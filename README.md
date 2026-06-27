@@ -184,6 +184,16 @@ figures are captured as images, and anything implementing the notebook display
 protocol (`_repr_html_` for DataFrames, `_repr_png_` for images) renders too. A
 trailing `;` suppresses the last expression's value, Jupyter-style.
 
+## Your work is saved
+
+Dialogs on the bundled **kernel** backend are persisted to disk — one JSON file
+per target at `~/.config/solveit-sidekick/dialogs-<target>.json` (override the
+directory with `SIDEKICK_DATA`). So your notebook survives a restart, and it
+survives the backend being rebuilt when you save Settings or switch targets.
+Cells, outputs, plots, and pin/mute flags are all restored. (The mock fallback
+used when no server is reachable stays ephemeral; a real **solveit** target keeps
+its dialogs on the SolveIt server.)
+
 ## Pain points this targets
 
 - **Switching local ↔ H100** — one dropdown; the tunnel keeps the URL constant.

@@ -8,8 +8,11 @@ Why a wrapper:
 """
 from __future__ import annotations
 
+import json
+import os
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
+from pathlib import Path
 
 from .targets import Target
 
@@ -24,6 +27,41 @@ class Msg:
     muted: bool = False        # if True, excluded from the AI's notebook context
     pinned: bool = False       # if True, always kept in context (survives budget trimming)
     rich: list = field(default_factory=list)   # rich outputs: [{"type": mime, "data": ...}]
+
+
+# ---- on-disk persistence for the in-memory backends -------------------------
+# Dialogs are saved per store key (the target name) as one JSON file, so your
+# notebook survives a restart — and survives the backend being rebuilt when you
+# save Settings or switch targets. Override the directory with SIDEKICK_DATA.
+def _store_path(key: str) -> Path:
+    base = os.environ.get("SIDEKICK_DATA")
+    base = Path(base).expanduser() if base else Path.home() / ".config" / "solveit-sidekick"
+    return base / f"dialogs-{key.replace('/', '_')}.json"
+
+
+def _load_dialogs(key: str) -> dict[str, list[Msg]]:
+    p = _store_path(key)
+    if not p.exists():
+        return {}
+    try:
+        raw = json.loads(p.read_text())
+    except (json.JSONDecodeError, OSError):
+        return {}
+    fields = Msg.__dataclass_fields__
+    return {name: [Msg(**{k: v for k, v in m.items() if k in fields}) for m in msgs]
+            for name, msgs in raw.items()}
+
+
+def _save_dialogs(key: str, dialogs: dict[str, list[Msg]]) -> None:
+    p = _store_path(key)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        raw = {name: [asdict(m) for m in msgs] for name, msgs in dialogs.items()}
+        tmp = p.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(raw, indent=2))
+        tmp.replace(p)                 # atomic write
+    except OSError:
+        pass                           # never let a disk hiccup break the app
 
 
 def _rename_in(dialogs: dict, old: str, new: str) -> None:
@@ -127,8 +165,15 @@ class _InMemoryBackend:
     ``exec`` (and may seed initial dialogs in ``__init__``).
     """
 
-    def __init__(self):
-        self._dialogs: dict[str, list[Msg]] = {}
+    def __init__(self, store_key: str | None = None):
+        # store_key None -> ephemeral (e.g. the demo MockBackend); a key -> the
+        # dialogs are loaded from / saved to disk under that key.
+        self._store_key = store_key
+        self._dialogs: dict[str, list[Msg]] = _load_dialogs(store_key) if store_key else {}
+
+    def _save(self) -> None:
+        if getattr(self, "_store_key", None):
+            _save_dialogs(self._store_key, self._dialogs)
 
     def list_dialogs(self) -> list[str]:
         return list(self._dialogs)
@@ -145,6 +190,7 @@ class _InMemoryBackend:
     def add(self, dialog: str, content: str, msg_type: str, model: str | None = None) -> Msg:
         m = Msg(id="_" + uuid.uuid4().hex[:8], msg_type=msg_type, content=content, model=model)
         self._dialogs.setdefault(dialog, []).append(m)
+        self._save()
         return m
 
     def update(self, dialog: str, msg_id: str, content: str) -> Msg | None:
@@ -155,18 +201,21 @@ class _InMemoryBackend:
             m.content = content
             m.output = ""
             m.rich = []
+            self._save()
         return m
 
     def delete(self, dialog: str, msg_id: str) -> None:
         lst = self._dialogs.get(dialog)
         if lst is not None:
             self._dialogs[dialog] = [m for m in lst if m.id != msg_id]
+            self._save()
 
     def set_muted(self, dialog: str, msg_id: str, muted: bool | None = None) -> Msg | None:
         """Toggle (or set) whether a cell is included in the AI's context."""
         m = self._find(dialog, msg_id)
         if m is not None:
             m.muted = (not m.muted) if muted is None else bool(muted)
+            self._save()
         return m
 
     def set_pinned(self, dialog: str, msg_id: str, pinned: bool | None = None) -> Msg | None:
@@ -174,10 +223,12 @@ class _InMemoryBackend:
         m = self._find(dialog, msg_id)
         if m is not None:
             m.pinned = (not m.pinned) if pinned is None else bool(pinned)
+            self._save()
         return m
 
     def rename(self, old: str, new: str) -> None:
         _rename_in(self._dialogs, old, new)
+        self._save()
 
 
 class MockBackend(_InMemoryBackend):
@@ -272,7 +323,7 @@ class HttpKernelBackend(_InMemoryBackend):
     live = True
 
     def __init__(self, target: Target):
-        super().__init__()
+        super().__init__(store_key=target.name)   # persist this target's dialogs to disk
         import urllib.request  # stdlib
         self._req = urllib.request
         self.target = target
@@ -302,12 +353,13 @@ class HttpKernelBackend(_InMemoryBackend):
             r = self._post("/prompt", {"dialog": dialog, "content": m.content,
                                        "model": m.model or "claude", "context": context})
             m.output = r["output"]
+        self._save()                         # persist the new output/plots
         return m
 
     def rename(self, old: str, new: str) -> None:
         # Move the message list; also re-key the server-side kernel namespace
         # so executed variables survive the rename.
-        super().rename(old, new)
+        super().rename(old, new)             # also persists (base rename calls _save)
         try:
             self._post("/rename", {"old": old, "new": new})
         except Exception:  # noqa: BLE001 — namespace move is best-effort

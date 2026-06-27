@@ -723,3 +723,39 @@ def test_secrets_env_overrides_file(tmp_path, monkeypatch):
     secrets_store.save("OPENAI_API_KEY", "from-file")
     monkeypatch.setenv("OPENAI_API_KEY", "from-env")
     assert secrets_store.get_key("OPENAI_API_KEY") == "from-env"
+
+
+# ---- persistence (in-memory backends save/restore dialogs) ------------------
+def test_persistence_round_trip_survives_backend_rebuild(monkeypatch, tmp_path):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    from sidekick.client import HttpKernelBackend, _store_path
+    from sidekick.targets import Target
+    t = Target(name="kernel", url="http://localhost:5055", token="dummy", ssh=None)
+    b1 = HttpKernelBackend(t)                       # __init__ is network-free
+    m = b1.add("paper/notes", "x = 1", "code")
+    b1.update("paper/notes", m.id, "x = 2")
+    b1.set_pinned("paper/notes", m.id)
+    # a brand-new backend (restart / Settings-save / target-switch) restores it
+    b2 = HttpKernelBackend(t)
+    msgs = b2.messages("paper/notes")
+    assert len(msgs) == 1
+    assert msgs[0].content == "x = 2" and msgs[0].pinned is True
+    assert _store_path("kernel").exists()
+
+
+def test_mock_backend_is_ephemeral(monkeypatch, tmp_path):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    from sidekick.client import MockBackend
+    MockBackend().add("d/x", "hi", "note")
+    assert list(tmp_path.glob("dialogs-*.json")) == []   # nothing written
+    assert MockBackend().list_dialogs() == ["demo/welcome"]
+
+
+def test_persistence_preserves_rich_and_flags(monkeypatch, tmp_path):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    from sidekick.client import _save_dialogs, _load_dialogs, Msg
+    _save_dialogs("kernel", {"d": [Msg("m1", "code", "plot()", output="ok",
+                                       rich=[{"type": "image/png", "data": "AAAA"}], muted=True)]})
+    m = _load_dialogs("kernel")["d"][0]
+    assert m.rich == [{"type": "image/png", "data": "AAAA"}]
+    assert m.muted is True and m.output == "ok"
