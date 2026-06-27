@@ -856,3 +856,54 @@ def test_export_routes_set_download_headers():
     assert 'filename="paper-x.ipynb"' in r1.headers["content-disposition"]
     assert 'filename="paper-x.md"' in r2.headers["content-disposition"]
     assert r1.media_type.startswith("application/x-ipynb")
+
+
+# ---- paper reading (PDF -> markdown) ----------------------------------------
+def test_paper_convert_caches_and_falls_back(monkeypatch, tmp_path):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    from sidekick import paper as pl
+    pdf = tmp_path / "x.pdf"; pdf.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(pl, "_marker_convert", lambda p: None)       # marker unavailable
+    monkeypatch.setattr(pl, "_pypdf_convert", lambda p: "# Extracted\ntext")
+    md, engine = pl.convert(str(pdf))
+    assert engine == "pypdf" and "Extracted" in md and pl.cache_path(pdf).exists()
+    monkeypatch.setattr(pl, "_pypdf_convert", lambda p: "SHOULD NOT RUN")
+    md2, engine2 = pl.convert(str(pdf))                              # second call hits cache
+    assert engine2 == "cache" and md2 == md
+
+
+def test_paper_uses_marker_when_available(monkeypatch, tmp_path):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    from sidekick import paper as pl
+    pdf = tmp_path / "y.pdf"; pdf.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(pl, "_marker_convert", lambda p: r"$$E=mc^2$$")
+    md, engine = pl.convert(str(pdf))
+    assert engine == "marker" and "E=mc^2" in md
+
+
+def test_paper_panel_states():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    app.STATE["paper"] = None
+    assert 'id="paperPanel"' in to_xml(app.PaperPanel())
+    app.STATE["paper"] = {"name": "p.pdf", "status": "converting"}
+    h = to_xml(app.PaperPanel())
+    assert "Converting" in h and "/paper/status" in h               # polling spinner
+    app.STATE["paper"] = {"name": "p.pdf", "status": "ready", "md": "# Title", "engine": "pypdf"}
+    h = to_xml(app.PaperPanel())
+    assert "<h1>Title</h1>" in h and "paperBody" in h               # rendered markdown
+    app.STATE["paper"] = None
+
+
+def test_paper_open_and_close_routes(monkeypatch, tmp_path):
+    import time, sidekick.app as app
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    monkeypatch.setattr(app.paperlib, "convert", lambda p: ("# Paper", "pypdf"))
+    app.paper_open(path=str(tmp_path / "a.pdf"))
+    for _ in range(100):
+        if (app.STATE["paper"] or {}).get("status") == "ready":
+            break
+        time.sleep(0.02)
+    assert app.STATE["paper"]["status"] == "ready" and app.STATE["paper"]["md"] == "# Paper"
+    app.paper_close()
+    assert app.STATE["paper"] is None

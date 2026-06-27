@@ -202,6 +202,20 @@ Cells, outputs, plots, and pin/mute flags are all restored. (The mock fallback
 used when no server is reachable stays ephemeral; a real **solveit** target keeps
 its dialogs on the SolveIt server.)
 
+## Reading papers
+
+Open a PDF with the **📄** button (paste a local path) and it appears in a
+left reading column. Select any passage → an **"Ask AI about this"** button
+drops the quoted paragraph into the composer (Ask AI mode), so your question
+carries the paragraph as context — then run code, plot, and take notes beside it.
+
+PDFs are converted to markdown and rendered with the same math/code pipeline as
+the rest of the app. By default this uses lightweight **pypdf** text extraction;
+install the **`paper`** extra for **marker** (`uv pip install "solveit-sidekick[paper]"`),
+which preserves structure, tables, and **equations as LaTeX** (rendered via KaTeX)
+— much nicer for ML papers. marker is heavier (torch + model downloads, GPL-3.0)
+and slower, so conversions run in the background and are cached to disk.
+
 ## Pain points this targets
 
 - **Switching local ↔ H100** — one dropdown; the tunnel keeps the URL constant.

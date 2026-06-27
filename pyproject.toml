@@ -14,6 +14,7 @@ dependencies = [
     "pyyaml",
     "mistune",     # server-side markdown (notes + AI answers); offline, no CDN
     "pygments",    # server-side code syntax highlighting; offline, no CDN
+    "pypdf",       # lightweight PDF text extraction for the reading panel (fallback)
     "anthropic",   # Ask AI → Claude (API key)
     "openai",      # Ask AI → Codex
     "zhipuai",     # Ask AI → GLM
@@ -36,6 +37,13 @@ kernel = [
     "torch",
 ]
 ml = ["solveit-sidekick[kernel]"]   # back-compat alias for the former name
+
+# High-quality PDF → markdown for reading papers: marker preserves structure,
+# tables, and equations as LaTeX (rendered by our mistune + KaTeX). Heavy (uses
+# torch + downloads models on first use) and GPL-3.0, so opt-in; without it the
+# reading panel falls back to pypdf text extraction.
+#   uv pip install "solveit-sidekick[paper]"
+paper = ["marker-pdf"]
 
 # Talk to the real Answer.AI SolveIt server instead of the bundled kernel.
 solveit = ["solveit_client"]

@@ -10,6 +10,8 @@ The whole point: the target switcher in the top-right flips between your laptop
 from __future__ import annotations
 
 import json
+import os
+import threading
 from urllib.parse import quote
 
 from fasthtml.common import *
@@ -18,6 +20,7 @@ from .targets import get_target, list_targets, list_models, default_model
 from .client import connect, build_context, est_tokens, _InMemoryBackend
 from .claude_cli import stream as stream_claude, CLI_MODELS
 from . import secrets_store
+from . import paper as paperlib
 
 
 # ---- code highlighting (server-side; works offline, no CDN) -----------------
@@ -90,6 +93,7 @@ STATE = {
     "model": default_model(),
     "msg_type": "prompt",
     "pending_stream": None,   # (dialog, msg_id) whose answer is being streamed live
+    "paper": None,            # {name, status, md, engine} for the reading panel
 }
 
 
@@ -123,6 +127,23 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
   background:var(--bg);color:var(--ink);font-size:15px;line-height:1.55}
 .app{display:grid;grid-template-columns:264px 1fr;height:100vh}
 .app.toc-open{grid-template-columns:264px 1fr 244px}
+.app.paper-open{grid-template-columns:264px minmax(300px,36%) 1fr}
+.app.paper-open.toc-open{grid-template-columns:264px minmax(280px,32%) 1fr 244px}
+/* paper reading panel (left column, toggled open when a paper is loaded) */
+.paper{display:none;background:var(--panel);border-right:1px solid var(--line);overflow:auto;height:100vh;padding:16px 18px}
+.app.paper-open .paper{display:flex;flex-direction:column}
+.paper-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+.paper-name{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.paper-converting{margin-top:14px;color:var(--muted);font-size:13px;font-style:italic}
+.paper-body{margin-top:10px;font-size:13.5px;line-height:1.6}
+.paper-body img{max-width:100%}
+.ask-sel-btn{position:absolute;z-index:60;background:var(--accent);color:#fff;border:none;border-radius:8px;
+  padding:5px 11px;font-size:12px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.20);display:none}
+.paper-form{display:flex;flex-direction:column;gap:6px;position:absolute;right:0;top:28px;z-index:20;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;min-width:240px;
+  box-shadow:0 6px 18px rgba(0,0,0,.10)}
+.paper-path{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;font-size:13px;outline:none}
+.paper-path:focus{border-color:var(--accent)}
 /* table of contents (right column, toggleable, full-height so it stays in view) */
 .toc{display:none;background:var(--sidebar);border-left:1px solid var(--line);
   padding:16px 14px;overflow:auto;height:100vh}
@@ -875,6 +896,65 @@ window.toggleTOC = function(){
 """
 
 
+def PaperPanel():
+    """Left reading column: the open paper as rendered markdown, or a converting
+    spinner that polls until ready. Selecting text shows an 'Ask AI' button."""
+    p = STATE.get("paper")
+    if not p:
+        return Div(cls="paper", id="paperPanel")
+    head = Div(Span(p["name"], cls="paper-name"),
+               A("✕", href="/paper/close", cls="gear", title="Close paper"),
+               cls="paper-head")
+    if p.get("status") == "converting":
+        body = Div("Converting… first time runs the model and can take a bit.",
+                   cls="paper-converting",
+                   hx_get="/paper/status", hx_trigger="every 2s",
+                   hx_target="#paperPanel", hx_swap="outerHTML")
+        return Div(head, body, cls="paper", id="paperPanel")
+    badge = Span(f"via {p.get('engine', '?')} · select text to ask the AI", cls="muted small")
+    body = Div(render_md(p.get("md", "")), cls="paper-body md", id="paperBody")
+    return Div(head, badge, body, Script(PAPER_JS), cls="paper", id="paperPanel")
+
+
+# Select text in the paper → a floating button → prefill the composer (Ask AI)
+# with the quoted passage, so the next question carries the paragraph as context.
+PAPER_JS = """
+(function(){
+  if(window.__paperSel) return; window.__paperSel = true;
+  var btn = null;
+  function hide(){ if(btn) btn.style.display = 'none'; }
+  function ask(text){
+    if(typeof setMode === 'function') setMode('prompt');
+    var ta = document.getElementById('composerInput');
+    if(ta){
+      var quote = text.split('\\n').map(function(l){ return '> ' + l; }).join('\\n');
+      ta.value = quote + '\\n\\n';
+      ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+      ta.scrollIntoView({block: 'center'});
+    }
+    hide();
+  }
+  document.addEventListener('mouseup', function(){
+    var paper = document.getElementById('paperBody');
+    var sel = window.getSelection();
+    var text = sel ? sel.toString().trim() : '';
+    if(!paper || !text || !sel.anchorNode || !paper.contains(sel.anchorNode)){ hide(); return; }
+    if(!btn){
+      btn = document.createElement('button');
+      btn.className = 'ask-sel-btn'; btn.textContent = 'Ask AI about this ↗';
+      btn.addEventListener('mousedown', function(e){ e.preventDefault(); ask(btn.__t); });
+      document.body.appendChild(btn);
+    }
+    btn.__t = text;
+    var r = sel.getRangeAt(0).getBoundingClientRect();
+    btn.style.top = (window.scrollY + r.bottom + 6) + 'px';
+    btn.style.left = (window.scrollX + r.left) + 'px';
+    btn.style.display = 'block';
+  });
+})();
+"""
+
+
 def Page():
     banner = (Div("⚠ ", STATE["warning"], " — showing a mock so you can still explore the UI.",
                   cls="banner") if STATE["warning"] else None)
@@ -888,10 +968,17 @@ def Page():
         Head(Title("SolveIt Sidekick"), *app.hdrs, Style(CSS)),
         Body(Div(
             Sidebar(),
+            PaperPanel(),
             Div(
                 Div(TitleEditor(),
                     Div(Span("☰", cls="gear toc-toggle", title="Toggle table of contents",
                              onclick="toggleTOC()"),
+                        Details(Summary("📄", cls="gear", title="Open a paper (PDF)"),
+                                Form(Input(name="path", placeholder="/path/to/paper.pdf",
+                                           cls="paper-path"),
+                                     Button("Open", cls="cell-btn run", type="submit"),
+                                     method="post", action="/paper/open", cls="paper-form"),
+                                cls="export"),
                         Details(Summary("⬇", cls="gear", title="Export this dialog"),
                                 Div(A("Jupyter notebook (.ipynb)", href="/export/ipynb"),
                                     A("Markdown (.md)", href="/export/md"),
@@ -908,7 +995,7 @@ def Page():
             ),
             Div(Div("Contents", cls="toc-head"), Div(id="tocList", cls="toc-list"),
                 cls="toc", id="toc"),
-            cls="app",
+            cls="app" + (" paper-open" if STATE.get("paper") else ""),
         ), Script(TOC_JS)),
     )
 
@@ -1246,6 +1333,42 @@ def export_md():
     msgs = STATE["backend"].messages(STATE["dialog"])
     fname = STATE["dialog"].replace("/", "-") + ".md"
     return _download(to_markdown(msgs), fname, "text/markdown; charset=utf-8")
+
+
+def _convert_paper_async(path: str):
+    """Convert a PDF in a background thread (marker can take a while), updating
+    STATE['paper'] from 'converting' to 'ready'/'error'. The panel polls."""
+    name = os.path.basename(path)
+    STATE["paper"] = {"name": name, "status": "converting"}
+
+    def work():
+        try:
+            md, engine = paperlib.convert(path)
+            STATE["paper"] = {"name": name, "status": "ready", "md": md, "engine": engine}
+        except Exception as e:  # noqa: BLE001 — surface conversion failures in the panel
+            STATE["paper"] = {"name": name, "status": "ready", "md": f"Could not open: {e}",
+                              "engine": "error"}
+
+    threading.Thread(target=work, daemon=True).start()
+
+
+@rt("/paper/open", methods=["post"])
+def paper_open(path: str = ""):
+    path = os.path.expanduser((path or "").strip())
+    if path:
+        _convert_paper_async(path)
+    return Page()
+
+
+@rt("/paper/status")
+def paper_status():
+    return PaperPanel()
+
+
+@rt("/paper/close")
+def paper_close():
+    STATE["paper"] = None
+    return Page()
 
 
 if __name__ == "__main__":
