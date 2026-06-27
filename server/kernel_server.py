@@ -9,7 +9,7 @@ API key is present) AI reply.
 Endpoints (simple JSON, no auth beyond the _solveit cookie check):
     GET  /test_route            -> "here"          (what doctor/solveit_client probe)
     GET  /health                -> {ok, dialogs}
-    POST /exec    {dialog,code}                    -> {output}
+    POST /exec    {dialog,code}                    -> {output, rich}
     POST /prompt  {dialog,content,model,context}   -> {output, model}
     POST /reset   {dialog}                 -> {ok}
 
@@ -35,17 +35,72 @@ def _ns(dialog: str) -> dict:
     return KERNELS.setdefault(dialog, {"__name__": "__solveit__"})
 
 
-def run_code(dialog: str, code: str) -> str:
-    """Execute code in the dialog's namespace; return stdout + last-expr repr."""
+def _b64(data: bytes) -> str:
+    import base64
+    return base64.b64encode(data).decode()
+
+
+def _capture_figs() -> list:
+    """Grab any open matplotlib figures as PNGs, then clear them (inline-plot
+    behavior). Returns [] when matplotlib isn't even imported, so there's no cost
+    for non-plotting code."""
+    import sys
+    plt = sys.modules.get("matplotlib.pyplot")
+    if plt is None:
+        return []
+    out = []
+    for num in plt.get_fignums():
+        bio = io.BytesIO()
+        try:
+            plt.figure(num).savefig(bio, format="png", bbox_inches="tight")
+            out.append({"type": "image/png", "data": _b64(bio.getvalue())})
+        except Exception:  # noqa: BLE001 — a bad figure shouldn't break the cell
+            pass
+    plt.close("all")
+    return out
+
+
+def _rich_repr(val) -> dict | None:
+    """Map a value to a rich output via the IPython display protocol.
+
+    Covers DataFrames (_repr_html_), PIL/other images (_repr_png_/_repr_jpeg_).
+    matplotlib Figures are handled by _capture_figs, so skip them here.
+    """
+    if type(val).__module__.startswith("matplotlib"):
+        return None
+    for meth, mime in (("_repr_png_", "image/png"), ("_repr_jpeg_", "image/jpeg")):
+        fn = getattr(val, meth, None)
+        if callable(fn):
+            data = fn()
+            if data:
+                return {"type": mime, "data": data if isinstance(data, str) else _b64(data)}
+    fn = getattr(val, "_repr_html_", None)
+    if callable(fn):
+        html = fn()
+        if html:
+            return {"type": "text/html", "data": html}
+    return None
+
+
+def run_code(dialog: str, code: str) -> tuple[str, list]:
+    """Execute code in the dialog's namespace.
+
+    Returns (text, rich) where text is stdout/stderr plus the last expression's
+    repr, and rich is a list of MIME-typed outputs (plots, images, dataframes).
+    """
     ns = _ns(dialog)
     buf = io.StringIO()
+    rich: list = []
     try:
         tree = ast.parse(code, mode="exec")
     except SyntaxError as e:
-        return f"SyntaxError: {e}"
+        return f"SyntaxError: {e}", rich
 
+    # A trailing ';' suppresses the last expression's value, Jupyter-style. The
+    # statement still runs (side effects, plots) — only its repr is hidden.
+    suppress = code.rstrip().endswith(";")
     last_expr = None
-    if tree.body and isinstance(tree.body[-1], ast.Expr):
+    if not suppress and tree.body and isinstance(tree.body[-1], ast.Expr):
         last_expr = ast.Expression(tree.body.pop().value)
 
     try:
@@ -54,10 +109,15 @@ def run_code(dialog: str, code: str) -> str:
             if last_expr is not None:
                 val = eval(compile(last_expr, "<dialog>", "eval"), ns)
                 if val is not None:
-                    print(repr(val), file=buf)
+                    r = _rich_repr(val)
+                    if r:
+                        rich.append(r)
+                    else:
+                        print(repr(val), file=buf)
     except Exception as e:  # noqa: BLE001 — surface kernel errors as output
         print(f"{type(e).__name__}: {e}", file=buf)
-    return buf.getvalue().rstrip("\n")
+    rich = _capture_figs() + rich          # plots created during the cell, newest cell-state
+    return buf.getvalue().rstrip("\n"), rich
 
 
 # Default API model per provider; override with env (e.g. OPENAI_MODEL=gpt-4.1).
@@ -184,8 +244,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(400, {"error": "bad json"})
         path = self.path.rstrip("/")
         if path == "/exec":
-            out = run_code(payload.get("dialog", "default"), payload.get("code", ""))
-            return self._send(200, {"output": out})
+            out, rich = run_code(payload.get("dialog", "default"), payload.get("code", ""))
+            return self._send(200, {"output": out, "rich": rich})
         if path == "/prompt":
             out = run_prompt(payload.get("dialog", "default"),
                              payload.get("content", ""), payload.get("model", "claude"),

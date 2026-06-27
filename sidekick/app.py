@@ -15,7 +15,7 @@ import os
 from fasthtml.common import *
 
 from .targets import get_target, list_targets, list_models, default_model
-from .client import connect
+from .client import connect, build_context, est_tokens
 from . import secrets_store
 
 
@@ -170,9 +170,22 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .cell-btn.run:hover{filter:brightness(1.05);color:#fff}
 .cell-btn.del:hover{border-color:#C0584B;color:#C0584B}
 .cell-btn.ctx.off{color:#B0784F;border-color:#E3C7AE;background:#FBF3E7}
+.cell-btn.pin.on{color:#2C6B45;border-color:#BFE0CC;background:#E6F2EA}
+.tok{margin-left:2px;font-variant-numeric:tabular-nums}
 /* a cell muted out of the AI's context: dim it, but keep it usable */
-.row.muted .cell-edit,.row.muted .bubble,.row.muted .out{opacity:.5}
+.row.muted .cell-edit,.row.muted .bubble,.row.muted .out,.row.muted .cell-img{opacity:.5}
 .row.muted .tag{opacity:.6}
+/* a pinned cell: a small accent rail on the left */
+.row.pinned{border-left:2px solid var(--accent);margin-left:-12px;padding-left:10px}
+/* rich kernel output: plots, images, dataframes */
+.cell-img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:8px;margin-top:9px;display:block;background:#fff}
+.cell-html{margin-top:9px;overflow-x:auto;font-size:13px}
+.cell-html table{border-collapse:collapse}
+.cell-html th,.cell-html td{border:1px solid var(--line);padding:4px 9px;text-align:right}
+.cell-html th{background:var(--chip)}
+/* live context meter at the foot of the stream */
+.ctx-meter{margin:18px auto 4px;text-align:center;font-size:12px;color:var(--muted);
+  border-top:1px dashed var(--line);padding-top:12px}
 .answer{margin-top:9px}
 .md>*:first-child{margin-top:0}.md>*:last-child{margin-bottom:0}
 .md p{margin:.5em 0}.md ul,.md ol{margin:.5em 0;padding-left:1.4em}
@@ -237,10 +250,10 @@ def _cell_textarea(m, code=False):
     return Textarea(m.content, **attrs)
 
 
-def _cell_actions(mid, run_label="Run", run_path="/cell/run", muted=False):
+def _cell_actions(mid, run_label="Run", run_path="/cell/run", muted=False, pinned=False):
     """Per-cell toolbar. Run posts the (possibly edited) source; Context toggles
-    whether the cell is fed to the AI; Delete removes it. All swap only #stream
-    so acting on a cell never reloads the whole page."""
+    whether the cell is fed to the AI; Pin keeps it in context through trimming;
+    Delete removes it. All swap only #stream so acting never reloads the page."""
     return Div(
         Button(run_label, type="button", cls="cell-btn run",
                hx_post=run_path, hx_include=f"#ta-{mid}",
@@ -251,6 +264,11 @@ def _cell_actions(mid, run_label="Run", run_path="/cell/run", muted=False):
                title="Toggle whether this cell is sent to the AI as notebook context",
                hx_post="/cell/mute", hx_vals=json.dumps({"id": mid}),
                hx_target="#stream", hx_swap="outerHTML"),
+        Button("Pinned" if pinned else "Pin", type="button",
+               cls="cell-btn pin" + (" on" if pinned else ""),
+               title="Pin this cell so it stays in context even when older cells are trimmed",
+               hx_post="/cell/pin", hx_vals=json.dumps({"id": mid}),
+               hx_target="#stream", hx_swap="outerHTML"),
         Button("Delete", type="button", cls="cell-btn del",
                hx_post="/cell/delete", hx_vals=json.dumps({"id": mid}),
                hx_confirm="Delete this cell?",
@@ -259,27 +277,42 @@ def _cell_actions(mid, run_label="Run", run_path="/cell/run", muted=False):
     )
 
 
+def _rich_view(item):
+    """Render one rich kernel output (plot/image/dataframe)."""
+    t, data = item.get("type", ""), item.get("data", "")
+    if t in ("image/png", "image/jpeg"):
+        return Img(src=f"data:{t};base64,{data}", cls="cell-img")
+    if t == "text/html":
+        return Div(NotStr(data), cls="cell-html")
+    return Div(data, cls="out")
+
+
+def _tok_badge(m):
+    return Span(f"~{est_tokens(m.content) + est_tokens(m.output)}t",
+                cls="muted small tok", title="estimated tokens this cell adds to AI context")
+
+
 def MsgRow(m):
     mid = m.id
-    rowcls = "row muted" if m.muted else "row"
+    rowcls = "row" + (" muted" if m.muted else "") + (" pinned" if m.pinned else "")
+    acts = lambda **kw: _cell_actions(mid, muted=m.muted, pinned=m.pinned, **kw)
     if m.msg_type == "note":
-        head = Div(Span("note", cls="tag"),
-                   _cell_actions(mid, run_label="Save", run_path="/cell/save", muted=m.muted),
-                   cls="who")
+        head = Div(Span("note", cls="tag"), _tok_badge(m),
+                   acts(run_label="Save", run_path="/cell/save"), cls="who")
         body = [head, _cell_textarea(m)]
         if (m.content or "").strip():            # rendered markdown preview
             body.append(Div(render_md(m.content), cls="bubble note md"))
         return Div(*body, cls=rowcls, id=f"cell-{mid}")
     if m.msg_type == "code":
-        head = Div(Span("code", cls="tag"), Span(mid, cls="muted small"),
-                   _cell_actions(mid, muted=m.muted), cls="who")
+        head = Div(Span("code", cls="tag"), Span(mid, cls="muted small"), _tok_badge(m),
+                   acts(), cls="who")
         body = [head, _cell_textarea(m, code=True)]
         if m.output:
             body.append(Div(m.output, cls="out"))
+        body += [_rich_view(it) for it in m.rich]    # plots / images / dataframes
         return Div(*body, cls=rowcls, id=f"cell-{mid}")
     # prompt -> editable question + AI answer (labelled with the model used)
-    head = Div(Span("Ask AI", cls="tag"),
-               _cell_actions(mid, run_label="Ask", muted=m.muted), cls="who")
+    head = Div(Span("Ask AI", cls="tag"), _tok_badge(m), acts(run_label="Ask"), cls="who")
     body = [head, _cell_textarea(m)]
     if m.output:
         who = m.model or "SolveIt AI"
@@ -318,13 +351,26 @@ STREAM_JS = """
 """
 
 
+def _ctx_meter(msgs):
+    """A live read-out of how much of the notebook the AI would see right now."""
+    toks = est_tokens(build_context(msgs))
+    n_muted = sum(1 for m in msgs if m.muted)
+    n_pin = sum(1 for m in msgs if m.pinned)
+    bits = [f"AI context ≈ {toks:,} tokens", f"{len(msgs) - n_muted}/{len(msgs)} cells in"]
+    if n_pin:
+        bits.append(f"{n_pin} pinned")
+    if n_muted:
+        bits.append(f"{n_muted} muted")
+    return Div(" · ".join(bits), cls="ctx-meter", title="estimated; ~4 chars/token")
+
+
 def Stream():
     msgs = STATE["backend"].messages(STATE["dialog"])
     if not msgs:
         inner = Div("Start the conversation — write code, ask the AI, or jot a note.",
                     cls="empty")
     else:
-        inner = Div(*[MsgRow(m) for m in msgs], cls="wrap")
+        inner = Div(*[MsgRow(m) for m in msgs], _ctx_meter(msgs), cls="wrap")
     return Div(inner, Script(STREAM_JS), cls="stream", id="stream")
 
 
@@ -598,6 +644,15 @@ def cell_mute(id: str):
     backend = STATE["backend"]
     if hasattr(backend, "set_muted"):
         backend.set_muted(STATE["dialog"], id)
+    return Stream()
+
+
+@rt("/cell/pin", methods=["post"])
+def cell_pin(id: str):
+    """Toggle whether this cell is pinned into context (survives trimming)."""
+    backend = STATE["backend"]
+    if hasattr(backend, "set_pinned"):
+        backend.set_pinned(STATE["dialog"], id)
     return Stream()
 
 

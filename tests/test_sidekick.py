@@ -361,6 +361,95 @@ def test_run_prompt_surfaces_context_when_no_key(monkeypatch, tmp_path):
     assert "no API key" in out and "notebook context:" in out
 
 
+# ---- rich output (plots / images / dataframes) -----------------------------
+def test_run_code_returns_text_and_rich_tuple():
+    import server.kernel_server as ks
+    text, rich = ks.run_code("rich/plain", "1 + 1")
+    assert text == "2" and rich == []
+
+
+def test_run_code_captures_repr_html_as_rich():
+    import server.kernel_server as ks
+    code = ("class T:\n"
+            "    def _repr_html_(self): return '<b>rich!</b>'\n"
+            "T()")
+    text, rich = ks.run_code("rich/html", code)
+    assert text == ""                                   # rich repr replaces the text repr
+    assert any(r["type"] == "text/html" and "rich!" in r["data"] for r in rich)
+
+
+def test_capture_figs_empty_without_matplotlib():
+    import server.kernel_server as ks
+    assert ks._capture_figs() == []                     # no matplotlib imported -> no cost
+
+
+def test_run_code_trailing_semicolon_suppresses_value():
+    import server.kernel_server as ks
+    text, rich = ks.run_code("rich/semi", "5 + 5;")
+    assert text == "" and rich == []                    # Jupyter-style suppression
+
+
+def test_kernel_backend_exec_stores_rich_output():
+    b = HttpKernelBackend.__new__(HttpKernelBackend)
+    b._dialogs = {}
+    b._post = lambda path, body: {"output": "", "rich": [{"type": "image/png", "data": "AAAA"}]}
+    m = b.add("d", "plot()", "code")
+    b.exec("d", m.id)
+    assert m.rich and m.rich[0]["type"] == "image/png"
+
+
+def test_rich_view_renders_image_and_html():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    img = to_xml(app._rich_view({"type": "image/png", "data": "XYZ"}))
+    assert "<img" in img and "data:image/png;base64,XYZ" in img
+    html = to_xml(app._rich_view({"type": "text/html", "data": "<b>hi</b>"}))
+    assert "<b>hi</b>" in html
+
+
+# ---- token counting + pinned cells -----------------------------------------
+def test_est_tokens_rough():
+    from sidekick.client import est_tokens
+    assert est_tokens("") == 0
+    assert est_tokens("a" * 40) == 10                   # ~4 chars/token
+
+
+def test_build_context_keeps_pinned_over_budget():
+    msgs = [_m("old", "note", "A" * 200), _m("new", "note", "B" * 200)]
+    msgs[0].pinned = True                               # pin the oldest, over-budget cell
+    ctx = build_context(msgs, max_chars=250)
+    assert "A" * 200 in ctx                             # pinned survives trimming
+    assert "B" * 200 not in ctx                         # the newer, unpinned cell is dropped
+
+
+def test_set_pinned_toggles():
+    b = MockBackend()
+    m = b.add("d", "x", "code")
+    b.set_pinned("d", m.id)
+    assert m.pinned is True
+    b.set_pinned("d", m.id)
+    assert m.pinned is False
+
+
+def test_cell_pin_route_toggles():
+    import sidekick.app as app
+    app.STATE["dialog"] = "cell/pin"
+    b = app.STATE["backend"]
+    b.messages("cell/pin")
+    m = b.add("cell/pin", "x", "code")
+    app.cell_pin(id=m.id)
+    assert m.pinned is True
+    app.cell_pin(id=m.id)
+    assert m.pinned is False
+
+
+def test_ctx_meter_reports_token_estimate():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    html = to_xml(app._ctx_meter([_m("a", "note", "hello world"), _m("b", "code", "x=1", "1")]))
+    assert "AI context" in html and "tokens" in html and "cells in" in html
+
+
 # ---- secrets store ----------------------------------------------------------
 def test_secrets_save_load_and_status(tmp_path, monkeypatch):
     from sidekick import secrets_store

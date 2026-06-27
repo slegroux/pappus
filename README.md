@@ -152,8 +152,20 @@ To keep within the model's token window, context is managed two ways:
   it from what the AI sees (it dims, but still runs) — the lever for steering
   context and staying under the limit.
 
+Each cell shows an estimated **token count**, and a live meter at the foot of the
+dialog reads out the total context (`AI context ≈ N tokens · M/K cells in`) — so
+you can see yourself approaching the limit. **Pin** a cell (toggle next to Mute)
+to keep it in context even when older cells are trimmed.
+
 This applies to the bundled **kernel** backend. On a real **solveit** target,
 SolveIt's server assembles the dialog context itself.
+
+#### Rich output
+
+Code cells render **plots and rich values inline**, not just text: matplotlib
+figures are captured as images, and anything implementing the notebook display
+protocol (`_repr_html_` for DataFrames, `_repr_png_` for images) renders too. A
+trailing `;` suppresses the last expression's value, Jupyter-style.
 
 ## Pain points this targets
 
