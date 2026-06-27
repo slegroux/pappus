@@ -20,14 +20,52 @@ from .claude_cli import stream as stream_claude, CLI_MODELS
 from . import secrets_store
 
 
+# ---- code highlighting (server-side; works offline, no CDN) -----------------
+try:
+    from pygments import highlight as _pyg_highlight
+    from pygments.lexers import get_lexer_by_name, PythonLexer
+    from pygments.formatters import HtmlFormatter
+    from pygments.util import ClassNotFound
+    # noclasses=True inlines the token colors, so no separate stylesheet is needed.
+    _pyg_fmt = HtmlFormatter(noclasses=True, style="monokai")
+
+    def _highlight(src: str, lang: str = "") -> str:
+        """Highlight `src` with Pygments (monokai). No language → Python (this is
+        a Python notebook); an unknown language → plain text."""
+        try:
+            lexer = get_lexer_by_name(lang) if lang else PythonLexer()
+        except ClassNotFound:
+            lexer = get_lexer_by_name("text")
+        return _pyg_highlight(src or "", lexer, _pyg_fmt)
+
+    def render_code(src: str):
+        return NotStr(_highlight(src, "python"))
+except Exception:  # noqa: BLE001 — degrade to a plain code block if pygments is missing
+    def _highlight(src: str, lang: str = "") -> str | None:
+        return None
+
+    def render_code(src: str):
+        return Pre(src or "", cls="code")
+
+
 # ---- markdown (server-side; works offline, no CDN) --------------------------
 try:
     import mistune
+
+    class _MdRenderer(mistune.HTMLRenderer):
+        """Markdown HTML renderer that syntax-highlights fenced code blocks
+        (```python …```) via Pygments — same palette as the code cells."""
+        def block_code(self, code, info=None):
+            lang = (info or "").strip().split(None, 1)[0] if (info or "").strip() else ""
+            html = _highlight(code, lang)
+            return html if html else super().block_code(code, info)
+
     # escape=True neutralises raw HTML in the source, so rendering a note or an
     # AI answer can't inject <script> — markdown syntax still renders.
     # 'math' extracts $…$ / $$…$$ before markdown can mangle underscores etc.,
     # emitting \(…\) (inline) and $$…$$ (block) for KaTeX to render client-side.
-    _md = mistune.create_markdown(escape=True, plugins=["strikethrough", "table", "math"])
+    _md = mistune.create_markdown(renderer=_MdRenderer(escape=True),
+                                  plugins=["strikethrough", "table", "math"])
 except Exception:  # noqa: BLE001 — degrade to plain text if mistune is missing
     _md = None
 
@@ -36,22 +74,6 @@ def render_md(text: str):
     """Render markdown to safe HTML, or fall back to escaped plain text."""
     text = text or ""
     return NotStr(_md(text)) if _md else text
-
-
-# ---- code highlighting (server-side; works offline, no CDN) -----------------
-try:
-    from pygments import highlight as _pyg_highlight
-    from pygments.lexers import PythonLexer
-    from pygments.formatters import HtmlFormatter
-    # noclasses=True inlines the token colors, so no separate stylesheet is needed.
-    _pyg_fmt = HtmlFormatter(noclasses=True, style="monokai")
-    _pyg_lexer = PythonLexer()
-
-    def render_code(src: str):
-        return NotStr(_pyg_highlight(src or "", _pyg_lexer, _pyg_fmt))
-except Exception:  # noqa: BLE001 — degrade to a plain code block if pygments is missing
-    def render_code(src: str):
-        return Pre(src or "", cls="code")
 
 
 def _initial_target() -> str:
@@ -248,6 +270,9 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .md table{border-collapse:collapse;margin:.5em 0}.md th,.md td{border:1px solid var(--line);padding:4px 9px}
 .md pre{background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:12px 14px;overflow:auto;
   font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px}
+/* Pygments-highlighted fenced code blocks in markdown (the .highlight div owns the bg) */
+.md .highlight{border-radius:10px;overflow:auto;margin:.5em 0}
+.md .highlight pre{background:transparent;margin:0;padding:12px 14px}
 .md code{font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:.92em}
 .md :not(pre)>code{background:var(--chip);border-radius:5px;padding:1px 5px}
 """
