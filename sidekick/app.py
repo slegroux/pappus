@@ -741,11 +741,11 @@ STREAM_JS = """
   }
   document.addEventListener('keydown', function(e){
     if(e.target.classList && e.target.classList.contains('cell-edit')
-       && (e.metaKey || e.ctrlKey) && e.key === 'Enter'){
+       && (e.metaKey || e.ctrlKey || e.shiftKey) && e.key === 'Enter'){
       e.preventDefault();
       var row = e.target.closest('.row');
       var btn = row && row.querySelector('.cell-btn.run');
-      if(btn) btn.click();                                      // Cmd/Ctrl+Enter runs the cell
+      if(btn) btn.click();                  // Shift/Cmd/Ctrl+Enter runs; plain Enter = newline
     }
   });
   // Track the cell under the cursor — the fallback target for a/b before anything
@@ -908,12 +908,9 @@ function cycleMode(dir){
       return;
     }
     if(e.key === 'Enter'){
-      if(document.getElementById('msgType').value === 'code'){
-        // Jupyter convention: Shift/Cmd/Ctrl+Enter runs, plain Enter = newline
-        if(e.shiftKey || e.metaKey || e.ctrlKey){ e.preventDefault(); _submitComposer(); }
-      } else if(!e.shiftKey){            // chat convention: Enter sends, Shift+Enter = newline
-        e.preventDefault(); _submitComposer();
-      }
+      // One notebook convention for every cell type: plain Enter = newline,
+      // Shift/Cmd/Ctrl+Enter = run/send (Ask AI, Code, and Note all match).
+      if(e.shiftKey || e.metaKey || e.ctrlKey){ e.preventDefault(); _submitComposer(); }
     }
   });
   if(document.getElementById('msgType').value === 'code') _initComposerCM();  // sticky Code mode
@@ -944,7 +941,7 @@ def Composer():
         Form(
             Input(type="hidden", name="msg_type", value=cur, id="msgType"),
             Textarea(name="content", id="composerInput",
-                     placeholder="Message SolveIt…  (Enter to send, Shift+Enter for newline)"),
+                     placeholder="Message SolveIt…  (Shift+Enter to send, Enter for newline)"),
             Div(
                 Div(mode("prompt", "Ask AI"), mode("code", "Code"),
                     mode("note", "Note"), cls="modes", id="modeChips"),
