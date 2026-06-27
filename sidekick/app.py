@@ -487,11 +487,23 @@ _PRIMARY = {"note": "Save", "code": "Run", "prompt": "Ask"}
 _TAG = {"note": "note", "code": "code", "prompt": "Ask AI"}
 
 
+def _stream_btn(label, post, *, cls="cell-btn", vals=None, title=None, confirm=None):
+    """A cell-action button: POST `post` and swap the whole #stream (the shape every
+    Type/Insert/Export/Mute/Pin/Delete/Run button shares)."""
+    a = {"type": "button", "cls": cls, "hx_post": post,
+         "hx_target": "#stream", "hx_swap": "outerHTML"}
+    if vals:
+        a["hx_vals"] = json.dumps(vals)
+    if title:
+        a["title"] = title
+    if confirm:
+        a["hx_confirm"] = confirm
+    return Button(label, **a)
+
+
 def _insert_item(mid, msg_type, where, label):
-    return Button(label, type="button", cls="ins-item",
-                  hx_post="/cell/insert",
-                  hx_vals=json.dumps({"id": mid, "msg_type": msg_type, "where": where}),
-                  hx_target="#stream", hx_swap="outerHTML")
+    return _stream_btn(label, "/cell/insert", cls="ins-item",
+                       vals={"id": mid, "msg_type": msg_type, "where": where})
 
 
 def _insert_menu(mid):
@@ -513,10 +525,8 @@ def _type_menu(m):
     mid = m.id
     def item(t, label):
         cur = (t == m.msg_type)
-        return Button(label, type="button", cls="ins-item" + (" cur" if cur else ""),
-                      hx_post="/cell/type",
-                      hx_vals=json.dumps({"id": mid, "msg_type": t}),
-                      hx_target="#stream", hx_swap="outerHTML")
+        return _stream_btn(label, "/cell/type", cls="ins-item" + (" cur" if cur else ""),
+                           vals={"id": mid, "msg_type": t})
     return Details(
         Summary("⇆", cls="cell-btn", title="Change cell type  ·  y = Code, m = Note, i = Ask AI"),
         Div(Span("Cell type", cls="ins-col-head"),
@@ -532,30 +542,22 @@ def _ctx_buttons(m):
     exported = m.msg_type == "code" and export.has_export(m.content)
     btns = []
     if m.msg_type == "code":
-        btns.append(
-            Button("Exported" if exported else "Export", type="button",
-                   cls="cell-btn exp" + (" on" if exported else ""),
-                   title="Toggle whether this cell is tangled into the exported package (#| export)",
-                   hx_post="/cell/export", hx_vals=json.dumps({"id": mid}),
-                   hx_target="#stream", hx_swap="outerHTML"))
+        btns.append(_stream_btn(
+            "Exported" if exported else "Export", "/cell/export",
+            cls="cell-btn exp" + (" on" if exported else ""), vals={"id": mid},
+            title="Toggle whether this cell is tangled into the exported package (#| export)"))
     return [
         _type_menu(m),
         _insert_menu(mid),
     ] + btns + [
-        Button("Muted" if m.muted else "In context", type="button",
-               cls="cell-btn ctx" + (" off" if m.muted else ""),
-               title="Toggle whether this cell is sent to the AI as notebook context",
-               hx_post="/cell/mute", hx_vals=json.dumps({"id": mid}),
-               hx_target="#stream", hx_swap="outerHTML"),
-        Button("Pinned" if m.pinned else "Pin", type="button",
-               cls="cell-btn pin" + (" on" if m.pinned else ""),
-               title="Pin this cell so it stays in context even when older cells are trimmed",
-               hx_post="/cell/pin", hx_vals=json.dumps({"id": mid}),
-               hx_target="#stream", hx_swap="outerHTML"),
-        Button("Delete", type="button", cls="cell-btn del",
-               hx_post="/cell/delete", hx_vals=json.dumps({"id": mid}),
-               hx_confirm="Delete this cell?",
-               hx_target="#stream", hx_swap="outerHTML"),
+        _stream_btn("Muted" if m.muted else "In context", "/cell/mute",
+                    cls="cell-btn ctx" + (" off" if m.muted else ""), vals={"id": mid},
+                    title="Toggle whether this cell is sent to the AI as notebook context"),
+        _stream_btn("Pinned" if m.pinned else "Pin", "/cell/pin",
+                    cls="cell-btn pin" + (" on" if m.pinned else ""), vals={"id": mid},
+                    title="Pin this cell so it stays in context even when older cells are trimmed"),
+        _stream_btn("Delete", "/cell/delete", cls="cell-btn del", vals={"id": mid},
+                    confirm="Delete this cell?"),
     ]
 
 
@@ -647,9 +649,8 @@ def _rendered_content(m):
 def MsgRow(m):
     """A cell in its default rendered (read-only, click-to-edit) state."""
     primary = [] if m.msg_type == "note" else [
-        Button(_PRIMARY[m.msg_type], type="button", cls="cell-btn run",
-               title="Re-run this cell", hx_post="/cell/exec",
-               hx_vals=json.dumps({"id": m.id}), hx_target="#stream", hx_swap="outerHTML")]
+        _stream_btn(_PRIMARY[m.msg_type], "/cell/exec", cls="cell-btn run",
+                    vals={"id": m.id}, title="Re-run this cell")]
     return Div(_head(m, primary), _rendered_content(m), *_output_views(m),
                cls=_rowcls(m), id=f"cell-{m.id}")
 
