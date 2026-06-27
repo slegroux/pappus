@@ -443,6 +443,48 @@ def test_cell_pin_route_toggles():
     assert m.pinned is False
 
 
+# ---- render-by-default / click-to-edit -------------------------------------
+def test_rendered_cells_are_not_raw_textareas():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    note = to_xml(app.MsgRow(Msg("n", "note", "# Title")))
+    code = to_xml(app.MsgRow(Msg("c", "code", "x = 1")))
+    assert "<textarea" not in note and "<h1>" in note          # markdown rendered, not raw
+    assert "<textarea" not in code and "highlight" in code      # pygments-highlighted, not raw
+
+
+def test_cell_edit_route_returns_editor_with_cancel():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    app.STATE["dialog"] = "edit/route"
+    b = app.STATE["backend"]
+    b.messages("edit/route")
+    m = b.add("edit/route", "x = 1", "code")
+    html = to_xml(app.cell_edit(id=m.id))
+    assert "<textarea" in html and "Cancel" in html
+
+
+def test_cell_view_route_returns_rendered_cell():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    app.STATE["dialog"] = "view/route"
+    b = app.STATE["backend"]
+    b.messages("view/route")
+    m = b.add("view/route", "# hi", "note")
+    html = to_xml(app.cell_view(id=m.id))
+    assert "<textarea" not in html and "<h1>" in html
+
+
+def test_cell_exec_route_reruns_stored_content():
+    import sidekick.app as app
+    app.STATE["dialog"] = "exec/route"
+    b = app.STATE["backend"]
+    b.messages("exec/route")
+    m = b.add("exec/route", "2+2", "code")
+    app.cell_exec(id=m.id)
+    assert b.messages("exec/route")[-1].output                 # re-ran stored source
+
+
 def test_page_includes_htmx_so_cell_buttons_work():
     # Regression guard: we return a full Html document, so FastHTML does NOT
     # auto-inject its headers — the page must carry htmx itself, or every

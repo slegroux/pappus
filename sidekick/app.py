@@ -35,6 +35,22 @@ def render_md(text: str):
     return NotStr(_md(text)) if _md else text
 
 
+# ---- code highlighting (server-side; works offline, no CDN) -----------------
+try:
+    from pygments import highlight as _pyg_highlight
+    from pygments.lexers import PythonLexer
+    from pygments.formatters import HtmlFormatter
+    # noclasses=True inlines the token colors, so no separate stylesheet is needed.
+    _pyg_fmt = HtmlFormatter(noclasses=True, style="monokai")
+    _pyg_lexer = PythonLexer()
+
+    def render_code(src: str):
+        return NotStr(_pyg_highlight(src or "", _pyg_lexer, _pyg_fmt))
+except Exception:  # noqa: BLE001 — degrade to a plain code block if pygments is missing
+    def render_code(src: str):
+        return Pre(src or "", cls="code")
+
+
 def _initial_target() -> str:
     """Honor SIDEKICK_TARGET / config default, falling back to the first target."""
     t = get_target()  # resolves SIDEKICK_TARGET env, then config 'default'
@@ -162,7 +178,16 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .cell-edit.code-edit{font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;
   background:var(--code-bg);color:var(--code-ink);border-color:#3a3933}
 .cell-actions{display:flex;gap:6px;margin-left:auto;opacity:0;transition:opacity .12s}
-.row:hover .cell-actions,.cell-actions:focus-within{opacity:1}
+.row:hover .cell-actions,.cell-actions:focus-within,.cell-actions.show{opacity:1}
+/* rendered cells are click-to-edit; hint it on hover */
+.clickedit{cursor:text;border-radius:9px;transition:outline-color .12s}
+.clickedit:hover{outline:1px dashed var(--line);outline-offset:4px}
+.note-view{padding:1px 0}.prompt-view{white-space:pre-wrap}
+.note-view .muted,.prompt-view .muted,.code-view .muted{font-style:italic}
+/* pygments code block (server-side highlight, inline colors) */
+.code-view .highlight{margin:0;border-radius:11px;overflow:auto}
+.code-view .highlight pre{margin:0;padding:11px 14px;border-radius:11px;
+  font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;line-height:1.5}
 .cell-btn{font-size:12px;border:1px solid var(--line);background:#fff;border-radius:7px;padding:3px 11px;
   cursor:pointer;color:var(--muted);line-height:1.6}
 .cell-btn:hover{border-color:#d4d0c4;color:var(--ink)}
@@ -250,22 +275,21 @@ def _cell_textarea(m, code=False):
     return Textarea(m.content, **attrs)
 
 
-def _cell_actions(mid, run_label="Run", run_path="/cell/run", muted=False, pinned=False):
-    """Per-cell toolbar. Run posts the (possibly edited) source; Context toggles
-    whether the cell is fed to the AI; Pin keeps it in context through trimming;
-    Delete removes it. All swap only #stream so acting never reloads the page."""
-    return Div(
-        Button(run_label, type="button", cls="cell-btn run",
-               hx_post=run_path, hx_include=f"#ta-{mid}",
-               hx_vals=json.dumps({"id": mid}),
-               hx_target="#stream", hx_swap="outerHTML"),
-        Button("Muted" if muted else "In context", type="button",
-               cls="cell-btn ctx" + (" off" if muted else ""),
+_PRIMARY = {"note": "Save", "code": "Run", "prompt": "Ask"}
+_TAG = {"note": "note", "code": "code", "prompt": "Ask AI"}
+
+
+def _ctx_buttons(m):
+    """Mute / Pin / Delete — available in both rendered and edit modes."""
+    mid = m.id
+    return [
+        Button("Muted" if m.muted else "In context", type="button",
+               cls="cell-btn ctx" + (" off" if m.muted else ""),
                title="Toggle whether this cell is sent to the AI as notebook context",
                hx_post="/cell/mute", hx_vals=json.dumps({"id": mid}),
                hx_target="#stream", hx_swap="outerHTML"),
-        Button("Pinned" if pinned else "Pin", type="button",
-               cls="cell-btn pin" + (" on" if pinned else ""),
+        Button("Pinned" if m.pinned else "Pin", type="button",
+               cls="cell-btn pin" + (" on" if m.pinned else ""),
                title="Pin this cell so it stays in context even when older cells are trimmed",
                hx_post="/cell/pin", hx_vals=json.dumps({"id": mid}),
                hx_target="#stream", hx_swap="outerHTML"),
@@ -273,8 +297,7 @@ def _cell_actions(mid, run_label="Run", run_path="/cell/run", muted=False, pinne
                hx_post="/cell/delete", hx_vals=json.dumps({"id": mid}),
                hx_confirm="Delete this cell?",
                hx_target="#stream", hx_swap="outerHTML"),
-        cls="cell-actions",
-    )
+    ]
 
 
 def _rich_view(item):
@@ -292,33 +315,77 @@ def _tok_badge(m):
                 cls="muted small tok", title="estimated tokens this cell adds to AI context")
 
 
-def MsgRow(m):
-    mid = m.id
-    rowcls = "row" + (" muted" if m.muted else "") + (" pinned" if m.pinned else "")
-    acts = lambda **kw: _cell_actions(mid, muted=m.muted, pinned=m.pinned, **kw)
-    if m.msg_type == "note":
-        head = Div(Span("note", cls="tag"), _tok_badge(m),
-                   acts(run_label="Save", run_path="/cell/save"), cls="who")
-        body = [head, _cell_textarea(m)]
-        if (m.content or "").strip():            # rendered markdown preview
-            body.append(Div(render_md(m.content), cls="bubble note md"))
-        return Div(*body, cls=rowcls, id=f"cell-{mid}")
+def _rowcls(m):
+    return "row" + (" muted" if m.muted else "") + (" pinned" if m.pinned else "")
+
+
+def _head(m, primary, show_actions=False):
+    bits = [Span(_TAG[m.msg_type], cls="tag")]
     if m.msg_type == "code":
-        head = Div(Span("code", cls="tag"), Span(mid, cls="muted small"), _tok_badge(m),
-                   acts(), cls="who")
-        body = [head, _cell_textarea(m, code=True)]
+        bits.append(Span(m.id, cls="muted small"))
+    bits.append(_tok_badge(m))
+    bits.append(Div(*primary, *_ctx_buttons(m),
+                    cls="cell-actions" + (" show" if show_actions else "")))
+    return Div(*bits, cls="who")
+
+
+def _output_views(m):
+    """Code output + plots/images, or the rendered AI answer for a prompt."""
+    out = []
+    if m.msg_type == "code":
         if m.output:
-            body.append(Div(m.output, cls="out"))
-        body += [_rich_view(it) for it in m.rich]    # plots / images / dataframes
-        return Div(*body, cls=rowcls, id=f"cell-{mid}")
-    # prompt -> editable question + AI answer (labelled with the model used)
-    head = Div(Span("Ask AI", cls="tag"), _tok_badge(m), acts(run_label="Ask"), cls="who")
-    body = [head, _cell_textarea(m)]
-    if m.output:
+            out.append(Div(m.output, cls="out"))
+        out += [_rich_view(it) for it in m.rich]
+    elif m.msg_type == "prompt" and m.output:
         who = m.model or "SolveIt AI"
-        body.append(Div(Div(Span(who, cls="tag"), cls="who"),
-                        Div(render_md(m.output), cls="bubble md"), cls="answer"))
-    return Div(*body, cls=rowcls, id=f"cell-{mid}")
+        out.append(Div(Div(Span(who, cls="tag"), cls="who"),
+                       Div(render_md(m.output), cls="bubble md"), cls="answer"))
+    return out
+
+
+def _rendered_content(m):
+    """Read-only, click-to-edit rendering of a cell's source: markdown for notes,
+    syntax-highlighted code for code cells, plain text for prompts."""
+    edit = dict(hx_get=f"/cell/edit?id={m.id}", hx_target=f"#cell-{m.id}",
+                hx_swap="outerHTML", title="click to edit")
+    has = (m.content or "").strip()
+    if m.msg_type == "note":
+        inner = render_md(m.content) if has else Span("Empty note — click to edit", cls="muted")
+        return Div(inner, cls="note-view md clickedit", **edit)
+    if m.msg_type == "code":
+        inner = render_code(m.content) if has else Span("Empty cell — click to edit", cls="muted")
+        return Div(inner, cls="code-view clickedit", **edit)
+    inner = m.content if has else Span("Empty prompt — click to edit", cls="muted")
+    return Div(inner, cls="prompt-view clickedit", **edit)
+
+
+def MsgRow(m):
+    """A cell in its default rendered (read-only, click-to-edit) state."""
+    primary = [] if m.msg_type == "note" else [
+        Button(_PRIMARY[m.msg_type], type="button", cls="cell-btn run",
+               title="Re-run this cell", hx_post="/cell/exec",
+               hx_vals=json.dumps({"id": m.id}), hx_target="#stream", hx_swap="outerHTML")]
+    return Div(_head(m, primary), _rendered_content(m), *_output_views(m),
+               cls=_rowcls(m), id=f"cell-{m.id}")
+
+
+def _cell_edit(m):
+    """A cell switched into edit mode: a raw textarea + Save/Run/Ask + Cancel."""
+    mid = m.id
+    path = "/cell/save" if m.msg_type == "note" else "/cell/run"
+    primary = [
+        Button(_PRIMARY[m.msg_type], type="button", cls="cell-btn run",
+               hx_post=path, hx_include=f"#ta-{mid}", hx_vals=json.dumps({"id": mid}),
+               hx_target="#stream", hx_swap="outerHTML"),
+        Button("Cancel", type="button", cls="cell-btn",
+               hx_get=f"/cell/view?id={mid}", hx_target=f"#cell-{mid}", hx_swap="outerHTML"),
+    ]
+    focus = Script(f"(function(){{var t=document.getElementById('ta-{mid}');"
+                   f"if(t){{t.focus();var n=t.value.length;t.setSelectionRange(n,n);}}}})()")
+    return Div(_head(m, primary, show_actions=True),
+               _cell_textarea(m, code=(m.msg_type == "code")),
+               *_output_views(m), focus,
+               cls=_rowcls(m), id=f"cell-{mid}")
 
 
 STREAM_JS = """
@@ -655,6 +722,29 @@ def cell_pin(id: str):
     backend = STATE["backend"]
     if hasattr(backend, "set_pinned"):
         backend.set_pinned(STATE["dialog"], id)
+    return Stream()
+
+
+@rt("/cell/edit")
+def cell_edit(id: str):
+    """Swap a single cell into edit mode (raw textarea)."""
+    m = _msg_by_id(STATE["backend"], STATE["dialog"], id)
+    return _cell_edit(m) if m else Stream()
+
+
+@rt("/cell/view")
+def cell_view(id: str):
+    """Swap a single cell back to its rendered (read-only) view — used by Cancel."""
+    m = _msg_by_id(STATE["backend"], STATE["dialog"], id)
+    return MsgRow(m) if m else Stream()
+
+
+@rt("/cell/exec", methods=["post"])
+def cell_exec(id: str):
+    """Re-run a cell's stored source without editing (the rendered-view Run/Ask)."""
+    backend = STATE["backend"]
+    if _msg_by_id(backend, STATE["dialog"], id):
+        backend.exec(STATE["dialog"], id)
     return Stream()
 
 

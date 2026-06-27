@@ -126,13 +126,14 @@ live server; amber = running on the mock (with a banner telling you why).
 
 Every message is a live cell, like a notebook:
 
-- **Edit anything** — click into any cell and change its source in place. Cells
-  auto-grow to fit their content.
-- **Run / re-run** — hover a cell for its **Run** and **Delete** controls, or
-  press **Cmd/Ctrl+Enter** inside it. Code re-executes in the persistent kernel
-  namespace; an *Ask AI* cell re-asks with the edited prompt.
-- **Notes render as markdown** — written server-side (works offline, no CDN), and
-  AI answers render as markdown too.
+- **Rendered by default, click to edit** — notes show as **markdown**, code as
+  **syntax-highlighted** Python, prompts show their question + the AI's markdown
+  answer. Click any cell to drop into a raw editor; **Save/Run/Ask** commits,
+  **Cancel** discards. All rendering and highlighting is server-side (mistune +
+  Pygments) so it works offline, no CDN.
+- **Run / re-run** — hover a cell for its **Run / In context / Pin / Delete**
+  controls, or press **Cmd/Ctrl+Enter** while editing. Code re-executes in the
+  persistent kernel namespace; an *Ask AI* cell re-asks with the edited prompt.
 
 Edits and runs swap only the conversation (via htmx), so re-running a cell never
 reloads the whole page.
