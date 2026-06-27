@@ -131,7 +131,6 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
 .app{display:flex;flex-direction:column;height:100vh}
 .cols{display:flex;flex:1;min-height:0}
 .app.no-side .side{display:none}
-.app.no-content .main{display:none}
 .topbar-left{display:flex;align-items:center;gap:12px;min-width:0}
 .topbar-right{display:flex;align-items:center;gap:12px}
 /* paper reading panel (left column, toggled open when a paper is loaded) */
@@ -1068,7 +1067,6 @@ window.syncToggles = function(){
     if(b) b.classList.toggle('off', hidden);
   }
   set('tgl-side', app.classList.contains('no-side'));
-  set('tgl-content', app.classList.contains('no-content'));
   set('tgl-toc', !app.classList.contains('toc-open'));
 };
 window.toggleTOC = function(){
@@ -1078,7 +1076,7 @@ window.toggleTOC = function(){
   try { localStorage.setItem('sidekick_toc', open ? '1' : '0'); } catch(e){}
   window.syncToggles();
 };
-// Generic column toggle (hide dialogs / notebook), persisted in localStorage.
+// Generic column toggle (the dialogs panel), persisted in localStorage.
 window.toggleCol = function(cls, key){
   var app = document.querySelector('.app');
   if(!app) return;
@@ -1096,7 +1094,8 @@ window.toggleCol = function(cls, key){
   }
   restore('sidekick_toc', 'toc-open', true);          // TOC default open
   restore('sidekick_noside', 'no-side', false);       // dialogs default shown
-  restore('sidekick_nocontent', 'no-content', false); // notebook default shown
+  // The notebook is the app's center, so it's always shown — no toggle for it.
+  app.classList.remove('no-content');                 // clear any stale stuck state
   window.syncToggles();
   window.buildTOC();
 })();
@@ -1195,14 +1194,11 @@ def Page():
         Head(Title("SolveIt Sidekick"), *app.hdrs, Style(CSS)),
         Body(Div(
             # global top bar — above all columns, so its toggles stay reachable
-            # even when the dialogs or notebook columns are hidden.
+            # even when the dialogs panel is hidden.
             Div(
                 Div(Span("🗂", cls="gear tgl", id="tgl-side",
                          title="Show/hide the dialogs panel",
                          onclick="toggleCol('no-side','sidekick_noside')"),
-                    Span("📓", cls="gear tgl", id="tgl-content",
-                         title="Show/hide the notebook panel",
-                         onclick="toggleCol('no-content','sidekick_nocontent')"),
                     TitleEditor(),
                     cls="topbar-left"),
                 Div(Span("☰", cls="gear tgl toc-toggle", id="tgl-toc",
