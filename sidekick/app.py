@@ -190,6 +190,12 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
 .seclabel{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);padding:8px 8px 4px}
 .conv{display:block;padding:8px 10px;border-radius:8px;color:var(--ink);text-decoration:none;font-size:14px;cursor:pointer}
 .conv:hover{background:#E8E5DB} .conv.active{background:#E3DFD3;font-weight:500}
+.folder>.conv,.folder>.folder{margin-left:10px}
+.folder-label{list-style:none;cursor:pointer;font-size:11px;letter-spacing:.04em;text-transform:uppercase;
+  color:var(--muted);padding:8px 8px 4px;user-select:none}
+.folder-label::-webkit-details-marker{display:none}
+.folder-label::before{content:"▸ ";font-size:9px;display:inline-block;transition:transform .12s}
+.folder[open]>.folder-label::before{transform:rotate(90deg)}
 .side-foot{margin-top:auto;font-size:12px;color:var(--muted);padding:8px}
 /* main */
 .main{flex:1 1 0;display:flex;flex-direction:column;min-width:0;min-height:0}  /* min-height:0 lets .stream scroll, not .main */
@@ -409,20 +415,45 @@ def TargetSwitcher():
     )
 
 
+def _dialog_tree(names):
+    """Nest names on '/' into {'folders': {seg: node}, 'leaves': [(label, full)]}."""
+    root = {"folders": {}, "leaves": []}
+    for n in names:
+        parts = n.split("/")
+        node = root
+        for seg in parts[:-1]:
+            node = node["folders"].setdefault(seg, {"folders": {}, "leaves": []})
+        node["leaves"].append((parts[-1], n))
+    return root
+
+
+def _render_dialog_nodes(node, active):
+    """Recursively render a dialog-tree node: folders (collapsible) then leaves."""
+    out = []
+    for seg in sorted(node["folders"]):
+        out.append(
+            Details(
+                Summary(seg, cls="folder-label"),
+                *_render_dialog_nodes(node["folders"][seg], active),
+                cls="folder",
+                open=True,
+            )
+        )
+    for label, full in sorted(node["leaves"]):
+        out.append(A(label, href=f"/open?dialog={quote(full)}",
+                     cls=f"conv{' active' if full == active else ''}"))
+    return out
+
+
 def Sidebar():
-    from urllib.parse import quote
     backend = STATE["backend"]
     names = backend.list_dialogs() or [STATE["dialog"]]
-    convs = [
-        A(n.split("/")[-1], href=f"/open?dialog={quote(n)}",
-          cls=f"conv{' active' if n == STATE['dialog'] else ''}")
-        for n in names
-    ]
+    tree = _dialog_tree(names)
     return Div(
         Div(Span("S", cls="dot"), "SolveIt Sidekick", cls="brand"),
         A("✎  New dialog", href="/new", cls="newbtn"),
         Div("Dialogs", cls="seclabel"),
-        *convs,
+        *_render_dialog_nodes(tree, STATE["dialog"]),
         Div(f"target: {STATE['target_name']}", cls="side-foot"),
         cls="side",
     )
