@@ -127,13 +127,16 @@ CSS = """
 *{box-sizing:border-box} html,body{margin:0;height:100%}
 body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
   background:var(--bg);color:var(--ink);font-size:15px;line-height:1.55}
-.app{display:grid;grid-template-columns:264px 1fr;height:100vh}
-.app.toc-open{grid-template-columns:264px 1fr 244px}
-.app.paper-open{grid-template-columns:264px minmax(300px,36%) 1fr}
-.app.paper-open.toc-open{grid-template-columns:264px minmax(280px,32%) 1fr 244px}
+/* global top bar over a flex row of columns; any column can be hidden */
+.app{display:flex;flex-direction:column;height:100vh}
+.cols{display:flex;flex:1;min-height:0}
+.app.no-side .side{display:none}
+.app.no-content .main{display:none}
+.topbar-left{display:flex;align-items:center;gap:12px;min-width:0}
+.topbar-right{display:flex;align-items:center;gap:12px}
 /* paper reading panel (left column, toggled open when a paper is loaded) */
-.paper{display:none;background:var(--panel);border-right:1px solid var(--line);overflow:auto;height:100vh;padding:16px 18px}
-.app.paper-open .paper{display:flex;flex-direction:column}
+.paper{display:none;background:var(--panel);border-right:1px solid var(--line);overflow:auto;padding:16px 18px;min-width:0}
+.app.paper-open .paper{display:flex;flex-direction:column;flex:1 1 0}
 .paper-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}
 .paper-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
 .paper-import{margin:0;display:flex;align-items:center;gap:5px}
@@ -152,8 +155,8 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
 .paper-file{font-size:12px;cursor:pointer}
 /* table of contents (right column, toggleable, full-height so it stays in view) */
 .toc{display:none;background:var(--sidebar);border-left:1px solid var(--line);
-  padding:16px 14px;overflow:auto;height:100vh}
-.app.toc-open .toc{display:flex;flex-direction:column}
+  padding:16px 14px;overflow:auto}
+.app.toc-open .toc{display:flex;flex-direction:column;flex:0 0 244px}
 .toc-head{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
 .toc-list{display:flex;flex-direction:column;gap:1px}
 .toc-link{display:block;text-decoration:none;color:var(--ink);font-size:13px;padding:4px 8px;border-radius:7px;
@@ -166,7 +169,7 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
 .toc-empty{font-size:12px;color:var(--muted);font-style:italic;padding:4px 8px}
 .toc-toggle{cursor:pointer}
 /* sidebar */
-.side{background:var(--sidebar);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 12px}
+.side{flex:0 0 264px;background:var(--sidebar);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 12px;overflow:auto}
 .brand{display:flex;align-items:center;gap:9px;font-weight:600;padding:6px 8px 14px}
 .brand .dot{width:22px;height:22px;border-radius:6px;background:var(--accent);display:grid;place-items:center;color:#fff;font-size:13px}
 .newbtn{display:flex;align-items:center;gap:8px;width:100%;border:1px solid var(--line);background:var(--panel);
@@ -177,8 +180,8 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
 .conv:hover{background:#E8E5DB} .conv.active{background:#E3DFD3;font-weight:500}
 .side-foot{margin-top:auto;font-size:12px;color:var(--muted);padding:8px}
 /* main */
-.main{display:flex;flex-direction:column;min-width:0;min-height:0}  /* min-height:0 lets .stream scroll, not .main */
-.topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 22px;border-bottom:1px solid var(--line)}
+.main{flex:1 1 0;display:flex;flex-direction:column;min-width:0;min-height:0}  /* min-height:0 lets .stream scroll, not .main */
+.topbar{flex-shrink:0;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 22px;border-bottom:1px solid var(--line)}
 .title{font-weight:600}
 .title-form{margin:0}
 .title-edit{font-weight:600;font-size:15px;font-family:inherit;color:var(--ink);
@@ -900,12 +903,24 @@ window.toggleTOC = function(){
   var open = app.classList.toggle('toc-open');
   try { localStorage.setItem('sidekick_toc', open ? '1' : '0'); } catch(e){}
 };
+// Generic column toggle (hide dialogs / notebook), persisted in localStorage.
+window.toggleCol = function(cls, key){
+  var app = document.querySelector('.app');
+  if(!app) return;
+  var on = app.classList.toggle(cls);
+  try { localStorage.setItem(key, on ? '1' : '0'); } catch(e){}
+};
 (function(){
   var app = document.querySelector('.app');
   if(!app) return;
-  var saved = null;
-  try { saved = localStorage.getItem('sidekick_toc'); } catch(e){}
-  if(saved !== '0') app.classList.add('toc-open');   // default open
+  function restore(key, cls, defOn){
+    var v = null; try { v = localStorage.getItem(key); } catch(e){}
+    if(v === null) v = defOn ? '1' : '0';
+    app.classList.toggle(cls, v === '1');
+  }
+  restore('sidekick_toc', 'toc-open', true);          // TOC default open
+  restore('sidekick_noside', 'no-side', false);       // dialogs default shown
+  restore('sidekick_nocontent', 'no-content', false); // notebook default shown
   window.buildTOC();
 })();
 """
@@ -1002,39 +1017,44 @@ def Page():
         # all served locally from /vendor — see _LOCAL_HDRS. Fully offline.
         Head(Title("SolveIt Sidekick"), *app.hdrs, Style(CSS)),
         Body(Div(
-            Sidebar(),
-            PaperPanel(),
+            # global top bar — above all columns, so its toggles stay reachable
+            # even when the dialogs or notebook columns are hidden.
             Div(
-                Div(TitleEditor(),
-                    Div(Span("☰", cls="gear toc-toggle", title="Toggle table of contents",
-                             onclick="toggleTOC()"),
-                        Details(Summary("📄", cls="gear", title="Open a paper (PDF)"),
-                                Form(Label("Choose a PDF…", cls="paper-file-label"),
-                                     Input(type="file", name="pdf",
-                                           accept="application/pdf,.pdf",
-                                           cls="paper-file", onchange="this.form.submit()"),
-                                     Input(name="path", placeholder="…or paste a file path",
-                                           cls="paper-path"),
-                                     Button("Open path", cls="cell-btn run", type="submit"),
-                                     method="post", action="/paper/open",
-                                     enctype="multipart/form-data", cls="paper-form"),
-                                cls="export"),
-                        Details(Summary("⬇", cls="gear", title="Export this dialog"),
-                                Div(A("Jupyter notebook (.ipynb)", href="/export/ipynb"),
-                                    A("Markdown (.md)", href="/export/md"),
-                                    cls="export-menu"),
-                                cls="export"),
-                        A("⚙", href="/settings", cls="gear", title="Settings — API keys"),
-                        TargetSwitcher(),
-                        style="display:flex;align-items:center;gap:12px"),
-                    cls="topbar"),
-                banner,
-                Stream(),
-                Composer(),
-                cls="main",
-            ),
-            Div(Div("Contents", cls="toc-head"), Div(id="tocList", cls="toc-list"),
-                cls="toc", id="toc"),
+                Div(Span("🗂", cls="gear", title="Show/hide the dialogs panel",
+                         onclick="toggleCol('no-side','sidekick_noside')"),
+                    Span("📓", cls="gear", title="Show/hide the notebook panel",
+                         onclick="toggleCol('no-content','sidekick_nocontent')"),
+                    TitleEditor(),
+                    cls="topbar-left"),
+                Div(Span("☰", cls="gear toc-toggle", title="Toggle table of contents",
+                         onclick="toggleTOC()"),
+                    Details(Summary("📄", cls="gear", title="Open a paper (PDF)"),
+                            Form(Label("Choose a PDF…", cls="paper-file-label"),
+                                 Input(type="file", name="pdf", accept="application/pdf,.pdf",
+                                       cls="paper-file", onchange="this.form.submit()"),
+                                 Input(name="path", placeholder="…or paste a file path",
+                                       cls="paper-path"),
+                                 Button("Open path", cls="cell-btn run", type="submit"),
+                                 method="post", action="/paper/open",
+                                 enctype="multipart/form-data", cls="paper-form"),
+                            cls="export"),
+                    Details(Summary("⬇", cls="gear", title="Export this dialog"),
+                            Div(A("Jupyter notebook (.ipynb)", href="/export/ipynb"),
+                                A("Markdown (.md)", href="/export/md"),
+                                cls="export-menu"),
+                            cls="export"),
+                    A("⚙", href="/settings", cls="gear", title="Settings — API keys"),
+                    TargetSwitcher(),
+                    cls="topbar-right"),
+                cls="topbar"),
+            # the columns row
+            Div(
+                Sidebar(),
+                PaperPanel(),
+                Div(banner, Stream(), Composer(), cls="main"),
+                Div(Div("Contents", cls="toc-head"), Div(id="tocList", cls="toc-list"),
+                    cls="toc", id="toc"),
+                cls="cols"),
             cls="app" + (" paper-open" if STATE.get("paper") else ""),
         ), Script(TOC_JS)),
     )
