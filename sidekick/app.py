@@ -193,6 +193,21 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
   font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;line-height:1.5}
 .CodeMirror-scroll{min-height:auto}
 .CodeMirror-lines{padding:9px 0}
+/* Re-map CodeMirror's monokai onto Pygments' exact monokai palette, so a code
+   cell looks IDENTICAL rendered (Pygments) vs being edited (CodeMirror). CM's
+   own theme uses `span.cm-*` selectors, so we match that specificity to win. */
+.cm-s-monokai.CodeMirror{color:#f8f8f2}
+.cm-s-monokai span.cm-keyword{color:#66d9ef}
+.cm-s-monokai span.cm-operator{color:#ff4689}
+.cm-s-monokai span.cm-def{color:#a6e22e}
+.cm-s-monokai span.cm-variable,.cm-s-monokai span.cm-variable-2,
+.cm-s-monokai span.cm-property{color:#f8f8f2}
+.cm-s-monokai span.cm-builtin,.cm-s-monokai span.cm-variable-3,
+.cm-s-monokai span.cm-type{color:#f8f8f2}
+.cm-s-monokai span.cm-string,.cm-s-monokai span.cm-string-2{color:#e6db74}
+.cm-s-monokai span.cm-number,.cm-s-monokai span.cm-atom{color:#ae81ff}
+.cm-s-monokai span.cm-comment{color:#959077}
+.cm-s-monokai span.cm-meta,.cm-s-monokai span.cm-qualifier{color:#a6e22e}
 .cell-btn{font-size:12px;border:1px solid var(--line);background:#fff;border-radius:7px;padding:3px 11px;
   cursor:pointer;color:var(--muted);line-height:1.6}
 .cell-btn:hover{border-color:#d4d0c4;color:var(--ink)}
