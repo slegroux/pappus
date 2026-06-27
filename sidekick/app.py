@@ -128,14 +128,25 @@ CSS = """
 body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
   background:var(--bg);color:var(--ink);font-size:15px;line-height:1.55}
 /* global top bar over a flex row of columns; any column can be hidden */
-.app{display:flex;flex-direction:column;height:100vh}
+.app{display:flex;flex-direction:column;height:100vh;--side-w:264px;--toc-w:244px;--paper-w:50%}
 .cols{display:flex;flex:1;min-height:0}
+/* drag-to-resize handles between columns: zero-width flex items with a wider
+   invisible hit area straddling the seam, so resizing adds no layout gap. */
+.gutter{flex:0 0 0;position:relative;z-index:6}
+.gutter::before{content:"";position:absolute;top:0;bottom:0;left:-3px;width:7px;cursor:col-resize}
+.gutter:hover::before,.gutter.dragging::before{background:var(--accent);opacity:.5}
+.app.no-side .gutter-side{display:none}
+.gutter-paper,.gutter-toc{display:none}
+.app.paper-open .gutter-paper{display:block}
+.app.paper-collapsed .gutter-paper{display:none}
+.app.toc-open .gutter-toc{display:block}
+body.col-resizing{cursor:col-resize;user-select:none}
 .app.no-side .side{display:none}
 .topbar-left{display:flex;align-items:center;gap:12px;min-width:0}
 .topbar-right{display:flex;align-items:center;gap:12px}
 /* paper reading panel (left column, toggled open when a paper is loaded) */
 .paper{display:none;background:var(--panel);border-right:1px solid var(--line);overflow:auto;padding:16px 18px;min-width:0}
-.app.paper-open .paper{display:flex;flex-direction:column;flex:1 1 0}
+.app.paper-open .paper{display:flex;flex-direction:column;flex:0 0 var(--paper-w)}
 .paper-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}
 .paper-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
 .paper-import{margin:0;display:flex;align-items:center;gap:5px}
@@ -168,7 +179,7 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
 /* table of contents (right column, toggleable, full-height so it stays in view) */
 .toc{display:none;background:var(--sidebar);border-left:1px solid var(--line);
   padding:16px 14px;overflow:auto}
-.app.toc-open .toc{display:flex;flex-direction:column;flex:0 0 244px}
+.app.toc-open .toc{display:flex;flex-direction:column;flex:0 0 var(--toc-w)}
 .toc-head{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
 .toc-list{display:flex;flex-direction:column;gap:1px}
 .toc-link{display:block;text-decoration:none;color:var(--ink);font-size:13px;padding:4px 8px;border-radius:7px;
@@ -181,7 +192,7 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
 .toc-empty{font-size:12px;color:var(--muted);font-style:italic;padding:4px 8px}
 .toc-toggle{cursor:pointer}
 /* sidebar */
-.side{flex:0 0 264px;background:var(--sidebar);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 12px;overflow:auto}
+.side{flex:0 0 var(--side-w);background:var(--sidebar);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 12px;overflow:auto}
 .brand{display:flex;align-items:center;gap:9px;font-weight:600;padding:6px 8px 14px}
 .brand .dot{width:22px;height:22px;border-radius:6px;background:var(--accent);display:grid;place-items:center;color:#fff;font-size:13px}
 .newbtn{display:flex;align-items:center;gap:8px;width:100%;border:1px solid var(--line);background:var(--panel);
@@ -1193,6 +1204,54 @@ window.toggleCol = function(cls, key){
   window.syncToggles();
   window.buildTOC();
 })();
+// ---- drag-to-resize columns ------------------------------------------------
+(function(){
+  var app = document.querySelector('.app');
+  if(!app) return;
+  // For each handle: the CSS var it drives, the column it sizes, and the sign of
+  // the drag (side/paper sit left of their handle -> +dx widens; toc sits right
+  // of its handle -> -dx widens). min/max clamp the resulting width in px.
+  var SPEC = {
+    side:  {v:'--side-w',  el:'.side',  sign: 1, min:170, max:520},
+    paper: {v:'--paper-w', el:'.paper', sign: 1, min:220, max:900},
+    toc:   {v:'--toc-w',   el:'.toc',   sign:-1, min:160, max:520}
+  };
+  var KEY = 'sidekick_colw';
+  function load(){ try { return JSON.parse(localStorage.getItem(KEY)||'{}'); } catch(e){ return {}; } }
+  function save(o){ try { localStorage.setItem(KEY, JSON.stringify(o)); } catch(e){} }
+  var saved = load();
+  Object.keys(SPEC).forEach(function(k){
+    if(saved[k]) app.style.setProperty(SPEC[k].v, saved[k] + 'px');
+  });
+  var drag = null;
+  document.addEventListener('mousedown', function(e){
+    var g = e.target.closest && e.target.closest('.gutter');
+    if(!g) return;
+    var s = SPEC[g.getAttribute('data-resize')]; if(!s) return;
+    var col = document.querySelector(s.el); if(!col) return;
+    drag = {s:s, k:g.getAttribute('data-resize'), x:e.clientX,
+            w:col.getBoundingClientRect().width, g:g};
+    g.classList.add('dragging');
+    document.body.classList.add('col-resizing');
+    e.preventDefault();
+  });
+  document.addEventListener('mousemove', function(e){
+    if(!drag) return;
+    var w = drag.w + drag.s.sign * (e.clientX - drag.x);
+    w = Math.max(drag.s.min, Math.min(drag.s.max, w));
+    app.style.setProperty(drag.s.v, w + 'px');
+  });
+  document.addEventListener('mouseup', function(){
+    if(!drag) return;
+    var col = document.querySelector(drag.s.el);
+    var o = load();
+    o[drag.k] = Math.round(col.getBoundingClientRect().width);
+    save(o);
+    drag.g.classList.remove('dragging');
+    document.body.classList.remove('col-resizing');
+    drag = null;
+  });
+})();
 """
 
 
@@ -1374,8 +1433,11 @@ def Page():
             # the columns row
             Div(
                 Sidebar(),
+                Div(cls="gutter gutter-side", data_resize="side"),
                 PaperPanel(),
+                Div(cls="gutter gutter-paper", data_resize="paper"),
                 Div(banner, Stream(), Composer(), cls="main"),
+                Div(cls="gutter gutter-toc", data_resize="toc"),
                 Div(Div("Contents", cls="toc-head"), Div(id="tocList", cls="toc-list"),
                     cls="toc", id="toc"),
                 cls="cols"),
