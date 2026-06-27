@@ -970,6 +970,21 @@ def test_paper_convert_caches_and_falls_back(monkeypatch, tmp_path):
     assert engine2 == "cache" and md2 == md
 
 
+def test_paper_empty_conversion_is_not_cached(monkeypatch, tmp_path):
+    # An empty extraction (image-only/scanned PDF) must NOT be cached, or the paper
+    # would be blank forever (cache key is path+mtime; uploads are content-deduped).
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    from sidekick import paper as pl
+    pdf = tmp_path / "scan.pdf"; pdf.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(pl, "_marker_convert", lambda p: None)
+    monkeypatch.setattr(pl, "_pypdf_convert", lambda p: "   ")       # nothing extracted
+    md, engine = pl.convert(str(pdf))
+    assert engine == "pypdf" and not pl.cache_path(pdf).exists()      # not poisoned
+    monkeypatch.setattr(pl, "_pypdf_convert", lambda p: "# Now it works")
+    md2, engine2 = pl.convert(str(pdf))                              # retried, not stuck blank
+    assert engine2 == "pypdf" and "Now it works" in md2
+
+
 def test_paper_uses_marker_when_available(monkeypatch, tmp_path):
     monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
     from sidekick import paper as pl

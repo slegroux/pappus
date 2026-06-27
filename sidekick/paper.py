@@ -122,9 +122,14 @@ def convert(path: str) -> tuple[str, str]:
     if md is None:
         md = _pypdf_convert(str(p))
         engine = "pypdf"
-    try:
-        cp.parent.mkdir(parents=True, exist_ok=True)
-        cp.write_text(md)
-    except OSError:
-        pass
+    # Only cache a non-empty conversion. An empty result (image-only/scanned PDF,
+    # or a failed extraction) must not be stored — the cache key is path+mtime and
+    # uploads are content-deduped, so a cached "" would make the paper blank
+    # forever with no way to retry short of deleting the cache file.
+    if md and md.strip():
+        try:
+            cp.parent.mkdir(parents=True, exist_ok=True)
+            cp.write_text(md)
+        except OSError:
+            pass
     return _clean_md(md), engine
