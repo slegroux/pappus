@@ -64,8 +64,8 @@ a small **SolveIt-compatible kernel server** that genuinely executes code. It's
 the fastest way to see the interface go *live* (green LED) end-to-end:
 
 ```bash
-# terminal 1 — start the kernel server (add --extra ml for numpy/torch/etc.)
-uv run --extra ml python -m server.kernel_server --port 5055
+# terminal 1 — start the kernel server (--extra kernel adds numpy/torch/etc.)
+uv run --extra kernel python -m server.kernel_server --port 5055
 
 # terminal 2 — verify and launch
 uv run python -m sidekick.cli doctor kernel      # -> all checks pass
@@ -83,18 +83,34 @@ tunnels it back.
 When you have access to the real Answer.AI SolveIt server, just point the `local`
 or `h100` targets at it (they use `backend: solveit` via `solveit_client`) — same UI.
 
-## ML libraries
+## Two dependency groups: the server vs your coding stack
 
-The LLM SDKs (anthropic, openai, zhipuai) ship in the base install. The heavier
-data-science stack is opt-in so the base stays light:
+Sidekick keeps two kinds of dependency apart, because they serve different jobs:
 
-| Extra | Installs |
-|-------|----------|
-| `ml`  | numpy, pandas, matplotlib, scikit-learn, scipy, torch |
-| `all` | ml + solveit |
+- **The server** (base install) — what *runs* sidekick: FastHTML, uvicorn, the
+  markdown/code renderers, and the AI SDKs. Light by design.
+- **The coding environment** (`kernel` extra) — what your *notebook code* imports:
+  numpy, pandas, matplotlib, scikit-learn, scipy, torch. Kept separate because
+  torch is large, and because the kernel server is a standalone HTTP process —
+  this stack belongs wherever the kernel actually runs.
 
-Start the kernel server with the ML stack via
-`uv run --extra ml python -m server.kernel_server --port 5055`.
+| Extra | Installs | Where it belongs |
+|-------|----------|------------------|
+| (base) | FastHTML, uvicorn, mistune, pygments, AI SDKs | wherever the **app** runs |
+| `kernel` (alias `ml`) | numpy, pandas, matplotlib, scikit-learn, scipy, torch | wherever the **kernel** runs |
+| `solveit` | solveit_client | app, to talk to a real SolveIt server |
+| `all` | kernel + solveit | a full local workstation |
+
+```bash
+# one machine, one venv: give the kernel the coding stack
+uv run --extra kernel python -m server.kernel_server --port 5055
+```
+
+Because the kernel talks to the app over HTTP, you can also **separate the
+environments entirely**: run the kernel server in its own venv (or on the H100)
+with `[kernel]` installed, and keep the app's venv lean — the app never imports
+torch, only the kernel does. (This is exactly the laptop-app ↔ H100-kernel split.)
+
 matplotlib defaults to the headless `Agg` backend on the server, so
 `plt.savefig(...)` works without a display.
 

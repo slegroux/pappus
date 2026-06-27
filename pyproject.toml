@@ -4,26 +4,30 @@ version = "0.1.0"
 description = "A Claude-desktop-style interface for SolveIt that runs against your laptop or a remote H100."
 readme = "README.md"
 requires-python = ">=3.10"
+# --- THE SERVER -------------------------------------------------------------
+# Base deps run sidekick itself: the web app, the kernel infrastructure, and the
+# AI calls. Deliberately light. The libraries your *notebook code* imports are a
+# separate concern — see the `kernel` extra below.
 dependencies = [
     "python-fasthtml",
     "uvicorn",
     "pyyaml",
-    "mistune",     # server-side markdown (notes + AI answers); works offline, no CDN
-    "pygments",    # server-side code syntax highlighting (offline, no CDN)
-    # LLM provider SDKs are core to the app (Ask AI), so they're always installed.
-    "anthropic",   # claude
-    "openai",      # codex
-    "zhipuai",     # glm
+    "mistune",     # server-side markdown (notes + AI answers); offline, no CDN
+    "pygments",    # server-side code syntax highlighting; offline, no CDN
+    "anthropic",   # Ask AI → Claude (API key)
+    "openai",      # Ask AI → Codex
+    "zhipuai",     # Ask AI → GLM
 ]
 
 [project.optional-dependencies]
-# `uv run --extra solveit ...` to talk to the real Answer.AI SolveIt server.
-solveit = ["solveit_client"]
-dev = ["pytest"]
-
-# Standard ML / data-science stack the kernel can use. Opt-in because torch is
-# large:  uv run --extra ml python -m server.kernel_server --port 5055
-ml = [
+# --- THE PYTHON-CODING ENVIRONMENT ------------------------------------------
+# What `import …` in a code cell can use. Kept out of the base install because
+# (a) torch is large and (b) the kernel server is a standalone HTTP process, so
+# this stack belongs wherever the kernel actually runs — which can be a separate
+# venv, or the H100 — while the app stays lean. Install it where the kernel runs:
+#   uv pip install "solveit-sidekick[kernel]"                          # one venv, or
+#   uv run --extra kernel python -m server.kernel_server --port 5055   # kernel only
+kernel = [
     "numpy",
     "pandas",
     "matplotlib",
@@ -31,13 +35,15 @@ ml = [
     "scipy",
     "torch",
 ]
+ml = ["solveit-sidekick[kernel]"]   # back-compat alias for the former name
 
-# Kept for back-compat; the LLM SDKs now live in base dependencies.
-llm = []
+# Talk to the real Answer.AI SolveIt server instead of the bundled kernel.
+solveit = ["solveit_client"]
+dev = ["pytest"]
 
-# Everything for a full local workstation in one shot.
+# Everything for a full local workstation in one shot (server + coding stack + solveit).
 all = [
-    "solveit-sidekick[ml]",
+    "solveit-sidekick[kernel]",
     "solveit-sidekick[solveit]",
 ]
 
