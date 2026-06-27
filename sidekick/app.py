@@ -301,8 +301,21 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .cell-btn.run{background:var(--accent);color:#fff;border-color:var(--accent)}
 .cell-btn.run:hover{filter:brightness(1.05);color:#fff}
 .cell-btn.del:hover{border-color:#C0584B;color:#C0584B}
-.cell-btn.ins{color:#2C6B45}
+.cell-btn.ins{color:#2C6B45;font-weight:600}
 .cell-btn.ins:hover{border-color:#BFE0CC;background:#E6F2EA}
+.ins{position:relative;display:inline-block}
+.ins>summary{list-style:none;cursor:pointer}
+.ins>summary::-webkit-details-marker{display:none}
+.ins-menu{position:absolute;right:0;top:26px;z-index:30;display:flex;gap:10px;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px;
+  box-shadow:0 6px 18px rgba(0,0,0,.12)}
+.ins-col{display:flex;flex-direction:column;gap:3px;min-width:80px}
+.ins-col-head{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:2px}
+.ins-item{text-align:left;font-size:12px;border:1px solid var(--line);background:#fff;border-radius:7px;
+  padding:4px 9px;cursor:pointer;color:var(--ink)}
+.ins-item:hover{border-color:var(--accent);background:#FBF3E7}
+/* the cell a/b will target (last hovered) */
+#stream .row:hover{box-shadow:inset 2px 0 0 var(--line)}
 .cell-btn.ctx.off{color:#B0784F;border-color:#E3C7AE;background:#FBF3E7}
 .cell-btn.pin.on{color:#2C6B45;border-color:#BFE0CC;background:#E6F2EA}
 .tok{margin-left:2px;font-variant-numeric:tabular-nums}
@@ -405,14 +418,32 @@ _PRIMARY = {"note": "Save", "code": "Run", "prompt": "Ask"}
 _TAG = {"note": "note", "code": "code", "prompt": "Ask AI"}
 
 
+def _insert_item(mid, msg_type, where, label):
+    return Button(label, type="button", cls="ins-item",
+                  hx_post="/cell/insert",
+                  hx_vals=json.dumps({"id": mid, "msg_type": msg_type, "where": where}),
+                  hx_target="#stream", hx_swap="outerHTML")
+
+
+def _insert_menu(mid):
+    """＋ dropdown: insert Code/Note/Ask above or below this cell (a / b shortcuts)."""
+    col = lambda where, head: Div(
+        Span(head, cls="ins-col-head"),
+        _insert_item(mid, "code", where, "Code"),
+        _insert_item(mid, "note", where, "Note"),
+        _insert_item(mid, "prompt", where, "Ask AI"),
+        cls="ins-col")
+    return Details(
+        Summary("＋", cls="cell-btn", title="Insert a cell  ·  a = above, b = below"),
+        Div(col("above", "↑ Above"), col("below", "↓ Below"), cls="ins-menu"),
+        cls="ins")
+
+
 def _ctx_buttons(m):
     """Insert / Mute / Pin / Delete — available in both rendered and edit modes."""
     mid = m.id
     return [
-        Button("＋code", type="button", cls="cell-btn ins",
-               title="Insert a code cell below",
-               hx_post="/cell/insert", hx_vals=json.dumps({"id": mid, "msg_type": "code"}),
-               hx_target="#stream", hx_swap="outerHTML"),
+        _insert_menu(mid),
         Button("Muted" if m.muted else "In context", type="button",
                cls="cell-btn ctx" + (" off" if m.muted else ""),
                title="Toggle whether this cell is sent to the AI as notebook context",
@@ -671,6 +702,26 @@ STREAM_JS = """
       var btn = row && row.querySelector('.cell-btn.run');
       if(btn) btn.click();                                      // Cmd/Ctrl+Enter runs the cell
     }
+  });
+  // Track the cell the cursor is over — the target for the a/b shortcuts.
+  document.addEventListener('mouseover', function(e){
+    var row = e.target.closest && e.target.closest('#stream .row');
+    if(row) window.__activeRow = row;
+  });
+  // Jupyter-style: 'a' inserts a code cell above the active cell, 'b' below —
+  // but only in "command mode" (not while typing in an editor/input/CodeMirror).
+  document.addEventListener('keydown', function(e){
+    if(e.key !== 'a' && e.key !== 'b') return;
+    if(e.metaKey || e.ctrlKey || e.altKey) return;
+    var t = e.target;
+    if(t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable
+             || (t.closest && t.closest('.CodeMirror')))) return;
+    var row = window.__activeRow;
+    if(!row || !document.body.contains(row) || !window.htmx) return;
+    e.preventDefault();
+    htmx.ajax('POST', '/cell/insert', {target: '#stream', swap: 'outerHTML', values: {
+      id: row.id.replace('cell-', ''), msg_type: 'code', where: (e.key === 'a' ? 'above' : 'below')
+    }});
   });
 })();
 """
@@ -1365,11 +1416,14 @@ def cell_exec(id: str):
 
 
 @rt("/cell/insert", methods=["post"])
-def cell_insert(id: str, msg_type: str = "code"):
-    """Insert a new (empty) cell right after `id` and open it in edit mode."""
+def cell_insert(id: str, msg_type: str = "code", where: str = "below"):
+    """Insert a new (empty) cell above/below `id` and open it in edit mode."""
     backend = STATE["backend"]
+    if msg_type not in ("code", "note", "prompt"):
+        msg_type = "code"
     if hasattr(backend, "insert"):
-        m = backend.insert(STATE["dialog"], "", msg_type, after_id=id)
+        m = backend.insert(STATE["dialog"], "", msg_type, anchor_id=id,
+                           above=(where == "above"))
         STATE["editing"] = m.id
     return Stream()
 

@@ -193,13 +193,13 @@ class _InMemoryBackend:
         self._save()
         return m
 
-    def insert(self, dialog: str, content: str, msg_type: str,
-               after_id: str, model: str | None = None) -> Msg:
-        """Insert a new cell right after `after_id` (at the end if not found)."""
+    def insert(self, dialog: str, content: str, msg_type: str, anchor_id: str,
+               above: bool = False, model: str | None = None) -> Msg:
+        """Insert a new cell above or below `anchor_id` (at the end if not found)."""
         lst = self._dialogs.setdefault(dialog, [])
         m = Msg(id="_" + uuid.uuid4().hex[:8], msg_type=msg_type, content=content, model=model)
-        idx = next((i for i, x in enumerate(lst) if x.id == after_id), len(lst) - 1)
-        lst.insert(idx + 1, m)
+        idx = next((i for i, x in enumerate(lst) if x.id == anchor_id), len(lst) - 1)
+        lst.insert(idx if above else idx + 1, m)
         self._save()
         return m
 

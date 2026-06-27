@@ -977,13 +977,15 @@ def test_clean_md_strips_marker_html_noise():
 
 
 # ---- insert cell below + section import ------------------------------------
-def test_insert_places_cell_after_anchor():
+def test_insert_below_and_above_anchor():
     b = MockBackend()
     a = b.add("d/x", "1", "code")
     c = b.add("d/x", "3", "code")
-    m = b.insert("d/x", "2", "note", after_id=a.id)
-    assert [x.id for x in b.messages("d/x")] == [a.id, m.id, c.id]
-    assert m.msg_type == "note" and m.content == "2"
+    below = b.insert("d/x", "2", "note", anchor_id=a.id)              # default: below
+    assert [x.id for x in b.messages("d/x")] == [a.id, below.id, c.id]
+    assert below.msg_type == "note"
+    above = b.insert("d/x", "0", "code", anchor_id=a.id, above=True)  # above the anchor
+    assert [x.id for x in b.messages("d/x")] == [above.id, a.id, below.id, c.id]
 
 
 def test_cell_insert_route_inserts_and_opens_editor():
@@ -1020,3 +1022,27 @@ def test_paper_import_section_mode_fewer_cells_than_para():
     para_cells = len(app.STATE["backend"].messages(app.STATE["dialog"]))
     assert sec_cells == 2 and para_cells == 6 and sec_cells < para_cells
     app.STATE["paper"] = None
+
+
+def test_cell_insert_route_above_and_below_with_type():
+    import sidekick.app as app
+    app.STATE["dialog"] = "ins/ab"
+    bk = app.STATE["backend"]
+    bk.messages("ins/ab")
+    anchor = bk.add("ins/ab", "anchor", "note")
+    app.cell_insert(id=anchor.id, msg_type="prompt", where="above")
+    app.cell_insert(id=anchor.id, msg_type="note", where="below")
+    cells = bk.messages("ins/ab")
+    types = [c.msg_type for c in cells]
+    assert types == ["prompt", "note", "note"]            # above-prompt, anchor-note, below-note
+    assert cells[1].id == anchor.id
+
+
+def test_cell_insert_route_rejects_bad_type():
+    import sidekick.app as app
+    app.STATE["dialog"] = "ins/bad"
+    bk = app.STATE["backend"]
+    bk.messages("ins/bad")
+    a = bk.add("ins/bad", "x", "code")
+    app.cell_insert(id=a.id, msg_type="evil", where="below")
+    assert bk.messages("ins/bad")[1].msg_type == "code"   # bad type falls back to code
