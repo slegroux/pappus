@@ -210,11 +210,13 @@ drops the quoted paragraph into the composer (Ask AI mode), so your question
 carries the paragraph as context — then run code, plot, and take notes beside it.
 
 PDFs are converted to markdown and rendered with the same math/code pipeline as
-the rest of the app. By default this uses lightweight **pypdf** text extraction;
-install the **`paper`** extra for **marker** (`uv pip install "solveit-sidekick[paper]"`),
-which preserves structure, tables, and **equations as LaTeX** (rendered via KaTeX)
-— much nicer for ML papers. marker is heavier (torch + model downloads, GPL-3.0)
-and slower, so conversions run in the background and are cached to disk.
+the rest of the app. The recommended reader is **marker** — install the **`paper`**
+extra (`uv pip install "solveit-sidekick[paper]"`, also in `[all]`) and it becomes
+the default engine: it preserves structure, tables, and **equations as LaTeX**
+(rendered via KaTeX), which is much nicer for ML papers. marker is heavier (torch
++ model downloads, GPL-3.0) and slower, so conversions run in the background and
+are cached to disk. Without it, the panel falls back to lightweight **pypdf**
+text extraction with no extra setup.
 
 ## Pain points this targets
 

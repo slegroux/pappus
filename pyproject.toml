@@ -49,9 +49,11 @@ paper = ["marker-pdf"]
 solveit = ["solveit_client"]
 dev = ["pytest"]
 
-# Everything for a full local workstation in one shot (server + coding stack + solveit).
+# Everything for a full local workstation in one shot (server + coding stack +
+# paper reader + solveit).
 all = [
     "solveit-sidekick[kernel]",
+    "solveit-sidekick[paper]",
     "solveit-sidekick[solveit]",
 ]
 
