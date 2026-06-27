@@ -149,6 +149,66 @@ def test_rename_rejects_duplicate():
         b.rename("a", "b")
 
 
+# ---- editable cells: update / delete ---------------------------------------
+def test_update_edits_content_and_clears_stale_output():
+    b = MockBackend()
+    m = b.add("d/x", "1+1", "code")
+    b.exec("d/x", m.id)
+    assert m.output                              # has output after a run
+    b.update("d/x", m.id, "2+2")
+    assert m.content == "2+2"
+    assert m.output == ""                        # stale output cleared on edit
+
+
+def test_update_unknown_id_is_noop():
+    b = MockBackend()
+    assert b.update("d/x", "nope", "x") is None
+
+
+def test_delete_removes_the_cell():
+    b = MockBackend()
+    a = b.add("d/x", "a = 1", "code")
+    keep = b.add("d/x", "b = 2", "code")
+    b.delete("d/x", a.id)
+    ids = [m.id for m in b.messages("d/x")]
+    assert a.id not in ids and keep.id in ids
+
+
+# ---- editable cells: web routes --------------------------------------------
+def test_cell_run_route_saves_edit_and_executes():
+    import sidekick.app as app
+    app.STATE["dialog"] = "cell/run"
+    b = app.STATE["backend"]
+    b.messages("cell/run")
+    m = b.add("cell/run", "old", "code")
+    app.cell_run(id=m.id, content="new code")
+    edited = b.messages("cell/run")[-1]
+    assert edited.content == "new code"          # edit persisted
+    assert edited.output                         # and it was executed
+
+
+def test_cell_save_route_edits_without_executing():
+    import sidekick.app as app
+    app.STATE["dialog"] = "cell/save"
+    b = app.STATE["backend"]
+    b.messages("cell/save")
+    m = b.add("cell/save", "draft", "note")
+    app.cell_save(id=m.id, content="# done")
+    saved = b.messages("cell/save")[-1]
+    assert saved.content == "# done" and saved.output == ""
+
+
+def test_cell_delete_route_removes_cell():
+    import sidekick.app as app
+    app.STATE["dialog"] = "cell/del"
+    b = app.STATE["backend"]
+    b.messages("cell/del")
+    m = b.add("cell/del", "x", "code")
+    before = len(b.messages("cell/del"))
+    app.cell_delete(id=m.id)
+    assert len(b.messages("cell/del")) == before - 1
+
+
 # ---- secrets store ----------------------------------------------------------
 def test_secrets_save_load_and_status(tmp_path, monkeypatch):
     from sidekick import secrets_store

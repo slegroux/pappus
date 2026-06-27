@@ -33,13 +33,17 @@ def _rename_in(dialogs: dict, old: str, new: str) -> None:
     dialogs[new] = dialogs.pop(old, [])
 
 
-class MockBackend:
-    """In-memory stand-in so the UI runs with no SolveIt server."""
+class _InMemoryBackend:
+    """Shared dialog/message bookkeeping for backends that keep state in-process.
 
-    live = False
+    MockBackend and HttpKernelBackend both hold dialogs as ``{name: [Msg, ...]}``
+    and only differ in how ``exec`` produces output, so the CRUD lives here:
+    list/open dialogs, add/edit/delete messages, and rename. Subclasses provide
+    ``exec`` (and may seed initial dialogs in ``__init__``).
+    """
 
     def __init__(self):
-        self._dialogs: dict[str, list[Msg]] = {"demo/welcome": []}
+        self._dialogs: dict[str, list[Msg]] = {}
 
     def list_dialogs(self) -> list[str]:
         return list(self._dialogs)
@@ -47,23 +51,53 @@ class MockBackend:
     def messages(self, dialog: str) -> list[Msg]:
         return self._dialogs.setdefault(dialog, [])
 
+    def _find(self, dialog: str, msg_id: str) -> Msg | None:
+        for m in self._dialogs.get(dialog, []):
+            if m.id == msg_id:
+                return m
+        return None
+
     def add(self, dialog: str, content: str, msg_type: str, model: str | None = None) -> Msg:
         m = Msg(id="_" + uuid.uuid4().hex[:8], msg_type=msg_type, content=content, model=model)
         self._dialogs.setdefault(dialog, []).append(m)
         return m
 
-    def exec(self, dialog: str, msg_id: str) -> Msg:
-        for m in self._dialogs.get(dialog, []):
-            if m.id == msg_id:
-                if m.msg_type == "code":
-                    m.output = "(mock) ran code — connect a real SolveIt server for real output"
-                elif m.msg_type == "prompt":
-                    m.output = f"(mock) {m.model or 'the AI'} would answer here once a target is live."
-                return m
-        raise KeyError(msg_id)
+    def update(self, dialog: str, msg_id: str, content: str) -> Msg | None:
+        """Edit a cell's source in place. Stale output is cleared so the UI never
+        shows an answer that no longer matches the (now-edited) input."""
+        m = self._find(dialog, msg_id)
+        if m is not None:
+            m.content = content
+            m.output = ""
+        return m
+
+    def delete(self, dialog: str, msg_id: str) -> None:
+        lst = self._dialogs.get(dialog)
+        if lst is not None:
+            self._dialogs[dialog] = [m for m in lst if m.id != msg_id]
 
     def rename(self, old: str, new: str) -> None:
         _rename_in(self._dialogs, old, new)
+
+
+class MockBackend(_InMemoryBackend):
+    """In-memory stand-in so the UI runs with no SolveIt server."""
+
+    live = False
+
+    def __init__(self):
+        super().__init__()
+        self._dialogs["demo/welcome"] = []
+
+    def exec(self, dialog: str, msg_id: str) -> Msg:
+        m = self._find(dialog, msg_id)
+        if m is None:
+            raise KeyError(msg_id)
+        if m.msg_type == "code":
+            m.output = "(mock) ran code — connect a real SolveIt server for real output"
+        elif m.msg_type == "prompt":
+            m.output = f"(mock) {m.model or 'the AI'} would answer here once a target is live."
+        return m
 
 
 class LiveBackend:
@@ -116,22 +150,50 @@ class LiveBackend:
         return Msg(d.get("id", msg_id), d.get("msg_type", "code"),
                    d.get("content", ""), d.get("output", ""))
 
+    def update(self, dialog: str, msg_id: str, content: str) -> Msg | None:
+        # solveit_client's edit API varies across versions; try the common
+        # shapes and degrade to a no-op rather than break the UI.
+        dlg = self._dlg(dialog)
+        try:
+            m = dlg.read_msg(id=msg_id)
+            if hasattr(m, "update"):
+                m.update(content=content)
+            elif hasattr(dlg, "update_msg"):
+                dlg.update_msg(msg_id, content)
+            else:
+                return None
+        except Exception:  # noqa: BLE001 — older clients may not support edits
+            return None
+        return Msg(msg_id, "code", content)
 
-class HttpKernelBackend:
+    def delete(self, dialog: str, msg_id: str) -> None:
+        dlg = self._dlg(dialog)
+        try:
+            m = dlg.read_msg(id=msg_id)
+            if hasattr(m, "delete"):
+                m.delete()
+            elif hasattr(dlg, "delete_msg"):
+                dlg.delete_msg(msg_id)
+        except Exception:  # noqa: BLE001 — best effort across client versions
+            pass
+
+
+class HttpKernelBackend(_InMemoryBackend):
     """Talks to the bundled kernel server (server/kernel_server.py) over HTTP.
 
     A real backend: code is actually executed server-side and output returned.
-    Used when a target sets `backend: kernel`.
+    Used when a target sets `backend: kernel`. Cell CRUD (add/edit/delete) is
+    inherited from _InMemoryBackend; only `exec` and `rename` reach the server.
     """
 
     live = True
 
     def __init__(self, target: Target):
+        super().__init__()
         import urllib.request  # stdlib
         self._req = urllib.request
         self.target = target
         self.base = target.url.rstrip("/")
-        self._dialogs: dict[str, list[Msg]] = {}
 
     def _post(self, path: str, body: dict) -> dict:
         import json
@@ -142,34 +204,22 @@ class HttpKernelBackend:
         with self._req.urlopen(req, timeout=30) as r:
             return json.loads(r.read().decode())
 
-    def list_dialogs(self) -> list[str]:
-        return list(self._dialogs)
-
-    def messages(self, dialog: str) -> list[Msg]:
-        return self._dialogs.setdefault(dialog, [])
-
-    def add(self, dialog: str, content: str, msg_type: str, model: str | None = None) -> Msg:
-        m = Msg(id="_" + uuid.uuid4().hex[:8], msg_type=msg_type, content=content, model=model)
-        self._dialogs.setdefault(dialog, []).append(m)
-        return m
-
     def exec(self, dialog: str, msg_id: str) -> Msg:
-        for m in self._dialogs.get(dialog, []):
-            if m.id != msg_id:
-                continue
-            if m.msg_type == "code":
-                m.output = self._post("/exec", {"dialog": dialog, "code": m.content})["output"]
-            elif m.msg_type == "prompt":
-                r = self._post("/prompt", {"dialog": dialog, "content": m.content,
-                                           "model": m.model or "claude"})
-                m.output = r["output"]
-            return m
-        raise KeyError(msg_id)
+        m = self._find(dialog, msg_id)
+        if m is None:
+            raise KeyError(msg_id)
+        if m.msg_type == "code":
+            m.output = self._post("/exec", {"dialog": dialog, "code": m.content})["output"]
+        elif m.msg_type == "prompt":
+            r = self._post("/prompt", {"dialog": dialog, "content": m.content,
+                                       "model": m.model or "claude"})
+            m.output = r["output"]
+        return m
 
     def rename(self, old: str, new: str) -> None:
         # Move the message list; also re-key the server-side kernel namespace
         # so executed variables survive the rename.
-        _rename_in(self._dialogs, old, new)
+        super().rename(old, new)
         try:
             self._post("/rename", {"old": old, "new": new})
         except Exception:  # noqa: BLE001 — namespace move is best-effort

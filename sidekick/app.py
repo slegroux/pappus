@@ -9,6 +9,7 @@ The whole point: the target switcher in the top-right flips between your laptop
 """
 from __future__ import annotations
 
+import json
 import os
 
 from fasthtml.common import *
@@ -16,6 +17,22 @@ from fasthtml.common import *
 from .targets import get_target, list_targets, list_models, default_model
 from .client import connect
 from . import secrets_store
+
+
+# ---- markdown (server-side; works offline, no CDN) --------------------------
+try:
+    import mistune
+    # escape=True neutralises raw HTML in the source, so rendering a note or an
+    # AI answer can't inject <script> — markdown syntax still renders.
+    _md = mistune.create_markdown(escape=True, plugins=["strikethrough", "table"])
+except Exception:  # noqa: BLE001 — degrade to plain text if mistune is missing
+    _md = None
+
+
+def render_md(text: str):
+    """Render markdown to safe HTML, or fall back to escaped plain text."""
+    text = text or ""
+    return NotStr(_md(text)) if _md else text
 
 
 def _initial_target() -> str:
@@ -137,6 +154,30 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .send{background:var(--accent);border:none;color:#fff;border-radius:10px;width:34px;height:34px;cursor:pointer;font-size:15px}
 .send:hover{filter:brightness(1.05)}
 .hint{font-size:11px;color:var(--muted);margin-top:8px;text-align:center}
+/* editable cells */
+.cell-edit{width:100%;border:1px solid var(--line);border-radius:11px;padding:11px 13px;font:inherit;
+  background:var(--panel);color:var(--ink);resize:none;outline:none;overflow:hidden;min-height:42px;display:block;
+  field-sizing:content}     /* auto-grows to fit content (Chrome/Edge/Safari); JS fallback below */
+.cell-edit:focus{border-color:var(--accent)}
+.cell-edit.code-edit{font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;
+  background:var(--code-bg);color:var(--code-ink);border-color:#3a3933}
+.cell-actions{display:flex;gap:6px;margin-left:auto;opacity:0;transition:opacity .12s}
+.row:hover .cell-actions,.cell-actions:focus-within{opacity:1}
+.cell-btn{font-size:12px;border:1px solid var(--line);background:#fff;border-radius:7px;padding:3px 11px;
+  cursor:pointer;color:var(--muted);line-height:1.6}
+.cell-btn:hover{border-color:#d4d0c4;color:var(--ink)}
+.cell-btn.run{background:var(--accent);color:#fff;border-color:var(--accent)}
+.cell-btn.run:hover{filter:brightness(1.05);color:#fff}
+.cell-btn.del:hover{border-color:#C0584B;color:#C0584B}
+.answer{margin-top:9px}
+.md>*:first-child{margin-top:0}.md>*:last-child{margin-bottom:0}
+.md p{margin:.5em 0}.md ul,.md ol{margin:.5em 0;padding-left:1.4em}
+.md h1,.md h2,.md h3{margin:.7em 0 .35em;line-height:1.3}
+.md table{border-collapse:collapse;margin:.5em 0}.md th,.md td{border:1px solid var(--line);padding:4px 9px}
+.md pre{background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:12px 14px;overflow:auto;
+  font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px}
+.md code{font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:.92em}
+.md :not(pre)>code{background:var(--chip);border-radius:5px;padding:1px 5px}
 """
 
 
@@ -183,23 +224,85 @@ def Sidebar():
     )
 
 
+def _cell_textarea(m, code=False):
+    """The editable source of a cell. One line tall by default; JS auto-grows it."""
+    attrs = {"name": "content", "id": f"ta-{m.id}", "rows": "1",
+             "cls": "cell-edit code-edit" if code else "cell-edit"}
+    if code:
+        attrs["spellcheck"] = "false"
+    return Textarea(m.content, **attrs)
+
+
+def _cell_actions(mid, run_label="Run", run_path="/cell/run"):
+    """Per-cell toolbar. Run posts the (possibly edited) source; Delete removes it.
+    Both swap only #stream so running a cell never reloads the whole page."""
+    return Div(
+        Button(run_label, type="button", cls="cell-btn run",
+               hx_post=run_path, hx_include=f"#ta-{mid}",
+               hx_vals=json.dumps({"id": mid}),
+               hx_target="#stream", hx_swap="outerHTML"),
+        Button("Delete", type="button", cls="cell-btn del",
+               hx_post="/cell/delete", hx_vals=json.dumps({"id": mid}),
+               hx_confirm="Delete this cell?",
+               hx_target="#stream", hx_swap="outerHTML"),
+        cls="cell-actions",
+    )
+
+
 def MsgRow(m):
+    mid = m.id
     if m.msg_type == "note":
-        return Div(Div(Span("note", cls="tag"), cls="who"),
-                   Div(m.content, cls="bubble note"), cls="row")
+        head = Div(Span("note", cls="tag"),
+                   _cell_actions(mid, run_label="Save", run_path="/cell/save"), cls="who")
+        body = [head, _cell_textarea(m)]
+        if (m.content or "").strip():            # rendered markdown preview
+            body.append(Div(render_md(m.content), cls="bubble note md"))
+        return Div(*body, cls="row", id=f"cell-{mid}")
     if m.msg_type == "code":
-        body = [Pre(m.content, cls="code")]
+        head = Div(Span("code", cls="tag"), Span(mid, cls="muted small"),
+                   _cell_actions(mid), cls="who")
+        body = [head, _cell_textarea(m, code=True)]
         if m.output:
             body.append(Div(m.output, cls="out"))
-        return Div(Div(Span("code", cls="tag"), m.id, cls="who"),
-                   Div(*body, cls="bubble"), cls="row")
-    # prompt -> show user question + AI answer (labelled with the model used)
-    rows = [Div(Div("You", cls="who"), Div(m.content, cls="bubble user"), cls="row")]
+        return Div(*body, cls="row", id=f"cell-{mid}")
+    # prompt -> editable question + AI answer (labelled with the model used)
+    head = Div(Span("Ask AI", cls="tag"), _cell_actions(mid, run_label="Ask"), cls="who")
+    body = [head, _cell_textarea(m)]
     if m.output:
         who = m.model or "SolveIt AI"
-        rows.append(Div(Div(Span(who, cls="tag"), cls="who"),
-                        Div(m.output, cls="bubble"), cls="row"))
-    return Div(*rows)
+        body.append(Div(Div(Span(who, cls="tag"), cls="who"),
+                        Div(render_md(m.output), cls="bubble md"), cls="answer"))
+    return Div(*body, cls="row", id=f"cell-{mid}")
+
+
+STREAM_JS = """
+(function(){
+  // CSS field-sizing auto-grows textareas natively; only run the JS fallback
+  // (measured after layout settles) where it isn't supported.
+  var hasFieldSizing = window.CSS && CSS.supports && CSS.supports('field-sizing','content');
+  function autosize(el){ el.style.height='auto'; el.style.height=el.scrollHeight+'px'; }
+  function sizeAll(){ document.querySelectorAll('.cell-edit').forEach(autosize); }
+  if(!hasFieldSizing) requestAnimationFrame(sizeAll);           // wait for final width
+
+  if(window.__sidekickCells) return;                            // bind document listeners once
+  window.__sidekickCells = true;
+  if(!hasFieldSizing){
+    document.addEventListener('input', function(e){
+      if(e.target.classList && e.target.classList.contains('cell-edit')) autosize(e.target);
+    });
+    window.addEventListener('resize', sizeAll);
+  }
+  document.addEventListener('keydown', function(e){
+    if(e.target.classList && e.target.classList.contains('cell-edit')
+       && (e.metaKey || e.ctrlKey) && e.key === 'Enter'){
+      e.preventDefault();
+      var row = e.target.closest('.row');
+      var btn = row && row.querySelector('.cell-btn.run');
+      if(btn) btn.click();                                      // Cmd/Ctrl+Enter runs the cell
+    }
+  });
+})();
+"""
 
 
 def Stream():
@@ -209,7 +312,7 @@ def Stream():
                     cls="empty")
     else:
         inner = Div(*[MsgRow(m) for m in msgs], cls="wrap")
-    return Div(inner, cls="stream", id="stream")
+    return Div(inner, Script(STREAM_JS), cls="stream", id="stream")
 
 
 COMPOSER_JS = """
@@ -438,6 +541,42 @@ def send(content: str, msg_type: str = "prompt", model: str = None):
         if msg_type in ("code", "prompt"):
             backend.exec(STATE["dialog"], m.id)
     return Page()
+
+
+def _msg_by_id(backend, dialog: str, mid: str):
+    for m in backend.messages(dialog):
+        if m.id == mid:
+            return m
+    return None
+
+
+@rt("/cell/run", methods=["post"])
+def cell_run(id: str, content: str = ""):
+    """Save a cell's edited source, then (re)execute it. Returns just the stream."""
+    backend = STATE["backend"]
+    if hasattr(backend, "update"):
+        backend.update(STATE["dialog"], id, content)
+    m = _msg_by_id(backend, STATE["dialog"], id)
+    if m is not None and m.msg_type in ("code", "prompt"):
+        backend.exec(STATE["dialog"], id)
+    return Stream()
+
+
+@rt("/cell/save", methods=["post"])
+def cell_save(id: str, content: str = ""):
+    """Save a cell's edited source without executing (used by note cells)."""
+    backend = STATE["backend"]
+    if hasattr(backend, "update"):
+        backend.update(STATE["dialog"], id, content)
+    return Stream()
+
+
+@rt("/cell/delete", methods=["post"])
+def cell_delete(id: str):
+    backend = STATE["backend"]
+    if hasattr(backend, "delete"):
+        backend.delete(STATE["dialog"], id)
+    return Stream()
 
 
 if __name__ == "__main__":

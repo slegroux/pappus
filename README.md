@@ -33,7 +33,6 @@ profile in `targets.yaml`.
 | `sidekick/client.py`  | Wrap `solveit_client`; fall back to an in-memory mock |
 | `sidekick/app.py`     | The web UI (FastHTML), styled like the Claude desktop app |
 | `sidekick/cli.py`     | `sidekick targets / doctor / up / serve` |
-| `preview.html`        | A static render of the UI so you can see the look |
 
 The mock fallback means the UI runs **with no SolveIt server at all** — handy for
 trying the interface or developing it away from the H100. When a real target is
@@ -122,6 +121,21 @@ uv run python -m sidekick.cli serve        # http://localhost:8000
 
 In the UI, the top-right dropdown flips between `local` and `h100`. A green LED =
 live server; amber = running on the mock (with a banner telling you why).
+
+### Editable cells (SolveIt-style)
+
+Every message is a live cell, like a notebook:
+
+- **Edit anything** — click into any cell and change its source in place. Cells
+  auto-grow to fit their content.
+- **Run / re-run** — hover a cell for its **Run** and **Delete** controls, or
+  press **Cmd/Ctrl+Enter** inside it. Code re-executes in the persistent kernel
+  namespace; an *Ask AI* cell re-asks with the edited prompt.
+- **Notes render as markdown** — written server-side (works offline, no CDN), and
+  AI answers render as markdown too.
+
+Edits and runs swap only the conversation (via htmx), so re-running a cell never
+reloads the whole page.
 
 ## Pain points this targets
 
