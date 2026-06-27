@@ -1337,11 +1337,16 @@ PAPER_JS = """
   // in document order, so the imported note keeps headings/formatting. Snaps to
   // whole blocks (partial selection of a block still imports that block's source).
   function selectedMarkdown(sel){
-    var out = [], blocks = document.querySelectorAll('#paperBody .pblock');
+    if(!sel.rangeCount) return '';
+    var range = sel.getRangeAt(0), out = [];
+    var blocks = document.querySelectorAll('#paperBody .pblock');
     for(var i = 0; i < blocks.length; i++){
-      try { if(sel.containsNode(blocks[i], true)){
-        var md = blocks[i].getAttribute('data-md'); if(md) out.push(md);
-      }} catch(e){}
+      // intersectsNode is reliable at block boundaries (containsNode(.,true) can
+      // drop a block the selection only partially covers → silent plain-text loss).
+      var hit;
+      try { hit = range.intersectsNode(blocks[i]); }
+      catch(e){ hit = sel.containsNode(blocks[i], true); }
+      if(hit){ var md = blocks[i].getAttribute('data-md'); if(md) out.push(md); }
     }
     return out.join('\\n\\n').trim();
   }
