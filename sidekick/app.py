@@ -20,7 +20,7 @@ from starlette.datastructures import UploadFile
 from .targets import get_target, list_targets, list_models, default_model
 from .client import connect, build_context, est_tokens, _InMemoryBackend
 from .claude_cli import stream as stream_claude, CLI_MODELS
-from . import secrets_store
+from . import secrets_store, export
 from . import paper as paperlib
 
 
@@ -347,6 +347,7 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
   background:rgba(44,107,69,.04)}
 .cell-btn.ctx.off{color:#B0784F;border-color:#E3C7AE;background:#FBF3E7}
 .cell-btn.pin.on{color:#2C6B45;border-color:#BFE0CC;background:#E6F2EA}
+.cell-btn.exp.on{color:#4A5BA6;border-color:#C3CBEB;background:#ECEFF9}
 .tok{margin-left:2px;font-variant-numeric:tabular-nums}
 /* drag-to-reorder handle (hover-revealed, like the toolbar) */
 .drag-handle{cursor:grab;color:var(--muted);opacity:0;transition:opacity .12s;
@@ -511,11 +512,22 @@ def _type_menu(m):
 
 
 def _ctx_buttons(m):
-    """Type / Insert / Mute / Pin / Delete — available in both rendered and edit modes."""
+    """Type / Insert / Export / Mute / Pin / Delete — in both rendered and edit modes.
+    Code cells also get an Export toggle (the `#| export` package directive)."""
     mid = m.id
+    exported = m.msg_type == "code" and export.has_export(m.content)
+    btns = []
+    if m.msg_type == "code":
+        btns.append(
+            Button("Exported" if exported else "Export", type="button",
+                   cls="cell-btn exp" + (" on" if exported else ""),
+                   title="Toggle whether this cell is tangled into the exported package (#| export)",
+                   hx_post="/cell/export", hx_vals=json.dumps({"id": mid}),
+                   hx_target="#stream", hx_swap="outerHTML"))
     return [
         _type_menu(m),
         _insert_menu(mid),
+    ] + btns + [
         Button("Muted" if m.muted else "In context", type="button",
                cls="cell-btn ctx" + (" off" if m.muted else ""),
                title="Toggle whether this cell is sent to the AI as notebook context",
@@ -1352,6 +1364,7 @@ def Page():
                     Details(Summary("⬇", cls="gear", title="Export this dialog"),
                             Div(A("Jupyter notebook (.ipynb)", href="/export/ipynb"),
                                 A("Markdown (.md)", href="/export/md"),
+                                A("Python package (.zip)", href="/export/package"),
                                 cls="export-menu"),
                             cls="export"),
                     A("⚙", href="/settings", cls="gear", title="Settings — API keys"),
@@ -1664,6 +1677,32 @@ def cell_pin(id: str):
     if hasattr(backend, "set_pinned"):
         backend.set_pinned(STATE["dialog"], id)
     return Stream()
+
+
+@rt("/cell/export", methods=["post"])
+def cell_export(id: str):
+    """Toggle this code cell's `#| export` directive (whether it's tangled into the package)."""
+    backend = STATE["backend"]
+    m = _msg_by_id(backend, STATE["dialog"], id)
+    if m is not None and m.msg_type == "code":
+        new = export.toggle_export(m.content)
+        if isinstance(backend, _InMemoryBackend):
+            m.content = new                  # a directive is a no-op comment — keep the cell's output
+        elif hasattr(backend, "update"):
+            backend.update(STATE["dialog"], id, new)
+    return Stream()
+
+
+@rt("/export/package")
+def export_package():
+    """Tangle the current dialog's `#| export` cells into a downloadable package zip."""
+    dialog = STATE["dialog"]
+    msgs = STATE["backend"].messages(dialog)
+    pkg = export.slug(dialog)
+    files = export.dialog_to_package(msgs, dialog, dialog_name=dialog)
+    blob = export.package_zip(files, pkg)
+    return Response(blob, media_type="application/zip",
+                    headers={"Content-Disposition": f'attachment; filename="{pkg}.zip"'})
 
 
 @rt("/cell/edit")
