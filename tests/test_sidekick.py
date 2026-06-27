@@ -1064,6 +1064,26 @@ def test_paper_open_accepts_upload(monkeypatch, tmp_path):
     app.STATE["paper"] = None
 
 
+def test_reupload_keeps_file_so_markdown_cache_hits(monkeypatch, tmp_path):
+    # The same PDF re-uploaded must reuse its conversion: identical content lands
+    # at the same path AND isn't rewritten, so the path+mtime cache key is stable.
+    import os, io, sidekick.app as app
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+
+    class FakeUpload:
+        def __init__(self, data): self.filename, self.file = "p.pdf", io.BytesIO(data)
+
+    data = b"%PDF-1.4 identical paper bytes"
+    p1, _ = app._save_upload(FakeUpload(data))
+    os.utime(p1, ns=(111_111_111, 111_111_111))          # stamp a distinctive mtime
+    key1 = app.paperlib.cache_path(Path(p1))
+
+    p2, _ = app._save_upload(FakeUpload(data))            # re-upload identical content
+    assert p1 == p2                                       # content-hashed path
+    assert os.stat(p2).st_mtime_ns == 111_111_111        # not rewritten -> mtime preserved
+    assert app.paperlib.cache_path(Path(p2)) == key1     # so the .md cache key still matches
+
+
 def test_paper_open_bad_path_reports_not_found():
     import sidekick.app as app
     app.paper_open(path="/no/such/file.pdf")

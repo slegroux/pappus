@@ -1673,8 +1673,9 @@ def _save_upload(pdf) -> tuple[str, str] | None:
     updir = paperlib._cache_dir() / "uploads"
     updir.mkdir(parents=True, exist_ok=True)
     dst = updir / (hashlib.sha1(data).hexdigest()[:16] + ".pdf")
-    dst.write_bytes(data)
-    return str(dst), pdf.filename
+    if not dst.exists():                         # identical content already saved →
+        dst.write_bytes(data)                    # keep it (and its mtime) so the markdown
+    return str(dst), pdf.filename                # cache, keyed by path+mtime, still hits
 
 
 @rt("/paper/open", methods=["post"])
