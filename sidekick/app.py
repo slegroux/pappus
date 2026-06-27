@@ -271,8 +271,14 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .md pre{background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:12px 14px;overflow:auto;
   font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px}
 /* Pygments-highlighted fenced code blocks in markdown (the .highlight div owns the bg) */
-.md .highlight{border-radius:10px;overflow:auto;margin:.5em 0}
+.md .highlight{border-radius:10px;overflow:auto;margin:.5em 0;position:relative}
 .md .highlight pre{background:transparent;margin:0;padding:12px 14px}
+/* hover Copy button on code snippets */
+.copy-btn{position:absolute;top:7px;right:7px;font-size:11px;line-height:1.4;
+  border:1px solid #3a3933;background:rgba(40,40,36,.75);color:#cfcabb;border-radius:6px;
+  padding:2px 9px;cursor:pointer;opacity:0;transition:opacity .12s}
+.md .highlight:hover .copy-btn,.copy-btn:focus{opacity:1}
+.copy-btn:hover{color:#fff;border-color:#6b675c}
 .md code{font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:.92em}
 .md :not(pre)>code{background:var(--chip);border-radius:5px;padding:1px 5px}
 """
@@ -509,7 +515,37 @@ STREAM_JS = """
       {left:'\\\\(', right:'\\\\)', display:false}
     ]}); } catch(e){}
   }
-  document.querySelectorAll('#stream .md').forEach(renderMath);   // already-rendered answers/notes
+
+  // Add a hover Copy button to each highlighted code block in answers/notes.
+  function copyText(text, btn){
+    function done(){ btn.textContent = 'Copied!'; setTimeout(function(){ btn.textContent = 'Copy'; }, 1200); }
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(done).catch(function(){ done(); });
+    } else {
+      var t = document.createElement('textarea'); t.value = text;
+      t.style.position='fixed'; t.style.opacity='0'; document.body.appendChild(t); t.select();
+      try { document.execCommand('copy'); } catch(e){}
+      document.body.removeChild(t); done();
+    }
+  }
+  function addCopyButtons(el){
+    if(!el) return;
+    el.querySelectorAll('.highlight').forEach(function(block){
+      if(block.__copy) return; block.__copy = true;
+      block.style.position = 'relative';
+      var btn = document.createElement('button');
+      btn.type = 'button'; btn.className = 'copy-btn'; btn.textContent = 'Copy';
+      btn.addEventListener('click', function(e){
+        e.stopPropagation();             // don't trigger a note's click-to-edit
+        var pre = block.querySelector('pre');
+        copyText(pre ? pre.innerText : block.innerText, btn);
+      });
+      block.appendChild(btn);
+    });
+  }
+  document.querySelectorAll('#stream .md').forEach(function(el){   // already-rendered answers/notes
+    renderMath(el); addCopyButtons(el);
+  });
 
   // Live AI answers: connect a vanilla EventSource for each streaming bubble.
   // 'msg' events carry the cumulative rendered markdown; 'done' closes the stream.
@@ -519,11 +555,11 @@ STREAM_JS = """
     var es = new EventSource(el.getAttribute('data-stream-url'));
     es.addEventListener('msg', function(e){
       el.innerHTML = e.data;
-      renderMath(el);                                  // typeset math as it streams in
+      renderMath(el); addCopyButtons(el);              // typeset math + copy buttons as it streams
       var s = el.closest('.stream'); if(s) s.scrollTop = s.scrollHeight;
     });
     es.addEventListener('done', function(){
-      renderMath(el);
+      renderMath(el); addCopyButtons(el);
       es.close(); el.removeAttribute('data-stream-url'); el.__streaming = false;
     });
     es.onerror = function(){ es.close(); };
