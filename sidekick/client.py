@@ -21,6 +21,7 @@ class Msg:
     content: str
     output: str = ""
     model: str | None = None   # which AI model a prompt was routed to
+    muted: bool = False        # if True, excluded from the AI's notebook context
 
 
 def _rename_in(dialogs: dict, old: str, new: str) -> None:
@@ -31,6 +32,77 @@ def _rename_in(dialogs: dict, old: str, new: str) -> None:
     if new in dialogs:
         raise ValueError(f"A dialog named '{new}' already exists.")
     dialogs[new] = dialogs.pop(old, [])
+
+
+# ---- notebook context for the AI (mirrors SolveIt's to_xml semantics) -------
+# Tunables, env-overridable like the kernel server's other settings:
+#   SIDEKICK_CTX_OUT_TRUNC  middle-out truncate each code/answer output to N chars
+#   SIDEKICK_CTX_MAX_CHARS  total context budget; oldest cells drop first when over
+def _ctx_limits(out_trunc: int | None, max_chars: int | None) -> tuple[int, int]:
+    import os
+    if out_trunc is None:
+        out_trunc = int(os.environ.get("SIDEKICK_CTX_OUT_TRUNC", 2000))
+    if max_chars is None:
+        max_chars = int(os.environ.get("SIDEKICK_CTX_MAX_CHARS", 100_000))
+    return out_trunc, max_chars
+
+
+def _trunc_middle(s: str, n: int) -> str:
+    """Middle-out truncation: keep the head and tail, elide the middle."""
+    s = s or ""
+    if n <= 0 or len(s) <= n:
+        return s
+    half = max(1, (n - 3) // 2)
+    return f"{s[:half]}\n…\n{s[-half:]}"
+
+
+def _cell_xml(m: "Msg", out_trunc: int) -> str:
+    """Render one cell as an XML-ish block for the AI to read."""
+    if m.msg_type == "note":
+        return f"<note>\n{m.content}\n</note>"
+    if m.msg_type == "code":
+        out = _trunc_middle(m.output or "", out_trunc)
+        body = f"{m.content}\n<output>\n{out}\n</output>" if out else m.content
+        return f"<code>\n{body}\n</code>"
+    # prompt: the question plus the answer it produced
+    ans = _trunc_middle(m.output or "", out_trunc)
+    body = f"{m.content}\n<answer>\n{ans}\n</answer>" if ans else m.content
+    return f"<prompt>\n{body}\n</prompt>"
+
+
+def build_context(msgs: list, upto_id: str | None = None,
+                  out_trunc: int | None = None, max_chars: int | None = None) -> str:
+    """Serialize the cells *before* `upto_id` into the AI's notebook context.
+
+    Empty and muted cells are skipped. Long outputs are middle-out truncated. If
+    the result exceeds the char budget, the oldest cells drop first (newest cells
+    are the most relevant), with a marker noting how many were omitted.
+    """
+    out_trunc, max_chars = _ctx_limits(out_trunc, max_chars)
+    cells = []
+    for m in msgs:
+        if upto_id is not None and m.id == upto_id:
+            break
+        if getattr(m, "muted", False):
+            continue
+        if not (m.content or "").strip() and not (m.output or "").strip():
+            continue
+        cells.append(_cell_xml(m, out_trunc))
+
+    kept, total = [], 0
+    for c in reversed(cells):                 # keep newest first within budget
+        if kept and total + len(c) > max_chars:
+            break
+        kept.append(c)
+        total += len(c)
+    kept.reverse()
+
+    dropped = len(cells) - len(kept)
+    body = "\n".join(kept)
+    if dropped:
+        body = (f'<omitted note="{dropped} earlier cell(s) dropped to fit the '
+                f'context budget"/>\n' + body)
+    return body
 
 
 class _InMemoryBackend:
@@ -75,6 +147,13 @@ class _InMemoryBackend:
         lst = self._dialogs.get(dialog)
         if lst is not None:
             self._dialogs[dialog] = [m for m in lst if m.id != msg_id]
+
+    def set_muted(self, dialog: str, msg_id: str, muted: bool | None = None) -> Msg | None:
+        """Toggle (or set) whether a cell is included in the AI's context."""
+        m = self._find(dialog, msg_id)
+        if m is not None:
+            m.muted = (not m.muted) if muted is None else bool(muted)
+        return m
 
     def rename(self, old: str, new: str) -> None:
         _rename_in(self._dialogs, old, new)
@@ -194,8 +273,11 @@ class HttpKernelBackend(_InMemoryBackend):
         if m.msg_type == "code":
             m.output = self._post("/exec", {"dialog": dialog, "code": m.content})["output"]
         elif m.msg_type == "prompt":
+            # Give the AI the notebook so far (cells above this one) as context,
+            # the way a real SolveIt dialog does.
+            context = build_context(self._dialogs.get(dialog, []), upto_id=msg_id)
             r = self._post("/prompt", {"dialog": dialog, "content": m.content,
-                                       "model": m.model or "claude"})
+                                       "model": m.model or "claude", "context": context})
             m.output = r["output"]
         return m
 

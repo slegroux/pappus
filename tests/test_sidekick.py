@@ -281,6 +281,86 @@ def test_live_backend_exec_update_delete_call_real_methods():
     assert fake._msgs[0].deleted
 
 
+# ---- notebook context for the AI (kernel backend) --------------------------
+from sidekick.client import build_context, Msg, HttpKernelBackend
+
+
+def _m(id, t, content, output="", muted=False):
+    return Msg(id, t, content, output, muted=muted)
+
+
+def test_build_context_includes_prior_cells_and_stops_at_upto():
+    msgs = [_m("a", "code", "x=1", "1"), _m("b", "note", "hello"), _m("c", "prompt", "q?")]
+    ctx = build_context(msgs, upto_id="c")
+    assert "x=1" in ctx and "hello" in ctx
+    assert "q?" not in ctx              # the prompt being answered is not its own context
+
+
+def test_build_context_truncates_long_output():
+    ctx = build_context([_m("a", "code", "run", "Z" * 5000)], out_trunc=100)
+    assert "…" in ctx and len(ctx) < 600
+
+
+def test_build_context_skips_muted_cells():
+    ctx = build_context([_m("a", "note", "SECRET", muted=True), _m("b", "note", "kept")])
+    assert "SECRET" not in ctx and "kept" in ctx
+
+
+def test_build_context_drops_oldest_when_over_budget():
+    msgs = [_m("old", "note", "A" * 200), _m("new", "note", "B" * 200)]
+    ctx = build_context(msgs, max_chars=250)      # only the newest cell fits
+    assert "B" * 200 in ctx and "A" * 200 not in ctx
+    assert "omitted" in ctx
+
+
+def test_set_muted_toggles_and_sets():
+    b = MockBackend()
+    m = b.add("d", "x", "code")
+    b.set_muted("d", m.id)
+    assert m.muted is True
+    b.set_muted("d", m.id)
+    assert m.muted is False
+    b.set_muted("d", m.id, muted=True)
+    assert m.muted is True
+
+
+def test_kernel_backend_exec_prompt_sends_notebook_context():
+    b = HttpKernelBackend.__new__(HttpKernelBackend)   # bypass __init__ (no network)
+    b._dialogs = {}
+    posts = []
+    b._post = lambda path, body: (posts.append((path, body)) or {"output": "ok"})
+    b.add("d", "import numpy as np", "code")
+    b._dialogs["d"][0].output = "imported"
+    p = b.add("d", "what did we import?", "prompt")
+    b.exec("d", p.id)
+    path, body = posts[-1]
+    assert path == "/prompt"
+    assert body["content"] == "what did we import?"
+    assert "import numpy as np" in body["context"]   # prior code cell is in the context
+    assert "imported" in body["context"]             # ...with its output
+
+
+def test_cell_mute_route_toggles():
+    import sidekick.app as app
+    app.STATE["dialog"] = "cell/mute"
+    b = app.STATE["backend"]
+    b.messages("cell/mute")
+    m = b.add("cell/mute", "x", "code")
+    app.cell_mute(id=m.id)
+    assert m.muted is True
+    app.cell_mute(id=m.id)
+    assert m.muted is False
+
+
+def test_run_prompt_surfaces_context_when_no_key(monkeypatch, tmp_path):
+    import server.kernel_server as ks
+    monkeypatch.setenv("SIDEKICK_SECRETS", str(tmp_path / "none.json"))
+    for env in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "ZHIPU_API_KEY"):
+        monkeypatch.delenv(env, raising=False)
+    out = ks.run_prompt("d", "q", "claude", context="<note>hi</note>")
+    assert "no API key" in out and "notebook context:" in out
+
+
 # ---- secrets store ----------------------------------------------------------
 def test_secrets_save_load_and_status(tmp_path, monkeypatch):
     from sidekick import secrets_store

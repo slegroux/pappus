@@ -9,8 +9,8 @@ API key is present) AI reply.
 Endpoints (simple JSON, no auth beyond the _solveit cookie check):
     GET  /test_route            -> "here"          (what doctor/solveit_client probe)
     GET  /health                -> {ok, dialogs}
-    POST /exec    {dialog,code}            -> {output}
-    POST /prompt  {dialog,content,model}   -> {output, model}
+    POST /exec    {dialog,code}                    -> {output}
+    POST /prompt  {dialog,content,model,context}   -> {output, model}
     POST /reset   {dialog}                 -> {ok}
 
 Run:  python -m server.kernel_server --port 5001        # laptop ('local' target)
@@ -68,33 +68,51 @@ MODEL_NAMES = {
 }
 
 
-def _call_claude(key: str, content: str) -> str:
+# Prepended to the notebook context so the model knows what it's reading.
+_SYSTEM_PREAMBLE = (
+    "You are an AI assistant embedded in a computational notebook — a SolveIt-style "
+    "dialog of code, output, notes, and prior Q&A. The notebook so far is below, in "
+    "order. Use it as context to answer the user's question; refer to variables, "
+    "results, and notes already present.\n\n"
+)
+
+
+def _system(context: str) -> str | None:
+    return (_SYSTEM_PREAMBLE + context) if context else None
+
+
+def _call_claude(key: str, content: str, context: str = "") -> str:
     import anthropic
     client = anthropic.Anthropic(api_key=key)
-    msg = client.messages.create(
-        model=MODEL_NAMES["claude"], max_tokens=600,
-        messages=[{"role": "user", "content": content}],
-    )
-    return msg.content[0].text
+    kw = {"model": MODEL_NAMES["claude"], "max_tokens": 1500,
+          "messages": [{"role": "user", "content": content}]}
+    sysmsg = _system(context)
+    if sysmsg:
+        kw["system"] = sysmsg
+    return client.messages.create(**kw).content[0].text
 
 
-def _call_openai(key: str, content: str) -> str:
+def _call_openai(key: str, content: str, context: str = "") -> str:
     from openai import OpenAI
     client = OpenAI(api_key=key)
+    msgs = [{"role": "user", "content": content}]
+    sysmsg = _system(context)
+    if sysmsg:
+        msgs.insert(0, {"role": "system", "content": sysmsg})
     r = client.chat.completions.create(
-        model=MODEL_NAMES["codex"], max_tokens=600,
-        messages=[{"role": "user", "content": content}],
+        model=MODEL_NAMES["codex"], max_tokens=1500, messages=msgs,
     )
     return r.choices[0].message.content
 
 
-def _call_zhipu(key: str, content: str) -> str:
+def _call_zhipu(key: str, content: str, context: str = "") -> str:
     from zhipuai import ZhipuAI
     client = ZhipuAI(api_key=key)
-    r = client.chat.completions.create(
-        model=MODEL_NAMES["glm"],
-        messages=[{"role": "user", "content": content}],
-    )
+    msgs = [{"role": "user", "content": content}]
+    sysmsg = _system(context)
+    if sysmsg:
+        msgs.insert(0, {"role": "system", "content": sysmsg})
+    r = client.chat.completions.create(model=MODEL_NAMES["glm"], messages=msgs)
     return r.choices[0].message.content
 
 
@@ -102,9 +120,11 @@ CALLERS = {"claude": _call_claude, "codex": _call_openai, "glm": _call_zhipu}
 SDK_MODULE = {"claude": "anthropic", "codex": "openai", "glm": "zhipuai"}
 
 
-def run_prompt(dialog: str, content: str, model: str) -> str:
+def run_prompt(dialog: str, content: str, model: str, context: str = "") -> str:
     """Route a prompt to its provider using the key from the shared secrets store
-    (Settings page or env). All three providers make real calls when keyed."""
+    (Settings page or env). `context` is the serialized notebook (cells above the
+    prompt); it's passed to the model as a system preamble. All three providers
+    make real calls when keyed."""
     import importlib
 
     try:
@@ -123,13 +143,16 @@ def run_prompt(dialog: str, content: str, model: str) -> str:
             return (f"[{label}] {sdk} SDK not installed — start the server with "
                     f"`uv run --extra llm ...` to enable live {label} calls.")
         try:                                  # real provider call
-            return caller(api_key, content)
+            return caller(api_key, content, context)
         except Exception as e:  # noqa: BLE001 — surface provider/runtime errors in the UI
             return f"[{label} error: {e}]"
 
     known = [k for k in _ns(dialog) if not k.startswith("__")]
-    ctx = f" (kernel vars: {', '.join(known)})" if known else ""
-    return f"[{label}] no API key — add one in Settings to enable live replies.{ctx}"
+    bits = [f"notebook context: {len(context)} chars"] if context else []
+    if known:
+        bits.append(f"kernel vars: {', '.join(known)}")
+    detail = f" ({'; '.join(bits)})" if bits else ""
+    return f"[{label}] no API key — add one in Settings to enable live replies.{detail}"
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -165,7 +188,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"output": out})
         if path == "/prompt":
             out = run_prompt(payload.get("dialog", "default"),
-                             payload.get("content", ""), payload.get("model", "claude"))
+                             payload.get("content", ""), payload.get("model", "claude"),
+                             payload.get("context", ""))
             return self._send(200, {"output": out, "model": payload.get("model", "claude")})
         if path == "/reset":
             KERNELS.pop(payload.get("dialog", ""), None)

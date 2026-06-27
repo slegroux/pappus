@@ -169,6 +169,10 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .cell-btn.run{background:var(--accent);color:#fff;border-color:var(--accent)}
 .cell-btn.run:hover{filter:brightness(1.05);color:#fff}
 .cell-btn.del:hover{border-color:#C0584B;color:#C0584B}
+.cell-btn.ctx.off{color:#B0784F;border-color:#E3C7AE;background:#FBF3E7}
+/* a cell muted out of the AI's context: dim it, but keep it usable */
+.row.muted .cell-edit,.row.muted .bubble,.row.muted .out{opacity:.5}
+.row.muted .tag{opacity:.6}
 .answer{margin-top:9px}
 .md>*:first-child{margin-top:0}.md>*:last-child{margin-bottom:0}
 .md p{margin:.5em 0}.md ul,.md ol{margin:.5em 0;padding-left:1.4em}
@@ -233,13 +237,19 @@ def _cell_textarea(m, code=False):
     return Textarea(m.content, **attrs)
 
 
-def _cell_actions(mid, run_label="Run", run_path="/cell/run"):
-    """Per-cell toolbar. Run posts the (possibly edited) source; Delete removes it.
-    Both swap only #stream so running a cell never reloads the whole page."""
+def _cell_actions(mid, run_label="Run", run_path="/cell/run", muted=False):
+    """Per-cell toolbar. Run posts the (possibly edited) source; Context toggles
+    whether the cell is fed to the AI; Delete removes it. All swap only #stream
+    so acting on a cell never reloads the whole page."""
     return Div(
         Button(run_label, type="button", cls="cell-btn run",
                hx_post=run_path, hx_include=f"#ta-{mid}",
                hx_vals=json.dumps({"id": mid}),
+               hx_target="#stream", hx_swap="outerHTML"),
+        Button("Muted" if muted else "In context", type="button",
+               cls="cell-btn ctx" + (" off" if muted else ""),
+               title="Toggle whether this cell is sent to the AI as notebook context",
+               hx_post="/cell/mute", hx_vals=json.dumps({"id": mid}),
                hx_target="#stream", hx_swap="outerHTML"),
         Button("Delete", type="button", cls="cell-btn del",
                hx_post="/cell/delete", hx_vals=json.dumps({"id": mid}),
@@ -251,28 +261,31 @@ def _cell_actions(mid, run_label="Run", run_path="/cell/run"):
 
 def MsgRow(m):
     mid = m.id
+    rowcls = "row muted" if m.muted else "row"
     if m.msg_type == "note":
         head = Div(Span("note", cls="tag"),
-                   _cell_actions(mid, run_label="Save", run_path="/cell/save"), cls="who")
+                   _cell_actions(mid, run_label="Save", run_path="/cell/save", muted=m.muted),
+                   cls="who")
         body = [head, _cell_textarea(m)]
         if (m.content or "").strip():            # rendered markdown preview
             body.append(Div(render_md(m.content), cls="bubble note md"))
-        return Div(*body, cls="row", id=f"cell-{mid}")
+        return Div(*body, cls=rowcls, id=f"cell-{mid}")
     if m.msg_type == "code":
         head = Div(Span("code", cls="tag"), Span(mid, cls="muted small"),
-                   _cell_actions(mid), cls="who")
+                   _cell_actions(mid, muted=m.muted), cls="who")
         body = [head, _cell_textarea(m, code=True)]
         if m.output:
             body.append(Div(m.output, cls="out"))
-        return Div(*body, cls="row", id=f"cell-{mid}")
+        return Div(*body, cls=rowcls, id=f"cell-{mid}")
     # prompt -> editable question + AI answer (labelled with the model used)
-    head = Div(Span("Ask AI", cls="tag"), _cell_actions(mid, run_label="Ask"), cls="who")
+    head = Div(Span("Ask AI", cls="tag"),
+               _cell_actions(mid, run_label="Ask", muted=m.muted), cls="who")
     body = [head, _cell_textarea(m)]
     if m.output:
         who = m.model or "SolveIt AI"
         body.append(Div(Div(Span(who, cls="tag"), cls="who"),
                         Div(render_md(m.output), cls="bubble md"), cls="answer"))
-    return Div(*body, cls="row", id=f"cell-{mid}")
+    return Div(*body, cls=rowcls, id=f"cell-{mid}")
 
 
 STREAM_JS = """
@@ -576,6 +589,15 @@ def cell_delete(id: str):
     backend = STATE["backend"]
     if hasattr(backend, "delete"):
         backend.delete(STATE["dialog"], id)
+    return Stream()
+
+
+@rt("/cell/mute", methods=["post"])
+def cell_mute(id: str):
+    """Toggle whether this cell is included in the AI's notebook context."""
+    backend = STATE["backend"]
+    if hasattr(backend, "set_muted"):
+        backend.set_muted(STATE["dialog"], id)
     return Stream()
 
 

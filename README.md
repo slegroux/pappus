@@ -137,6 +137,24 @@ Every message is a live cell, like a notebook:
 Edits and runs swap only the conversation (via htmx), so re-running a cell never
 reloads the whole page.
 
+#### The AI sees the notebook
+
+Like a real SolveIt dialog, an *Ask AI* cell isn't answered in isolation — the
+**cells above it** (notes, code, code output, prior Q&A) are sent as context, so
+you can ask "what did that return?" or "why is this slow?" and it knows.
+
+To keep within the model's token window, context is managed two ways:
+
+- **Truncation (automatic)** — long outputs are middle-out truncated, and if the
+  whole notebook exceeds a budget the **oldest** cells drop first (newest are most
+  relevant). Tune with `SIDEKICK_CTX_OUT_TRUNC` and `SIDEKICK_CTX_MAX_CHARS`.
+- **Mute (manual)** — each cell has an **In context / Muted** toggle. Muting drops
+  it from what the AI sees (it dims, but still runs) — the lever for steering
+  context and staying under the limit.
+
+This applies to the bundled **kernel** backend. On a real **solveit** target,
+SolveIt's server assembles the dialog context itself.
+
 ## Pain points this targets
 
 - **Switching local ↔ H100** — one dropdown; the tunnel keeps the URL constant.
