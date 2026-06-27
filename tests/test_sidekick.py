@@ -248,6 +248,31 @@ def test_undo_restores_deleted_cell_at_its_position():
     assert [m.id for m in b.messages("u/x")] == [a.id, mid.id, z.id]   # back in the middle
 
 
+def test_undo_lands_after_anchor_even_after_reorder():
+    # Undo must restore relative to the cell it followed, not a stale absolute index.
+    b = MockBackend()
+    a = b.add("u/r", "a", "code")
+    mid = b.add("u/r", "mid", "code")
+    z = b.add("u/r", "z", "code")
+    b.delete("u/r", mid.id)                       # [a, z]; mid had followed a
+    b.reorder("u/r", [z.id, a.id])                # [z, a] — old index 1 now means something else
+    b.undo("u/r")
+    assert [m.id for m in b.messages("u/r")] == [z.id, a.id, mid.id]   # after its anchor a
+
+
+def test_undo_appends_when_anchor_also_deleted():
+    b = MockBackend()
+    a = b.add("u/g", "a", "code")
+    mid = b.add("u/g", "mid", "code")
+    b.delete("u/g", mid.id)                       # mid anchored on a
+    b.delete("u/g", a.id)                         # anchor gone -> []
+    b.undo("u/g")                                 # undo the mid delete (LIFO: a first)
+    # LIFO: first undo restores a (most recent delete)
+    assert [m.id for m in b.messages("u/g")] == [a.id]
+    b.undo("u/g")                                 # now mid; its anchor a exists again
+    assert [m.id for m in b.messages("u/g")] == [a.id, mid.id]
+
+
 def test_undo_is_lifo_and_empty_is_noop():
     b = MockBackend()
     x = b.add("u/y", "x", "code")

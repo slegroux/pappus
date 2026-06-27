@@ -180,8 +180,9 @@ class _InMemoryBackend:
         # dialogs are loaded from / saved to disk under that key.
         self._store_key = store_key
         self._dialogs: dict[str, list[Msg]] = _load_dialogs(store_key) if store_key else {}
-        # Deleted cells, newest last: (dialog, index, msg) — popped by undo() ('z').
-        self._undo: list[tuple[str, int, Msg]] = []
+        # Deleted cells, newest last: (dialog, prev_cell_id_or_None, msg) — the
+        # anchor is the id of the cell above, so undo() ('z') re-inserts correctly.
+        self._undo: list[tuple[str, str | None, Msg]] = []
 
     def _save(self) -> None:
         if getattr(self, "_store_key", None):
@@ -245,19 +246,30 @@ class _InMemoryBackend:
         if lst is not None:
             idx = next((i for i, m in enumerate(lst) if m.id == msg_id), None)
             if idx is not None:
-                self._undo.append((dialog, idx, lst[idx]))   # remember for undo() / 'z'
+                # Anchor on the *id* of the cell above (None if it was first), not an
+                # absolute index — so undo lands correctly even after intervening
+                # reorders/inserts/deletes.
+                prev_id = lst[idx - 1].id if idx > 0 else None
+                self._undo.append((dialog, prev_id, lst[idx]))
                 del self._undo[:-50]                          # cap the undo history
             self._dialogs[dialog] = [m for m in lst if m.id != msg_id]
             self._save()
 
     def undo(self, dialog: str) -> Msg | None:
-        """Restore the most recently deleted cell in `dialog` (Jupyter's 'z')."""
+        """Restore the most recently deleted cell (Jupyter's 'z'), right after the
+        cell it used to follow — or at the front if it was first, or at the end if
+        that anchor has since been deleted too."""
         for i in range(len(self._undo) - 1, -1, -1):
-            d, idx, m = self._undo[i]
+            d, prev_id, m = self._undo[i]
             if d == dialog:
                 del self._undo[i]
                 lst = self._dialogs.setdefault(dialog, [])
-                lst.insert(min(idx, len(lst)), m)
+                if prev_id is None:
+                    pos = 0
+                else:
+                    j = next((k for k, x in enumerate(lst) if x.id == prev_id), None)
+                    pos = j + 1 if j is not None else len(lst)
+                lst.insert(pos, m)
                 self._save()
                 return m
         return None
