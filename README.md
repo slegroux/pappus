@@ -223,7 +223,7 @@ its dialogs on the SolveIt server.)
 
 ## Reading papers
 
-Open a PDF with the **📄** button (paste a local path) and it appears in a
+Open a PDF with the **📄** button (it opens a file picker) and it appears in a
 left reading column. Select any passage → an **"Ask AI about this"** button
 drops the quoted paragraph into the composer (Ask AI mode), so your question
 carries the paragraph as context — then run code, plot, and take notes beside it.

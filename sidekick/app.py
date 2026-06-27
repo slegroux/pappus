@@ -146,13 +146,10 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
 .paper-body img{max-width:100%}
 .ask-sel-btn{position:absolute;z-index:60;background:var(--accent);color:#fff;border:none;border-radius:8px;
   padding:5px 11px;font-size:12px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.20);display:none}
-.paper-form{display:flex;flex-direction:column;gap:6px;position:absolute;right:0;top:28px;z-index:20;
-  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;min-width:240px;
-  box-shadow:0 6px 18px rgba(0,0,0,.10)}
-.paper-path{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;font-size:13px;outline:none}
-.paper-path:focus{border-color:var(--accent)}
-.paper-file-label{font-size:12px;color:var(--muted);font-weight:600}
-.paper-file{font-size:12px;cursor:pointer}
+/* the 📄 topbar icon IS the file picker: a label wrapping a hidden file input */
+.paper-form{display:inline-flex;align-items:center;margin:0}
+.paper-pick{cursor:pointer}
+.paper-file{display:none}
 /* table of contents (right column, toggleable, full-height so it stays in view) */
 .toc{display:none;background:var(--sidebar);border-left:1px solid var(--line);
   padding:16px 14px;overflow:auto}
@@ -1196,16 +1193,12 @@ def Page():
                 Div(Span("☰", cls="gear tgl toc-toggle", id="tgl-toc",
                          title="Show/hide the table of contents",
                          onclick="toggleTOC()"),
-                    Details(Summary("📄", cls="gear", title="Open a paper (PDF)"),
-                            Form(Label("Choose a PDF…", cls="paper-file-label"),
-                                 Input(type="file", name="pdf", accept="application/pdf,.pdf",
-                                       cls="paper-file", onchange="this.form.submit()"),
-                                 Input(name="path", placeholder="…or paste a file path",
-                                       cls="paper-path"),
-                                 Button("Open path", cls="cell-btn run", type="submit"),
-                                 method="post", action="/paper/open",
-                                 enctype="multipart/form-data", cls="paper-form"),
-                            cls="export"),
+                    Form(Label("📄",
+                              Input(type="file", name="pdf", accept="application/pdf,.pdf",
+                                    cls="paper-file", onchange="this.form.submit()"),
+                              cls="gear paper-pick", title="Open a paper (PDF) — choose a file"),
+                         method="post", action="/paper/open",
+                         enctype="multipart/form-data", cls="paper-form"),
                     Details(Summary("⬇", cls="gear", title="Export this dialog"),
                             Div(A("Jupyter notebook (.ipynb)", href="/export/ipynb"),
                                 A("Markdown (.md)", href="/export/md"),
