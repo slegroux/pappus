@@ -143,6 +143,13 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
 .paper-converting{margin-top:14px;color:var(--muted);font-size:13px;font-style:italic}
 .paper-body{margin-top:10px;font-size:13.5px;line-height:1.6}
 .paper-body img{max-width:100%}
+/* collapsed paper: hide the text, keep the header (incl. Next section) in a
+   compact strip so the notebook reclaims the width. */
+.paper-toggle{cursor:pointer;transition:transform .12s}
+.app.paper-collapsed .paper-toggle{transform:rotate(-90deg)}
+.app.paper-collapsed .paper-body,.app.paper-collapsed .paper-badge{display:none}
+.app.paper-collapsed .paper{flex:0 0 auto}
+.app.paper-collapsed .paper-name{max-width:150px}
 .ask-sel-btn{position:absolute;z-index:60;background:var(--accent);color:#fff;border:none;border-radius:8px;
   padding:5px 11px;font-size:12px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.20);display:none}
 /* the 📄 topbar icon IS the file picker: a label wrapping a hidden file input */
@@ -1128,6 +1135,7 @@ window.toggleCol = function(cls, key){
   }
   restore('sidekick_toc', 'toc-open', true);          // TOC default open
   restore('sidekick_noside', 'no-side', false);       // dialogs default shown
+  restore('sidekick_paperhidden', 'paper-collapsed', false);  // paper text default shown
   // The notebook is the app's center, so it's always shown — no toggle for it.
   app.classList.remove('no-content');                 // clear any stale stuck state
   window.syncToggles();
@@ -1164,6 +1172,9 @@ def PaperPanel():
             Button("§", cls="cell-btn", type="submit", name="mode", value="section",
                    title="Import the whole paper at once — one note per section"),
             method="post", action="/paper/import", cls="paper-import"))
+        # collapse just the paper text — the header (incl. Next section) stays put
+        actions.append(Span("▾", cls="gear paper-toggle", title="Show/hide the paper text",
+                            onclick="toggleCol('paper-collapsed','sidekick_paperhidden')"))
     actions.append(A("✕", href="/paper/close", cls="gear", title="Close paper"))
     head = Div(Span(p["name"], cls="paper-name"), Div(*actions, cls="paper-actions"),
                cls="paper-head")
@@ -1173,7 +1184,8 @@ def PaperPanel():
                    hx_get="/paper/status", hx_trigger="every 2s",
                    hx_target="#paperPanel", hx_swap="outerHTML")
         return Div(head, body, cls="paper", id="paperPanel")
-    badge = Span(f"via {p.get('engine', '?')} · select text to ask the AI", cls="muted small")
+    badge = Span(f"via {p.get('engine', '?')} · select text to ask the AI",
+                 cls="muted small paper-badge")
     body = Div(render_md(p.get("md", "")), cls="paper-body md", id="paperBody")
     return Div(head, badge, body, Script(PAPER_JS), cls="paper", id="paperPanel")
 
