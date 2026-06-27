@@ -9,6 +9,7 @@ dependencies = [
     "uvicorn",
     "pyyaml",
     "mistune",     # server-side markdown (notes + AI answers); works offline, no CDN
+    "pygments",    # server-side code syntax highlighting (offline, no CDN)
     # LLM provider SDKs are core to the app (Ask AI), so they're always installed.
     "anthropic",   # claude
     "openai",      # codex

@@ -18,7 +18,7 @@ default: local
 
 # Models the "Ask AI" composer can route a prompt to. `id` is what we pass to
 # the SolveIt server; `label` is what the UI shows. Reorder/extend freely.
-default_model: claude
+default_model: codex   # OpenAI for now (avoids the Anthropic API issue)
 models:
   - id: claude        # Anthropic API (uses ANTHROPIC_API_KEY / prepaid credits)
     label: Claude

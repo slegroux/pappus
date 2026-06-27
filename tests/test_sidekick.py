@@ -53,7 +53,7 @@ def test_token_from_env(monkeypatch):
 def test_models_and_default():
     ids = [m["id"] for m in targets.list_models()]
     assert ids == ["claude", "claude-cli", "glm", "codex"]
-    assert targets.default_model() == "claude"
+    assert targets.default_model() == "codex"
 
 
 def test_unknown_target_raises():
@@ -510,6 +510,147 @@ def test_run_prompt_surfaces_context_when_no_key(monkeypatch, tmp_path):
         monkeypatch.delenv(env, raising=False)
     out = ks.run_prompt("d", "q", "claude", context="<note>hi</note>")
     assert "no API key" in out and "notebook context:" in out
+
+
+# ---- rich output (plots / images / dataframes) -----------------------------
+def test_run_code_returns_text_and_rich_tuple():
+    import server.kernel_server as ks
+    text, rich = ks.run_code("rich/plain", "1 + 1")
+    assert text == "2" and rich == []
+
+
+def test_run_code_captures_repr_html_as_rich():
+    import server.kernel_server as ks
+    code = ("class T:\n"
+            "    def _repr_html_(self): return '<b>rich!</b>'\n"
+            "T()")
+    text, rich = ks.run_code("rich/html", code)
+    assert text == ""                                   # rich repr replaces the text repr
+    assert any(r["type"] == "text/html" and "rich!" in r["data"] for r in rich)
+
+
+def test_capture_figs_empty_without_matplotlib():
+    import server.kernel_server as ks
+    assert ks._capture_figs() == []                     # no matplotlib imported -> no cost
+
+
+def test_run_code_trailing_semicolon_suppresses_value():
+    import server.kernel_server as ks
+    text, rich = ks.run_code("rich/semi", "5 + 5;")
+    assert text == "" and rich == []                    # Jupyter-style suppression
+
+
+def test_kernel_backend_exec_stores_rich_output():
+    b = HttpKernelBackend.__new__(HttpKernelBackend)
+    b._dialogs = {}
+    b._post = lambda path, body: {"output": "", "rich": [{"type": "image/png", "data": "AAAA"}]}
+    m = b.add("d", "plot()", "code")
+    b.exec("d", m.id)
+    assert m.rich and m.rich[0]["type"] == "image/png"
+
+
+def test_rich_view_renders_image_and_html():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    img = to_xml(app._rich_view({"type": "image/png", "data": "XYZ"}))
+    assert "<img" in img and "data:image/png;base64,XYZ" in img
+    html = to_xml(app._rich_view({"type": "text/html", "data": "<b>hi</b>"}))
+    assert "<b>hi</b>" in html
+
+
+# ---- token counting + pinned cells -----------------------------------------
+def test_est_tokens_rough():
+    from sidekick.client import est_tokens
+    assert est_tokens("") == 0
+    assert est_tokens("a" * 40) == 10                   # ~4 chars/token
+
+
+def test_build_context_keeps_pinned_over_budget():
+    msgs = [_m("old", "note", "A" * 200), _m("new", "note", "B" * 200)]
+    msgs[0].pinned = True                               # pin the oldest, over-budget cell
+    ctx = build_context(msgs, max_chars=250)
+    assert "A" * 200 in ctx                             # pinned survives trimming
+    assert "B" * 200 not in ctx                         # the newer, unpinned cell is dropped
+
+
+def test_set_pinned_toggles():
+    b = MockBackend()
+    m = b.add("d", "x", "code")
+    b.set_pinned("d", m.id)
+    assert m.pinned is True
+    b.set_pinned("d", m.id)
+    assert m.pinned is False
+
+
+def test_cell_pin_route_toggles():
+    import sidekick.app as app
+    app.STATE["dialog"] = "cell/pin"
+    b = app.STATE["backend"]
+    b.messages("cell/pin")
+    m = b.add("cell/pin", "x", "code")
+    app.cell_pin(id=m.id)
+    assert m.pinned is True
+    app.cell_pin(id=m.id)
+    assert m.pinned is False
+
+
+# ---- render-by-default / click-to-edit -------------------------------------
+def test_rendered_cells_are_not_raw_textareas():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    note = to_xml(app.MsgRow(Msg("n", "note", "# Title")))
+    code = to_xml(app.MsgRow(Msg("c", "code", "x = 1")))
+    assert "<textarea" not in note and "<h1>" in note          # markdown rendered, not raw
+    assert "<textarea" not in code and "highlight" in code      # pygments-highlighted, not raw
+
+
+def test_cell_edit_route_returns_editor_with_cancel():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    app.STATE["dialog"] = "edit/route"
+    b = app.STATE["backend"]
+    b.messages("edit/route")
+    m = b.add("edit/route", "x = 1", "code")
+    html = to_xml(app.cell_edit(id=m.id))
+    assert "<textarea" in html and "Cancel" in html
+
+
+def test_cell_view_route_returns_rendered_cell():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    app.STATE["dialog"] = "view/route"
+    b = app.STATE["backend"]
+    b.messages("view/route")
+    m = b.add("view/route", "# hi", "note")
+    html = to_xml(app.cell_view(id=m.id))
+    assert "<textarea" not in html and "<h1>" in html
+
+
+def test_cell_exec_route_reruns_stored_content():
+    import sidekick.app as app
+    app.STATE["dialog"] = "exec/route"
+    b = app.STATE["backend"]
+    b.messages("exec/route")
+    m = b.add("exec/route", "2+2", "code")
+    app.cell_exec(id=m.id)
+    assert b.messages("exec/route")[-1].output                 # re-ran stored source
+
+
+def test_page_includes_htmx_so_cell_buttons_work():
+    # Regression guard: we return a full Html document, so FastHTML does NOT
+    # auto-inject its headers — the page must carry htmx itself, or every
+    # per-cell hx-post button (Run/Mute/Pin/Delete) renders but does nothing.
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    assert "htmx" in to_xml(app.Page()).lower()
+    assert "htmx" in to_xml(app.SettingsPage()).lower()
+
+
+def test_ctx_meter_reports_token_estimate():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    html = to_xml(app._ctx_meter([_m("a", "note", "hello world"), _m("b", "code", "x=1", "1")]))
+    assert "AI context" in html and "tokens" in html and "cells in" in html
 
 
 # ---- secrets store ----------------------------------------------------------

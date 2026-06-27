@@ -22,6 +22,8 @@ class Msg:
     output: str = ""
     model: str | None = None   # which AI model a prompt was routed to
     muted: bool = False        # if True, excluded from the AI's notebook context
+    pinned: bool = False       # if True, always kept in context (survives budget trimming)
+    rich: list = field(default_factory=list)   # rich outputs: [{"type": mime, "data": ...}]
 
 
 def _rename_in(dialogs: dict, old: str, new: str) -> None:
@@ -70,16 +72,22 @@ def _cell_xml(m: "Msg", out_trunc: int) -> str:
     return f"<prompt>\n{body}\n</prompt>"
 
 
+def est_tokens(text: str) -> int:
+    """Rough token estimate (~4 chars/token) — provider-agnostic, no tokenizer dep."""
+    return (len(text or "") + 3) // 4
+
+
 def build_context(msgs: list, upto_id: str | None = None,
                   out_trunc: int | None = None, max_chars: int | None = None) -> str:
     """Serialize the cells *before* `upto_id` into the AI's notebook context.
 
-    Empty and muted cells are skipped. Long outputs are middle-out truncated. If
-    the result exceeds the char budget, the oldest cells drop first (newest cells
-    are the most relevant), with a marker noting how many were omitted.
+    Empty and muted cells are skipped. Long outputs are middle-out truncated.
+    Pinned cells are always kept; if the rest exceeds the char budget, the oldest
+    non-pinned cells drop first (newest are most relevant), with a marker noting
+    how many were omitted.
     """
     out_trunc, max_chars = _ctx_limits(out_trunc, max_chars)
-    cells = []
+    cells = []                          # [(pinned, xml), ...] in notebook order
     for m in msgs:
         if upto_id is not None and m.id == upto_id:
             break
@@ -87,16 +95,21 @@ def build_context(msgs: list, upto_id: str | None = None,
             continue
         if not (m.content or "").strip() and not (m.output or "").strip():
             continue
-        cells.append(_cell_xml(m, out_trunc))
+        cells.append((getattr(m, "pinned", False), _cell_xml(m, out_trunc)))
 
-    kept, total = [], 0
-    for c in reversed(cells):                 # keep newest first within budget
-        if kept and total + len(c) > max_chars:
-            break
-        kept.append(c)
-        total += len(c)
-    kept.reverse()
+    keep = [False] * len(cells)
+    budget = max_chars
+    for i, (pinned, c) in enumerate(cells):       # pinned cells always survive
+        if pinned:
+            keep[i] = True
+            budget -= len(c)
+    for i in range(len(cells) - 1, -1, -1):       # fill remaining budget, newest first
+        pinned, c = cells[i]
+        if not pinned and len(c) <= budget:
+            keep[i] = True
+            budget -= len(c)
 
+    kept = [c for i, (_, c) in enumerate(cells) if keep[i]]
     dropped = len(cells) - len(kept)
     body = "\n".join(kept)
     if dropped:
@@ -136,11 +149,12 @@ class _InMemoryBackend:
 
     def update(self, dialog: str, msg_id: str, content: str) -> Msg | None:
         """Edit a cell's source in place. Stale output is cleared so the UI never
-        shows an answer that no longer matches the (now-edited) input."""
+        shows an answer (or plot) that no longer matches the (now-edited) input."""
         m = self._find(dialog, msg_id)
         if m is not None:
             m.content = content
             m.output = ""
+            m.rich = []
         return m
 
     def delete(self, dialog: str, msg_id: str) -> None:
@@ -153,6 +167,13 @@ class _InMemoryBackend:
         m = self._find(dialog, msg_id)
         if m is not None:
             m.muted = (not m.muted) if muted is None else bool(muted)
+        return m
+
+    def set_pinned(self, dialog: str, msg_id: str, pinned: bool | None = None) -> Msg | None:
+        """Toggle (or set) whether a cell is pinned into context (survives trimming)."""
+        m = self._find(dialog, msg_id)
+        if m is not None:
+            m.pinned = (not m.pinned) if pinned is None else bool(pinned)
         return m
 
     def rename(self, old: str, new: str) -> None:
@@ -271,7 +292,9 @@ class HttpKernelBackend(_InMemoryBackend):
         if m is None:
             raise KeyError(msg_id)
         if m.msg_type == "code":
-            m.output = self._post("/exec", {"dialog": dialog, "code": m.content})["output"]
+            r = self._post("/exec", {"dialog": dialog, "code": m.content})
+            m.output = r.get("output", "")
+            m.rich = r.get("rich", [])      # plots/images/dataframes from the kernel
         elif m.msg_type == "prompt":
             # Give the AI the notebook so far (cells above this one) as context,
             # the way a real SolveIt dialog does.

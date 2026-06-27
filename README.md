@@ -126,13 +126,14 @@ live server; amber = running on the mock (with a banner telling you why).
 
 Every message is a live cell, like a notebook:
 
-- **Edit anything** — click into any cell and change its source in place. Cells
-  auto-grow to fit their content.
-- **Run / re-run** — hover a cell for its **Run** and **Delete** controls, or
-  press **Cmd/Ctrl+Enter** inside it. Code re-executes in the persistent kernel
-  namespace; an *Ask AI* cell re-asks with the edited prompt.
-- **Notes render as markdown** — written server-side (works offline, no CDN), and
-  AI answers render as markdown too.
+- **Rendered by default, click to edit** — notes show as **markdown**, code as
+  **syntax-highlighted** Python, prompts show their question + the AI's markdown
+  answer. Click any cell to drop into a raw editor; **Save/Run/Ask** commits,
+  **Cancel** discards. All rendering and highlighting is server-side (mistune +
+  Pygments) so it works offline, no CDN.
+- **Run / re-run** — hover a cell for its **Run / In context / Pin / Delete**
+  controls, or press **Cmd/Ctrl+Enter** while editing. Code re-executes in the
+  persistent kernel namespace; an *Ask AI* cell re-asks with the edited prompt.
 
 Edits and runs swap only the conversation (via htmx), so re-running a cell never
 reloads the whole page.
@@ -152,8 +153,20 @@ To keep within the model's token window, context is managed two ways:
   it from what the AI sees (it dims, but still runs) — the lever for steering
   context and staying under the limit.
 
+Each cell shows an estimated **token count**, and a live meter at the foot of the
+dialog reads out the total context (`AI context ≈ N tokens · M/K cells in`) — so
+you can see yourself approaching the limit. **Pin** a cell (toggle next to Mute)
+to keep it in context even when older cells are trimmed.
+
 This applies to the bundled **kernel** backend. On a real **solveit** target,
 SolveIt's server assembles the dialog context itself.
+
+#### Rich output
+
+Code cells render **plots and rich values inline**, not just text: matplotlib
+figures are captured as images, and anything implementing the notebook display
+protocol (`_repr_html_` for DataFrames, `_repr_png_` for images) renders too. A
+trailing `;` suppresses the last expression's value, Jupyter-style.
 
 ## Pain points this targets
 
