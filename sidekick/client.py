@@ -226,6 +226,20 @@ class _InMemoryBackend:
             self._save()
         return m
 
+    def set_type(self, dialog: str, msg_id: str, msg_type: str) -> Msg | None:
+        """Convert a cell to another type (code/note/prompt). The source text is
+        kept — a prompt's question becomes the new source — and stale output is
+        cleared, since a code result or AI answer no longer applies."""
+        if msg_type not in ("code", "note", "prompt"):
+            return None
+        m = self._find(dialog, msg_id)
+        if m is not None and m.msg_type != msg_type:
+            m.msg_type = msg_type
+            m.output = ""
+            m.rich = []
+            self._save()
+        return m
+
     def delete(self, dialog: str, msg_id: str) -> None:
         lst = self._dialogs.get(dialog)
         if lst is not None:

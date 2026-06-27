@@ -206,6 +206,36 @@ def test_kernel_prompt_without_model_routes_to_subscription():
     assert sent["body"]["model"] == "claude-cli"          # not "claude" (the API path)
 
 
+def test_set_type_converts_and_clears_stale_output():
+    b = MockBackend()
+    m = b.add("t/x", "df.head()", "code")
+    m.output = "old result"
+    b.set_type("t/x", m.id, "note")
+    got = b.messages("t/x")[0]
+    assert got.msg_type == "note"
+    assert got.content == "df.head()"     # source text kept
+    assert got.output == "" and got.rich == []   # stale output dropped
+
+
+def test_set_type_rejects_unknown_type():
+    b = MockBackend()
+    m = b.add("t/y", "x", "code")
+    b.set_type("t/y", m.id, "bogus")
+    assert b.messages("t/y")[0].msg_type == "code"   # unchanged
+
+
+def test_cell_type_route_converts_in_place():
+    import sidekick.app as app
+    app.STATE["dialog"] = "t/route"
+    bk = app.STATE["backend"]
+    bk.messages("t/route")
+    m = bk.add("t/route", "2 + 2", "code")
+    app.cell_type(id=m.id, msg_type="prompt")
+    cells = bk.messages("t/route")
+    assert len(cells) == 1                 # same cell, not a new one
+    assert cells[0].id == m.id and cells[0].msg_type == "prompt"
+
+
 def test_undo_restores_deleted_cell_at_its_position():
     b = MockBackend()
     a = b.add("u/x", "a = 1", "code")

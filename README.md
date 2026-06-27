@@ -172,14 +172,17 @@ The notebook has a **command mode** and an **edit mode**, like Jupyter:
 | `Esc` | leave edit mode back to command mode (no edits lost) |
 | `↑` / `↓` or `k` / `j` | select the previous / next cell |
 | `a` / `b` | insert a cell above / below |
+| `y` / `m` / `i` | convert the cell to **code** / **note** (markdown) / **Ask AI** |
 | `dd` | delete the selected cell |
 | `z` | undo the last delete |
 | `Cmd`/`Ctrl`/`Shift`+`Enter` | run the cell |
 
 The **selected** cell shows a green bar on its left. Command-mode keys only fire
-when no editor or input is focused, so they never interrupt typing. A richer ＋
-menu (on each cell's hover toolbar) also inserts **Code / Note / Ask AI** above
-or below.
+when no editor or input is focused, so they never interrupt typing. Each cell's
+hover toolbar also has a **⇆ menu** to change its type and a **＋ menu** to
+insert **Code / Note / Ask AI** above or below — so the shortcuts are
+discoverable. Converting a cell keeps its source text (a prompt's question
+becomes the new source) and clears any stale output.
 
 #### The AI sees the notebook
 

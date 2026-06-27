@@ -314,6 +314,10 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .ins-item{text-align:left;font-size:12px;border:1px solid var(--line);background:#fff;border-radius:7px;
   padding:4px 9px;cursor:pointer;color:var(--ink)}
 .ins-item:hover{border-color:var(--accent);background:#FBF3E7}
+.type-menu{position:absolute;right:0;top:26px;z-index:30;display:flex;flex-direction:column;gap:3px;
+  min-width:96px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px;
+  box-shadow:0 6px 18px rgba(0,0,0,.12)}
+.ins-item.cur{border-color:var(--accent);background:#FBF3E7;font-weight:600}   /* the current type */
 /* the cell a/b will target (last hovered) */
 #stream .row:hover{box-shadow:inset 2px 0 0 var(--line)}
 /* the selected cell in Jupyter-style command mode (Esc / j / k) */
@@ -442,10 +446,28 @@ def _insert_menu(mid):
         cls="ins")
 
 
+def _type_menu(m):
+    """⇆ dropdown: convert this cell to Code / Note / Ask AI (y / m / i shortcuts)."""
+    mid = m.id
+    def item(t, label):
+        cur = (t == m.msg_type)
+        return Button(label, type="button", cls="ins-item" + (" cur" if cur else ""),
+                      hx_post="/cell/type",
+                      hx_vals=json.dumps({"id": mid, "msg_type": t}),
+                      hx_target="#stream", hx_swap="outerHTML")
+    return Details(
+        Summary("⇆", cls="cell-btn", title="Change cell type  ·  y = Code, m = Note, i = Ask AI"),
+        Div(Span("Cell type", cls="ins-col-head"),
+            item("code", "Code"), item("note", "Note"), item("prompt", "Ask AI"),
+            cls="type-menu"),
+        cls="ins")
+
+
 def _ctx_buttons(m):
-    """Insert / Mute / Pin / Delete — available in both rendered and edit modes."""
+    """Type / Insert / Mute / Pin / Delete — available in both rendered and edit modes."""
     mid = m.id
     return [
+        _type_menu(m),
         _insert_menu(mid),
         Button("Muted" if m.muted else "In context", type="button",
                cls="cell-btn ctx" + (" off" if m.muted else ""),
@@ -744,6 +766,12 @@ STREAM_JS = """
     var s = document.getElementById('stream');
     if(s) window.__streamScroll = s.scrollTop;
   });
+  // Re-apply the command-mode selection highlight once htmx finishes a swap.
+  // (The inline reapply runs too early on script-bearing swaps, so the class
+  // gets dropped; afterSettle reliably lands after the new DOM is in place.)
+  document.addEventListener('htmx:afterSettle', function(){
+    if(window.__selCell && window.__selectCell) window.__selectCell(window.__selCell, false);
+  });
   if(!hasFieldSizing){
     document.addEventListener('input', function(e){
       if(e.target.classList && e.target.classList.contains('cell-edit')) autosize(e.target);
@@ -819,6 +847,12 @@ STREAM_JS = """
     } else if(e.key === 'a' || e.key === 'b'){
       e.preventDefault();
       _insert(e.key === 'a' ? 'above' : 'below');
+    } else if(e.key === 'y' || e.key === 'm' || e.key === 'i'){   // convert cell type
+      if(idx < 0 || !window.htmx) return;
+      e.preventDefault();
+      var t = e.key === 'y' ? 'code' : (e.key === 'm' ? 'note' : 'prompt');
+      htmx.ajax('POST', '/cell/type', {target: '#stream', swap: 'outerHTML',
+        values: {id: ids[idx], msg_type: t}});   // id is unchanged -> selection persists
     } else if(e.key === 'd'){                       // dd within 600ms = delete
       var now = Date.now();
       if(window.__lastD && now - window.__lastD < 600){
@@ -1488,6 +1522,15 @@ def cell_delete(id: str):
     backend = STATE["backend"]
     if hasattr(backend, "delete"):
         backend.delete(STATE["dialog"], id)
+    return Stream()
+
+
+@rt("/cell/type", methods=["post"])
+def cell_type(id: str, msg_type: str = "code"):
+    """Convert a cell to another type in place (y=code, m=note, i=prompt)."""
+    backend = STATE["backend"]
+    if hasattr(backend, "set_type"):
+        backend.set_type(STATE["dialog"], id, msg_type)
     return Stream()
 
 
