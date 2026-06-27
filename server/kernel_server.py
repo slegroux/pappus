@@ -6,7 +6,11 @@ backend: it executes Python code in a persistent per-dialog namespace and return
 output, just like a notebook kernel. Prompts get a routed (stubbed, or real if an
 API key is present) AI reply.
 
-Endpoints (simple JSON, no auth beyond the _solveit cookie check):
+Auth: on loopback with no --token the server is open (local dev). Off-loopback
+it refuses to start without --token, and then every request must carry a matching
+`_solveit` cookie — because /exec runs arbitrary code.
+
+Endpoints (simple JSON):
     GET  /test_route            -> "here"          (what doctor/solveit_client probe)
     GET  /health                -> {ok, dialogs}
     POST /exec    {dialog,code}                    -> {output, rich}
@@ -21,13 +25,40 @@ from __future__ import annotations
 
 import argparse
 import ast
+import hmac
 import io
 import json
 import os
 import contextlib
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from sidekick import claude_cli   # CLI (subscription) Claude + shared notebook preamble
+
+# Request auth. main() sets _AUTH_TOKEN: when it's not None, every request must
+# carry a matching `_solveit` cookie (this is what makes binding off-loopback
+# safe — /exec runs arbitrary code). On loopback with no token it stays open.
+_AUTH_TOKEN: str | None = None
+
+
+def _is_loopback(host: str) -> bool:
+    return host in ("127.0.0.1", "localhost", "::1", "")
+
+
+def _token_from_cookie(cookie_header: str) -> str:
+    c = SimpleCookie()
+    try:
+        c.load(cookie_header or "")
+    except Exception:  # noqa: BLE001 — a malformed cookie is just no token
+        return ""
+    m = c.get("_solveit")
+    return m.value if m else ""
+
+
+def _check_auth(expected: str | None, cookie_header: str) -> bool:
+    if expected is None:
+        return True                                  # open (loopback dev, no token)
+    return hmac.compare_digest(_token_from_cookie(cookie_header), expected)
 
 # Per-dialog execution namespaces — this is the "kernel" state.
 KERNELS: dict[str, dict] = {}
@@ -229,7 +260,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _authorized(self) -> bool:
+        return _check_auth(_AUTH_TOKEN, self.headers.get("Cookie", ""))
+
     def do_GET(self):
+        if not self._authorized():
+            return self._send(403, {"error": "unauthorized — bad or missing _solveit token"})
         if self.path.rstrip("/") == "/test_route":
             return self._send(200, "here", ctype="text/plain")
         if self.path.rstrip("/") == "/health":
@@ -237,6 +273,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self._authorized():
+            return self._send(403, {"error": "unauthorized — bad or missing _solveit token"})
         n = int(self.headers.get("Content-Length", 0))
         try:
             payload = json.loads(self.rfile.read(n) or b"{}")
@@ -270,12 +308,26 @@ def main():
     # Headless-safe plotting: a server has no display, so default matplotlib to
     # the Agg backend. User code can still save figures with plt.savefig(...).
     os.environ.setdefault("MPLBACKEND", "Agg")
+    global _AUTH_TOKEN
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=5001)
+    ap.add_argument("--token", default=os.environ.get("SIDEKICK_KERNEL_TOKEN"),
+                    help="require this _solveit cookie on every request "
+                         "(mandatory when binding off-loopback)")
     args = ap.parse_args()
+
+    if args.token:
+        _AUTH_TOKEN = args.token
+    elif not _is_loopback(args.host):
+        # /exec runs arbitrary code; refuse to expose it unauthenticated.
+        ap.error(f"refusing to bind {args.host} without --token — that would expose "
+                 f"unauthenticated code execution. Pass --token (or set "
+                 f"SIDEKICK_KERNEL_TOKEN), or bind 127.0.0.1.")
+
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
-    print(f"SolveIt kernel server on http://{args.host}:{args.port}  (Ctrl-C to stop)")
+    auth = "token required" if _AUTH_TOKEN else "open (loopback only)"
+    print(f"SolveIt kernel server on http://{args.host}:{args.port}  [{auth}]  (Ctrl-C to stop)")
     try:
         srv.serve_forever()
     except KeyboardInterrupt:

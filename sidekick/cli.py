@@ -8,6 +8,7 @@ Usage:
 """
 from __future__ import annotations
 
+import os
 import sys
 
 from .targets import get_target, list_targets, load_config
@@ -60,8 +61,15 @@ def cmd_up(args):
 def cmd_serve(_):
     import uvicorn
     from .app import app
-    print("SolveIt Sidekick UI -> http://localhost:8000")
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    # Default to loopback: the UI is single-user with global state and holds your
+    # API keys. Opt into network exposure explicitly via SIDEKICK_HOST=0.0.0.0.
+    host = os.environ.get("SIDEKICK_HOST", "127.0.0.1")
+    port = int(os.environ.get("SIDEKICK_PORT", "8000"))
+    print(f"SolveIt Sidekick UI -> http://{host}:{port}")
+    if host not in ("127.0.0.1", "localhost"):
+        print("  ⚠ binding a non-loopback host — this single-user UI (and your stored "
+              "API keys) will be reachable by anyone on the network.")
+    uvicorn.run(app, host=host, port=port)
     return 0
 
 

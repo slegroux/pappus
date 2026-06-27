@@ -759,3 +759,30 @@ def test_persistence_preserves_rich_and_flags(monkeypatch, tmp_path):
     m = _load_dialogs("kernel")["d"][0]
     assert m.rich == [{"type": "image/png", "data": "AAAA"}]
     assert m.muted is True and m.output == "ok"
+
+
+# ---- kernel server auth -----------------------------------------------------
+def test_kernel_auth_open_when_no_token():
+    import server.kernel_server as ks
+    assert ks._check_auth(None, "") is True
+    assert ks._check_auth(None, "_solveit=whatever") is True
+
+
+def test_kernel_auth_enforced_when_token_set():
+    import server.kernel_server as ks
+    assert ks._check_auth("s3cret", "_solveit=s3cret") is True
+    assert ks._check_auth("s3cret", "a=1; _solveit=s3cret; b=2") is True
+    assert ks._check_auth("s3cret", "_solveit=wrong") is False
+    assert ks._check_auth("s3cret", "") is False                 # missing cookie -> denied
+
+
+def test_kernel_token_from_cookie():
+    import server.kernel_server as ks
+    assert ks._token_from_cookie("x=1; _solveit=tok; y=2") == "tok"
+    assert ks._token_from_cookie("") == ""
+
+
+def test_kernel_loopback_detection():
+    import server.kernel_server as ks
+    assert ks._is_loopback("127.0.0.1") and ks._is_loopback("localhost")
+    assert not ks._is_loopback("0.0.0.0") and not ks._is_loopback("1.2.3.4")

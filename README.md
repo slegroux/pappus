@@ -80,6 +80,14 @@ in a persistent per-dialog namespace — variables carry across cells, just like
 notebook. On the **H100**, run the same server there and `sidekick up h100`
 tunnels it back.
 
+> **Security.** `/exec` runs arbitrary code, so the kernel server is secure by
+> default: on loopback it's open (local dev), but it **refuses to bind a
+> non-loopback host without `--token`** (or `SIDEKICK_KERNEL_TOKEN`), after which
+> every request must carry a matching `_solveit` cookie. The H100 flow keeps it on
+> `127.0.0.1` and reaches it through the SSH tunnel, so no token is needed; only
+> pass `--token` if you expose the port directly. Likewise, `sidekick serve` binds
+> `127.0.0.1` by default — set `SIDEKICK_HOST=0.0.0.0` to expose the UI on your LAN.
+
 When you have access to the real Answer.AI SolveIt server, just point the `local`
 or `h100` targets at it (they use `backend: solveit` via `solveit_client`) — same UI.
 
