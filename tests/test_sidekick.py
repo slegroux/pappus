@@ -174,6 +174,42 @@ def test_delete_removes_the_cell():
     assert a.id not in ids and keep.id in ids
 
 
+def test_undo_restores_deleted_cell_at_its_position():
+    b = MockBackend()
+    a = b.add("u/x", "a = 1", "code")
+    mid = b.add("u/x", "m = 2", "code")
+    z = b.add("u/x", "z = 3", "code")
+    b.delete("u/x", mid.id)
+    assert [m.id for m in b.messages("u/x")] == [a.id, z.id]
+    restored = b.undo("u/x")
+    assert restored.id == mid.id
+    assert [m.id for m in b.messages("u/x")] == [a.id, mid.id, z.id]   # back in the middle
+
+
+def test_undo_is_lifo_and_empty_is_noop():
+    b = MockBackend()
+    x = b.add("u/y", "x", "code")
+    y = b.add("u/y", "y", "code")
+    b.delete("u/y", x.id)
+    b.delete("u/y", y.id)
+    assert b.undo("u/y").id == y.id          # most-recent delete comes back first
+    assert b.undo("u/y").id == x.id
+    assert b.undo("u/y") is None             # nothing left to undo
+
+
+def test_cell_undo_route_restores_last_delete():
+    import sidekick.app as app
+    app.STATE["dialog"] = "u/route"
+    bk = app.STATE["backend"]
+    bk.messages("u/route")
+    keep = bk.add("u/route", "keep", "code")
+    gone = bk.add("u/route", "gone", "note")
+    app.cell_delete(id=gone.id)
+    assert [m.id for m in bk.messages("u/route")] == [keep.id]
+    app.cell_undo()
+    assert [m.id for m in bk.messages("u/route")] == [keep.id, gone.id]
+
+
 # ---- editable cells: web routes --------------------------------------------
 def test_cell_run_route_saves_edit_and_executes():
     import sidekick.app as app

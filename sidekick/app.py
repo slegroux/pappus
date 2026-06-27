@@ -316,6 +316,9 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .ins-item:hover{border-color:var(--accent);background:#FBF3E7}
 /* the cell a/b will target (last hovered) */
 #stream .row:hover{box-shadow:inset 2px 0 0 var(--line)}
+/* the selected cell in Jupyter-style command mode (Esc / j / k) */
+#stream .row.selected{box-shadow:inset 3px 0 0 var(--accent);border-radius:10px;
+  background:rgba(44,107,69,.04)}
 .cell-btn.ctx.off{color:#B0784F;border-color:#E3C7AE;background:#FBF3E7}
 .cell-btn.pin.on{color:#2C6B45;border-color:#BFE0CC;background:#E6F2EA}
 .tok{margin-left:2px;font-variant-numeric:tabular-nums}
@@ -686,6 +689,30 @@ STREAM_JS = """
     es.onerror = function(){ es.close(); };
   });
 
+  // ---- Jupyter-style command mode ---------------------------------------
+  // A cell is "selected" (command mode) by id; the highlight is re-applied on
+  // every swap since #stream is replaced wholesale. Defined every render (cheap
+  // reassign) so the per-render call below and the once-bound listeners share them.
+  window.__cellIds = function(){
+    return Array.prototype.map.call(document.querySelectorAll('#stream .row'),
+      function(r){ return r.id.replace('cell-', ''); });
+  };
+  window.__inEditor = function(t){
+    return !!(t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.tagName === 'SELECT'
+                    || t.isContentEditable || (t.closest && t.closest('.CodeMirror'))));
+  };
+  window.__selectCell = function(id, scroll){
+    window.__selCell = id || null;
+    document.querySelectorAll('#stream .row.selected').forEach(function(r){
+      r.classList.remove('selected'); });
+    if(!id) return;
+    var row = document.getElementById('cell-' + id);
+    if(row){ row.classList.add('selected'); if(scroll) row.scrollIntoView({block:'nearest'}); }
+    else window.__selCell = null;
+  };
+  // Re-apply the selection highlight after this (re)render; drop it if the cell is gone.
+  window.__selectCell(window.__selCell, false);
+
   if(window.__sidekickCells) return;                            // bind document listeners once
   window.__sidekickCells = true;
   if(!hasFieldSizing){
@@ -703,25 +730,81 @@ STREAM_JS = """
       if(btn) btn.click();                                      // Cmd/Ctrl+Enter runs the cell
     }
   });
-  // Track the cell the cursor is over — the target for the a/b shortcuts.
+  // Track the cell under the cursor — the fallback target for a/b before anything
+  // is selected. Clicking a cell selects it (so Esc later lands on the right one).
   document.addEventListener('mouseover', function(e){
     var row = e.target.closest && e.target.closest('#stream .row');
     if(row) window.__activeRow = row;
   });
-  // Jupyter-style: 'a' inserts a code cell above the active cell, 'b' below —
-  // but only in "command mode" (not while typing in an editor/input/CodeMirror).
+  document.addEventListener('click', function(e){
+    var row = e.target.closest && e.target.closest('#stream .row');
+    if(row) window.__selectCell(row.id.replace('cell-', ''), false);
+  });
+
+  // Jupyter-style command mode: Esc leaves the editor; ↑/↓ or j/k move the
+  // selection; Enter edits; a/b insert; dd deletes; z undoes the last delete.
+  // Single-letter keys only fire when no editor/input is focused.
+  function _insert(where){
+    var id = window.__selCell ||
+             (window.__activeRow && window.__activeRow.id.replace('cell-', ''));
+    if(!id || !window.htmx) return;
+    htmx.ajax('POST', '/cell/insert', {target: '#stream', swap: 'outerHTML',
+      values: {id: id, msg_type: 'code', where: where}});
+  }
   document.addEventListener('keydown', function(e){
-    if(e.key !== 'a' && e.key !== 'b') return;
-    if(e.metaKey || e.ctrlKey || e.altKey) return;
-    var t = e.target;
-    if(t && (t.tagName === 'TEXTAREA' || t.tagName === 'INPUT' || t.isContentEditable
-             || (t.closest && t.closest('.CodeMirror')))) return;
-    var row = window.__activeRow;
-    if(!row || !document.body.contains(row) || !window.htmx) return;
-    e.preventDefault();
-    htmx.ajax('POST', '/cell/insert', {target: '#stream', swap: 'outerHTML', values: {
-      id: row.id.replace('cell-', ''), msg_type: 'code', where: (e.key === 'a' ? 'above' : 'below')
-    }});
+    if(e.metaKey || e.ctrlKey) return;
+    var inEditor = window.__inEditor(e.target);
+
+    if(e.key === 'Escape'){                        // leave edit mode -> command mode
+      if(!inEditor) return;
+      var row = e.target.closest('#stream .row');
+      if(!row) return;
+      e.preventDefault();
+      if(e.target.blur) e.target.blur();
+      window.__selectCell(row.id.replace('cell-', ''), false);
+      return;
+    }
+    if(inEditor || e.altKey) return;               // everything below is command-mode only
+    if(e.key !== 'd') window.__lastD = 0;           // any other key breaks a pending 'dd'
+
+    var ids = window.__cellIds();
+    if(!ids.length) return;
+    var idx = ids.indexOf(window.__selCell);
+
+    if(e.key === 'ArrowDown' || e.key === 'j'){
+      e.preventDefault();
+      window.__selectCell(ids[idx < 0 ? 0 : Math.min(ids.length - 1, idx + 1)], true);
+    } else if(e.key === 'ArrowUp' || e.key === 'k'){
+      e.preventDefault();
+      window.__selectCell(ids[idx < 0 ? ids.length - 1 : Math.max(0, idx - 1)], true);
+    } else if(e.key === 'Enter'){                  // enter edit mode / focus the editor
+      if(idx < 0) return;
+      e.preventDefault();
+      var row = document.getElementById('cell-' + window.__selCell);
+      var view = row && row.querySelector('.clickedit');
+      if(view){ view.click(); return; }            // rendered cell -> open its editor
+      var cm = row && row.querySelector('.CodeMirror');
+      if(cm && cm.CodeMirror){ cm.CodeMirror.focus(); return; }
+      var ta = row && row.querySelector('textarea');
+      if(ta) ta.focus();
+    } else if(e.key === 'a' || e.key === 'b'){
+      e.preventDefault();
+      _insert(e.key === 'a' ? 'above' : 'below');
+    } else if(e.key === 'd'){                       // dd within 600ms = delete
+      var now = Date.now();
+      if(window.__lastD && now - window.__lastD < 600){
+        window.__lastD = 0;
+        if(idx < 0 || !window.htmx) return;
+        e.preventDefault();
+        window.__selCell = ids[idx + 1] || ids[idx - 1] || null;   // land on a neighbor
+        htmx.ajax('POST', '/cell/delete', {target: '#stream', swap: 'outerHTML',
+          values: {id: ids[idx]}});
+      } else { window.__lastD = now; }
+    } else if(e.key === 'z'){                       // undo last delete
+      if(!window.htmx) return;
+      e.preventDefault();
+      htmx.ajax('POST', '/cell/undo', {target: '#stream', swap: 'outerHTML', values: {}});
+    }
   });
 })();
 """
@@ -1367,6 +1450,15 @@ def cell_delete(id: str):
     backend = STATE["backend"]
     if hasattr(backend, "delete"):
         backend.delete(STATE["dialog"], id)
+    return Stream()
+
+
+@rt("/cell/undo", methods=["post"])
+def cell_undo():
+    """Restore the last deleted cell in this dialog (Jupyter's 'z')."""
+    backend = STATE["backend"]
+    if hasattr(backend, "undo"):
+        backend.undo(STATE["dialog"])
     return Stream()
 
 

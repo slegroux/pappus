@@ -162,6 +162,25 @@ Every message is a live cell, like a notebook:
 Edits and runs swap only the conversation (via htmx), so re-running a cell never
 reloads the whole page.
 
+#### Keyboard shortcuts (Jupyter-style)
+
+The notebook has a **command mode** and an **edit mode**, like Jupyter:
+
+| Key | Action |
+|-----|--------|
+| `Enter` | enter edit mode on the selected cell |
+| `Esc` | leave edit mode back to command mode (no edits lost) |
+| `↑` / `↓` or `k` / `j` | select the previous / next cell |
+| `a` / `b` | insert a cell above / below |
+| `dd` | delete the selected cell |
+| `z` | undo the last delete |
+| `Cmd`/`Ctrl`/`Shift`+`Enter` | run the cell |
+
+The **selected** cell shows a green bar on its left. Command-mode keys only fire
+when no editor or input is focused, so they never interrupt typing. A richer ＋
+menu (on each cell's hover toolbar) also inserts **Code / Note / Ask AI** above
+or below.
+
 #### The AI sees the notebook
 
 Like a real SolveIt dialog, an *Ask AI* cell isn't answered in isolation — the

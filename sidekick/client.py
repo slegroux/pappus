@@ -170,6 +170,8 @@ class _InMemoryBackend:
         # dialogs are loaded from / saved to disk under that key.
         self._store_key = store_key
         self._dialogs: dict[str, list[Msg]] = _load_dialogs(store_key) if store_key else {}
+        # Deleted cells, newest last: (dialog, index, msg) — popped by undo() ('z').
+        self._undo: list[tuple[str, int, Msg]] = []
 
     def _save(self) -> None:
         if getattr(self, "_store_key", None):
@@ -217,8 +219,24 @@ class _InMemoryBackend:
     def delete(self, dialog: str, msg_id: str) -> None:
         lst = self._dialogs.get(dialog)
         if lst is not None:
+            idx = next((i for i, m in enumerate(lst) if m.id == msg_id), None)
+            if idx is not None:
+                self._undo.append((dialog, idx, lst[idx]))   # remember for undo() / 'z'
+                del self._undo[:-50]                          # cap the undo history
             self._dialogs[dialog] = [m for m in lst if m.id != msg_id]
             self._save()
+
+    def undo(self, dialog: str) -> Msg | None:
+        """Restore the most recently deleted cell in `dialog` (Jupyter's 'z')."""
+        for i in range(len(self._undo) - 1, -1, -1):
+            d, idx, m = self._undo[i]
+            if d == dialog:
+                del self._undo[i]
+                lst = self._dialogs.setdefault(dialog, [])
+                lst.insert(min(idx, len(lst)), m)
+                self._save()
+                return m
+        return None
 
     def set_muted(self, dialog: str, msg_id: str, muted: bool | None = None) -> Msg | None:
         """Toggle (or set) whether a cell is included in the AI's context."""
