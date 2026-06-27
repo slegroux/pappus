@@ -1896,11 +1896,17 @@ def _convert_paper_async(path: str, name: str | None = None):
 
 
 def _url_name(url: str) -> str:
-    """A readable panel/dialog name for a web page: its last path segment, else host."""
+    """A readable panel/dialog name for a URL source: its last path segment, else
+    host. Only strips known doc extensions so an arXiv id like '2305.18247' stays
+    intact (os.path.splitext would chop it at the dot)."""
     from urllib.parse import urlparse
     u = urlparse(url)
     seg = [s for s in u.path.split("/") if s]
-    base = os.path.splitext(seg[-1])[0] if seg else u.netloc
+    base = seg[-1] if seg else u.netloc
+    for ext in (".pdf", ".html", ".htm"):
+        if base.lower().endswith(ext):
+            base = base[:-len(ext)]
+            break
     return base or u.netloc or "page"
 
 

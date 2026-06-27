@@ -136,53 +136,74 @@ def convert(path: str) -> tuple[str, str]:
     return _clean_md(md), engine
 
 
-# ---- web pages / blogs → markdown -------------------------------------------
+# ---- URL sources: a web page/blog OR a PDF paper (e.g. arXiv) ----------------
 def _url_cache_path(url: str) -> Path:
     key = hashlib.sha1(url.encode()).hexdigest()[:16]
     return _cache_dir() / f"url-{key}.md"
 
 
-def _trafilatura_extract(url: str) -> str | None:
-    """The main article as markdown via trafilatura, or None if unavailable."""
+def _arxiv_pdf(url: str) -> str | None:
+    """Rewrite an arXiv abstract/pdf URL to its PDF URL (so we fetch the paper, not
+    the abstract page). e.g. arxiv.org/abs/2305.18247 → arxiv.org/pdf/2305.18247."""
+    m = re.match(r"https?://arxiv\.org/(?:abs|pdf)/([\w.\-]+?)(v\d+)?(?:\.pdf)?/?$", url, re.I)
+    return f"https://arxiv.org/pdf/{m.group(1)}{m.group(2) or ''}" if m else None
+
+
+def _fetch(url: str) -> tuple[bytes, str]:
+    """Fetch a URL → (bytes, content_type). Follows redirects (urllib default)."""
+    import urllib.request
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (solveit-sidekick)"})
+    with urllib.request.urlopen(req, timeout=25) as r:
+        return r.read(), (r.headers.get("Content-Type") or "")
+
+
+def _save_pdf_bytes(data: bytes) -> str:
+    """Save downloaded PDF bytes under the uploads cache (content-hashed, so the
+    same paper reuses its conversion)."""
+    updir = _cache_dir() / "uploads"
+    updir.mkdir(parents=True, exist_ok=True)
+    dst = updir / (hashlib.sha1(data).hexdigest()[:16] + ".pdf")
+    if not dst.exists():
+        dst.write_bytes(data)
+    return str(dst)
+
+
+def _extract_article(html: str, url: str) -> tuple[str, str]:
+    """Main article of an HTML page as markdown: trafilatura, else a bs4 heuristic."""
     try:
         import trafilatura
-        html = trafilatura.fetch_url(url)
-        if not html:
-            return None
-        return trafilatura.extract(html, output_format="markdown", include_links=True,
-                                   include_formatting=True, include_tables=True)
-    except Exception:  # noqa: BLE001 — not installed, or an extraction error → fall back
-        return None
-
-
-def _html_to_md_fallback(url: str) -> str:
-    """No-extra fallback: fetch, drop page chrome, markdownify the main content."""
-    import urllib.request
+        md = trafilatura.extract(html, url=url, output_format="markdown",
+                                 include_links=True, include_formatting=True, include_tables=True)
+        if md and md.strip():
+            return md, "trafilatura"
+    except Exception:  # noqa: BLE001 — not installed / extraction error → bs4 fallback
+        pass
     from bs4 import BeautifulSoup
     from markdownify import markdownify
-    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (solveit-sidekick)"})
-    with urllib.request.urlopen(req, timeout=20) as r:
-        html = r.read().decode("utf-8", "replace")
     soup = BeautifulSoup(html, "html.parser")
     for tag in soup(["script", "style", "nav", "header", "footer", "aside", "form", "noscript"]):
         tag.decompose()
     main = soup.find("article") or soup.find("main") or soup.body or soup
-    return markdownify(str(main), heading_style="ATX").strip()
+    return markdownify(str(main), heading_style="ATX").strip(), "bs4"
 
 
 def convert_url(url: str) -> tuple[str, str]:
-    """Return (markdown, engine) for a web page — article extraction via trafilatura
-    (engine 'trafilatura'), falling back to a bs4 + markdownify heuristic ('bs4').
-    Cached on disk by URL; empty results aren't cached so a transient fetch can retry."""
+    """Fetch a URL and convert to markdown, auto-routing by what it actually is:
+    a PDF (arXiv, a `.pdf` link, or `application/pdf`) goes through the PDF pipeline
+    (marker/pypdf — equations/tables preserved); anything else is article-extracted
+    (trafilatura/bs4). Returns (markdown, engine); cached on disk by URL."""
     cp = _url_cache_path(url)
     if cp.exists():
         try:
             return _clean_md(cp.read_text()), "cache"
         except OSError:
             pass
-    md, engine = _trafilatura_extract(url), "trafilatura"
-    if not (md and md.strip()):
-        md, engine = _html_to_md_fallback(url), "bs4"
+    target = _arxiv_pdf(url) or url          # arXiv abstract → its PDF
+    data, ctype = _fetch(target)
+    if data[:5] == b"%PDF-" or "application/pdf" in ctype.lower():
+        md, engine = convert(_save_pdf_bytes(data))     # PDF pipeline (marker/pypdf)
+    else:
+        md, engine = _extract_article(data.decode("utf-8", "replace"), target)
     md = md or ""
     if md.strip():
         try:

@@ -228,14 +228,22 @@ its dialogs on the SolveIt server.)
 
 ## Reading papers (and web pages)
 
-Open a source with the **📄** button — either **choose a PDF** or **paste a web
-page / blog URL** — and it appears in a left reading column. Web pages are
-fetched and reduced to just the main article (no nav/ads/footer): with the
-**`web`** extra (`uv pip install "solveit-sidekick[web]"`) that's done by
-**trafilatura** (clean, keeps headings/code/links); without it, a built-in
-**bs4 + markdownify** fallback handles it. Either way the page becomes markdown
-in the same reader, so the stepper, highlight-import, and TOC all work the same
-as for a PDF. **Highlight any passage** and a small toolbar pops up:
+Open a source with the **📄** button — **choose a PDF** or **paste any URL** — and
+it appears in a left reading column. The URL field **auto-detects** what you give
+it:
+
+- An **arXiv** link (`arxiv.org/abs/…`), a **`.pdf`** link, or anything served as
+  `application/pdf` is **downloaded and run through marker** (the PDF pipeline —
+  equations as LaTeX, tables, structure). So pasting `arxiv.org/abs/1706.03762`
+  imports the *paper*, not the abstract page.
+- Any other page (a **blog/article**) is fetched and reduced to just the main
+  content (no nav/ads/footer): **trafilatura** with the **`web`** extra
+  (`uv pip install "solveit-sidekick[web]"`), or a built-in **bs4 + markdownify**
+  fallback without it.
+
+Either way the source becomes markdown in the same reader, so the stepper,
+highlight-import, and TOC all work the same. **Highlight any passage** and a small
+toolbar pops up:
 
 - **→ Notebook** — import the highlighted passage as a **note**, followed by an
   **empty code cell that opens focused**, so you can *reimplement that idea

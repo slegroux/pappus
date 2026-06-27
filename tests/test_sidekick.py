@@ -1034,31 +1034,44 @@ def test_paper_empty_conversion_is_not_cached(monkeypatch, tmp_path):
     assert engine2 == "pypdf" and "Now it works" in md2
 
 
-def test_convert_url_uses_trafilatura_then_caches(monkeypatch, tmp_path):
+def test_arxiv_url_rewrites_to_pdf():
+    from sidekick import paper as pl
+    assert pl._arxiv_pdf("https://arxiv.org/abs/2305.18247") == "https://arxiv.org/pdf/2305.18247"
+    assert pl._arxiv_pdf("https://arxiv.org/abs/2305.18247v2") == "https://arxiv.org/pdf/2305.18247v2"
+    assert pl._arxiv_pdf("https://arxiv.org/pdf/2305.18247.pdf") == "https://arxiv.org/pdf/2305.18247"
+    assert pl._arxiv_pdf("https://example.com/post") is None        # not arXiv
+
+
+def test_convert_url_html_is_article_extracted_and_cached(monkeypatch, tmp_path):
     monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
     from sidekick import paper as pl
-    monkeypatch.setattr(pl, "_trafilatura_extract", lambda u: "# Post\n\nbody")
+    monkeypatch.setattr(pl, "_fetch", lambda u: (b"<html><body><h1>Post</h1></body></html>", "text/html"))
+    monkeypatch.setattr(pl, "_extract_article", lambda html, url: ("# Post\n\nbody", "trafilatura"))
     md, engine = pl.convert_url("https://blog.example.com/post")
     assert engine == "trafilatura" and "Post" in md
-    monkeypatch.setattr(pl, "_trafilatura_extract", lambda u: "SHOULD NOT RUN")
-    md2, engine2 = pl.convert_url("https://blog.example.com/post")     # cache hit
+    monkeypatch.setattr(pl, "_fetch", lambda u: (_ for _ in ()).throw(AssertionError("refetched!")))
+    md2, engine2 = pl.convert_url("https://blog.example.com/post")     # cache hit, no refetch
     assert engine2 == "cache" and md2 == md
 
 
-def test_convert_url_falls_back_to_bs4(monkeypatch, tmp_path):
+def test_convert_url_pdf_routes_to_pdf_pipeline(monkeypatch, tmp_path):
+    # An arXiv (or any application/pdf) URL must go through the PDF pipeline, not
+    # HTML article extraction — so equations/tables survive.
     monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
     from sidekick import paper as pl
-    monkeypatch.setattr(pl, "_trafilatura_extract", lambda u: None)      # not installed / failed
-    monkeypatch.setattr(pl, "_html_to_md_fallback", lambda u: "# Heuristic\n\ntext")
-    md, engine = pl.convert_url("https://x.example.com/a")
-    assert engine == "bs4" and "Heuristic" in md
+    seen = {}
+    monkeypatch.setattr(pl, "_fetch", lambda u: (seen.setdefault("url", u), (b"%PDF-1.4 ...", "application/pdf"))[1])
+    monkeypatch.setattr(pl, "convert", lambda path: ("# Paper\n\n$E=mc^2$", "marker"))
+    md, engine = pl.convert_url("https://arxiv.org/abs/2305.18247")
+    assert engine == "marker" and "E=mc^2" in md
+    assert seen["url"] == "https://arxiv.org/pdf/2305.18247"          # fetched the PDF, not /abs/
 
 
 def test_convert_url_empty_not_cached(monkeypatch, tmp_path):
     monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
     from sidekick import paper as pl
-    monkeypatch.setattr(pl, "_trafilatura_extract", lambda u: None)
-    monkeypatch.setattr(pl, "_html_to_md_fallback", lambda u: "   ")
+    monkeypatch.setattr(pl, "_fetch", lambda u: (b"<html></html>", "text/html"))
+    monkeypatch.setattr(pl, "_extract_article", lambda html, url: ("   ", "bs4"))
     pl.convert_url("https://empty.example.com")
     assert not pl._url_cache_path("https://empty.example.com").exists()
 
@@ -1066,6 +1079,8 @@ def test_convert_url_empty_not_cached(monkeypatch, tmp_path):
 def test_url_name_is_readable():
     import sidekick.app as app
     assert app._url_name("https://www.fast.ai/posts/2025-11-07-solveit.html") == "2025-11-07-solveit"
+    assert app._url_name("https://arxiv.org/abs/2305.18247") == "2305.18247"   # arXiv id intact
+    assert app._url_name("https://example.com/paper.pdf") == "paper"
     assert app._url_name("https://example.com/") == "example.com"
     assert app._url_name("https://example.com") == "example.com"
 
