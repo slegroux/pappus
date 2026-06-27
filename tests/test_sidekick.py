@@ -1054,6 +1054,21 @@ def test_paper_import_selection_adds_note_and_code():
     app.STATE["paper"] = None
 
 
+def test_dialog_tree_nests_and_drops_empty_segments():
+    import sidekick.app as app
+    t = app._dialog_tree(["a/b", "a/c", "top"])
+    assert sorted(t["folders"]) == ["a"]
+    assert [lab for lab, _ in t["folders"]["a"]["leaves"]] == ["b", "c"]
+    assert ("top", "top") in t["leaves"]
+    # leading/trailing/double slashes must not create blank-named folders/leaves
+    t2 = app._dialog_tree(["/x", "y/", "p//q"])
+    assert "" not in t2["folders"]
+    assert ("x", "/x") in t2["leaves"] and ("y", "y/") in t2["leaves"]
+    assert "" not in t2["folders"]["p"]["folders"]      # p//q -> p/q, no empty middle
+    assert ("q", "p//q") in t2["folders"]["p"]["leaves"]
+    assert app._dialog_tree(["/"])["leaves"] == []      # only-slashes name is skipped
+
+
 def test_paper_panel_shows_stepper_progress():
     import sidekick.app as app
     from fasthtml.common import to_xml

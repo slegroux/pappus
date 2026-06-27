@@ -432,7 +432,9 @@ def _dialog_tree(names):
     """Nest names on '/' into {'folders': {seg: node}, 'leaves': [(label, full)]}."""
     root = {"folders": {}, "leaves": []}
     for n in names:
-        parts = n.split("/")
+        parts = [seg for seg in n.split("/") if seg]   # drop empties: "/a", "a//b", "a/"
+        if not parts:
+            continue                                   # a name that is only slashes
         node = root
         for seg in parts[:-1]:
             node = node["folders"].setdefault(seg, {"folders": {}, "leaves": []})
