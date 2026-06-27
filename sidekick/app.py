@@ -147,6 +147,7 @@ body.col-resizing{cursor:col-resize;user-select:none}
 /* paper reading panel (left column, toggled open when a paper is loaded) */
 .paper{display:none;background:var(--panel);border-right:1px solid var(--line);overflow:auto;padding:16px 18px;min-width:0}
 .app.paper-open .paper{display:flex;flex-direction:column;flex:0 0 var(--paper-w)}
+.app.paper-open.no-paper .paper,.app.no-paper .gutter-paper{display:none}   /* topbar 📖 toggle */
 .paper-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}
 .paper-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
 .paper-import{margin:0;display:flex;align-items:center;gap:5px}
@@ -1177,6 +1178,7 @@ window.syncToggles = function(){
     if(b) b.classList.toggle('off', hidden);
   }
   set('tgl-side', app.classList.contains('no-side'));
+  set('tgl-paper', app.classList.contains('no-paper'));
   set('tgl-toc', !app.classList.contains('toc-open'));
 };
 // Toggle a layout column class on .app and persist it; syncToggles() updates the
@@ -1198,6 +1200,7 @@ window.toggleCol = function(cls, key){
   }
   restore('sidekick_toc', 'toc-open', true);          // TOC default open
   restore('sidekick_noside', 'no-side', false);       // dialogs default shown
+  restore('sidekick_nopaper', 'no-paper', false);     // paper viewer default shown
   restore('sidekick_paperhidden', 'paper-collapsed', false);  // paper text default shown
   window.syncToggles();
   window.buildTOC();
@@ -1426,14 +1429,18 @@ def Page():
                 Div(Span("🗂", cls="gear tgl", id="tgl-side",
                          title="Show/hide the dialogs panel",
                          onclick="toggleCol('no-side','sidekick_noside')"),
-                    TitleEditor(),
-                    cls="topbar-left"),
-                Div(Span("☰", cls="gear tgl toc-toggle", id="tgl-toc",
+                    Span("📖", cls="gear tgl", id="tgl-paper",
+                         title="Show/hide the paper (PDF / markdown) viewer",
+                         onclick="toggleCol('no-paper','sidekick_nopaper')"),
+                    Span("☰", cls="gear tgl toc-toggle", id="tgl-toc",
                          title="Show/hide the table of contents",
                          onclick="toggleCol('toc-open','sidekick_toc')"),
-                    Form(Label("📄",
+                    TitleEditor(),
+                    cls="topbar-left"),
+                Div(Form(Label("📄",
                               Input(type="file", name="pdf", accept="application/pdf,.pdf",
-                                    cls="paper-file", onchange="this.form.submit()"),
+                                    cls="paper-file",
+                                    onchange="try{localStorage.removeItem('sidekick_nopaper')}catch(e){};this.form.submit()"),
                               cls="gear paper-pick", title="Open a paper (PDF) — choose a file"),
                          method="post", action="/paper/open",
                          enctype="multipart/form-data", cls="paper-form"),
