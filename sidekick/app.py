@@ -152,7 +152,7 @@ body.col-resizing{cursor:col-resize;user-select:none}
 .paper-import{margin:0;display:flex;align-items:center;gap:5px}
 .paper-name{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .paper-converting{margin-top:14px;color:var(--muted);font-size:13px;font-style:italic}
-.paper-body{margin-top:10px;font-size:13.5px;line-height:1.6}
+.paper-body{margin-top:10px;font-size:13px;line-height:1.6}
 .paper-body img{max-width:100%}
 /* collapsed paper: hide the text, keep the header (incl. Next section) in a
    compact strip so the notebook reclaims the width. */
@@ -264,16 +264,16 @@ select.tsel{appearance:none;background:var(--chip);border:1px solid var(--line);
 /* conversation */
 .stream{flex:1;overflow:auto;padding:26px 0}
 .wrap{max-width:760px;margin:0 auto;padding:0 22px}
-.row{margin-bottom:22px}
-.who{font-size:12px;color:var(--muted);margin-bottom:6px;display:flex;align-items:center;gap:7px}
+.row{margin-bottom:16px}
+.who{font-size:12px;color:var(--muted);margin-bottom:4px;display:flex;align-items:center;gap:7px}
 .tag{font-size:11px;border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:var(--muted)}
-.bubble{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:13px 15px}
+.bubble{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 13px}
 .bubble.user{background:var(--bubble-user);border-color:#EBD9CD}
 .bubble.note{background:transparent;border:none;padding:2px 0}
 pre.code{background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:13px 15px;overflow:auto;
   font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;margin:0}
-.out{margin-top:9px;border-left:2px solid var(--line);padding:4px 0 4px 12px;color:var(--muted);
-  font-family:ui-monospace,Menlo,monospace;font-size:13px;white-space:pre-wrap}
+.out{margin-top:6px;border-left:2px solid var(--line);padding:4px 0 4px 12px;color:var(--muted);
+  font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;white-space:pre-wrap}
 .empty{color:var(--muted);text-align:center;margin-top:60px}
 /* composer */
 .composer{padding:0 0 22px} .composer .wrap{padding:0 22px}
@@ -282,12 +282,13 @@ pre.code{background:var(--code-bg);color:var(--code-ink);border-radius:10px;padd
 .box textarea{width:100%;border:none;outline:none;resize:none;background:transparent;font:inherit;color:var(--ink);min-height:46px}
 .row2{display:flex;align-items:center;justify-content:space-between;margin-top:6px}
 .modes{display:flex;gap:6px}
-.mode{font-size:12px;border:1px solid var(--line);background:#fff;border-radius:8px;padding:5px 10px;cursor:pointer;color:var(--muted)}
+.mode{font-size:12px;border:1px solid var(--line);background:#fff;border-radius:8px;height:32px;padding:0 12px;
+  display:inline-flex;align-items:center;cursor:pointer;color:var(--muted)}
 .mode input{display:none}
 .mode.sel{background:var(--accent);border-color:var(--accent);color:#fff}
-select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-radius:8px;padding:5px 24px 5px 10px;
+select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-radius:8px;height:32px;padding:0 24px 0 12px;
   font-size:12px;cursor:pointer;color:var(--ink)}
-.send{background:var(--accent);border:none;color:#fff;border-radius:10px;width:34px;height:34px;cursor:pointer;font-size:15px}
+.send{background:var(--accent);border:none;color:#fff;border-radius:8px;width:32px;height:32px;cursor:pointer;font-size:15px}
 .send:hover{filter:brightness(1.05)}
 .hint{font-size:11px;color:var(--muted);margin-top:8px;text-align:center}
 /* editable cells */
@@ -382,10 +383,10 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 /* live context meter at the foot of the stream */
 .ctx-meter{margin:18px auto 4px;text-align:center;font-size:12px;color:var(--muted);
   border-top:1px dashed var(--line);padding-top:12px}
-.answer{margin-top:9px}
+.answer{margin-top:6px}
 .md>*:first-child{margin-top:0}.md>*:last-child{margin-bottom:0}
-.md p{margin:.5em 0}.md ul,.md ol{margin:.5em 0;padding-left:1.4em}
-.md h1,.md h2,.md h3{margin:.7em 0 .35em;line-height:1.3}
+.md p{margin:.35em 0}.md ul,.md ol{margin:.35em 0;padding-left:1.4em}
+.md h1,.md h2,.md h3{margin:.6em 0 .3em;line-height:1.3}
 .md table{border-collapse:collapse;margin:.5em 0}.md th,.md td{border:1px solid var(--line);padding:4px 9px}
 .md pre{background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:12px 14px;overflow:auto;
   font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px}
