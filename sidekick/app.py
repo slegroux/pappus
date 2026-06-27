@@ -1767,8 +1767,7 @@ def export_package():
     pkg = export.slug(dialog)
     files = export.dialog_to_package(msgs, dialog, dialog_name=dialog)
     blob = export.package_zip(files, pkg)
-    return Response(blob, media_type="application/zip",
-                    headers={"Content-Disposition": f'attachment; filename="{pkg}.zip"'})
+    return _download(blob, f"{pkg}.zip", "application/zip")
 
 
 @rt("/cell/edit")
