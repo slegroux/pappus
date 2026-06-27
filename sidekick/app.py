@@ -617,6 +617,15 @@ _FOCUS_JS = """
 
 STREAM_JS = """
 (function(){
+  // Running/editing a cell swaps all of #stream — the scroll container itself —
+  // which would snap the view back to the top. Restore the position saved just
+  // before the swap (see the htmx:beforeSwap handler) so you stay at the cell
+  // you acted on. A pending AI answer still scrolls to follow its stream below.
+  (function(){
+    var s = document.getElementById('stream');
+    if(s && window.__streamScroll != null) s.scrollTop = window.__streamScroll;
+  })();
+
   // CSS field-sizing auto-grows textareas natively; only run the JS fallback
   // (measured after layout settles) where it isn't supported.
   var hasFieldSizing = window.CSS && CSS.supports && CSS.supports('field-sizing','content');
@@ -730,6 +739,12 @@ STREAM_JS = """
 
   if(window.__sidekickCells) return;                            // bind document listeners once
   window.__sidekickCells = true;
+  // Remember the notebook's scroll position right before htmx replaces #stream,
+  // so the fresh render (above) can restore it instead of jumping to the top.
+  document.addEventListener('htmx:beforeSwap', function(){
+    var s = document.getElementById('stream');
+    if(s) window.__streamScroll = s.scrollTop;
+  });
   if(!hasFieldSizing){
     document.addEventListener('input', function(e){
       if(e.target.classList && e.target.classList.contains('cell-edit')) autosize(e.target);
