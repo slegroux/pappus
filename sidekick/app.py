@@ -961,8 +961,7 @@ def _ctx_meter(msgs):
 
 def Stream():
     msgs = STATE["backend"].messages(STATE["dialog"])
-    editing = STATE.pop("editing", None)            # a just-inserted cell opens in edit mode
-    STATE["editing"] = None
+    editing = STATE.pop("editing", None)            # a just-inserted cell opens in edit mode (one-shot)
     if not msgs:
         inner = Div("Start the conversation — write code, ask the AI, or jot a note.",
                     cls="empty")
@@ -1176,14 +1175,8 @@ window.syncToggles = function(){
   set('tgl-side', app.classList.contains('no-side'));
   set('tgl-toc', !app.classList.contains('toc-open'));
 };
-window.toggleTOC = function(){
-  var app = document.querySelector('.app');
-  if(!app) return;
-  var open = app.classList.toggle('toc-open');
-  try { localStorage.setItem('sidekick_toc', open ? '1' : '0'); } catch(e){}
-  window.syncToggles();
-};
-// Generic column toggle (the dialogs panel), persisted in localStorage.
+// Toggle a layout column class on .app and persist it; syncToggles() updates the
+// matching icon's dimmed state. (TOC uses cls 'toc-open'; dialogs uses 'no-side'.)
 window.toggleCol = function(cls, key){
   var app = document.querySelector('.app');
   if(!app) return;
@@ -1202,8 +1195,6 @@ window.toggleCol = function(cls, key){
   restore('sidekick_toc', 'toc-open', true);          // TOC default open
   restore('sidekick_noside', 'no-side', false);       // dialogs default shown
   restore('sidekick_paperhidden', 'paper-collapsed', false);  // paper text default shown
-  // The notebook is the app's center, so it's always shown — no toggle for it.
-  app.classList.remove('no-content');                 // clear any stale stuck state
   window.syncToggles();
   window.buildTOC();
 })();
@@ -1421,7 +1412,7 @@ def Page():
                     cls="topbar-left"),
                 Div(Span("☰", cls="gear tgl toc-toggle", id="tgl-toc",
                          title="Show/hide the table of contents",
-                         onclick="toggleTOC()"),
+                         onclick="toggleCol('toc-open','sidekick_toc')"),
                     Form(Label("📄",
                               Input(type="file", name="pdf", accept="application/pdf,.pdf",
                                     cls="paper-file", onchange="this.form.submit()"),
