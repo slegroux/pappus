@@ -294,6 +294,14 @@ class _InMemoryBackend:
         _rename_in(self._dialogs, old, new)
         self._save()
 
+    def delete_dialog(self, dialog: str) -> bool:
+        """Remove a whole dialog (and its cells). Returns whether it existed."""
+        if dialog in self._dialogs:
+            del self._dialogs[dialog]
+            self._save()
+            return True
+        return False
+
     def reorder(self, dialog: str, ordered_ids: list[str]) -> None:
         """Reorder a dialog's cells to match `ordered_ids` (from a drag). Any id
         not listed is appended in its original order, so we never drop a cell."""

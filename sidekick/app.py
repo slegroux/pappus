@@ -205,9 +205,24 @@ body.col-resizing{cursor:col-resize;user-select:none}
   color:var(--ink);border-radius:10px;padding:9px 12px;cursor:pointer;font-size:14px;margin-bottom:12px}
 .newbtn:hover{border-color:#d4d0c4}
 .seclabel{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);padding:8px 8px 4px}
-.conv{display:block;padding:8px 10px;border-radius:8px;color:var(--ink);text-decoration:none;font-size:14px;cursor:pointer}
+.conv{display:block;padding:8px 10px;border-radius:8px;color:var(--ink);text-decoration:none;font-size:14px;cursor:pointer;
+  flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .conv:hover{background:#E8E5DB} .conv.active{background:#E3DFD3;font-weight:500}
-.folder>.conv,.folder>.folder{margin-left:10px}
+/* a dialog row: open-link + a ⋯ actions menu revealed on hover */
+.conv-row{display:flex;align-items:center;gap:2px;position:relative}
+.conv-actions{position:relative;flex:0 0 auto}
+.conv-dots{list-style:none;cursor:pointer;color:var(--muted);opacity:0;padding:2px 7px;border-radius:6px;
+  font-size:16px;line-height:1;transition:opacity .12s}
+.conv-dots::-webkit-details-marker{display:none}
+.conv-row:hover .conv-dots,.conv-actions[open] .conv-dots{opacity:.65}
+.conv-dots:hover{opacity:1;background:#E8E5DB}
+.conv-menu{position:absolute;right:0;top:26px;z-index:30;background:var(--panel);border:1px solid var(--line);
+  border-radius:8px;padding:4px;box-shadow:0 6px 18px rgba(0,0,0,.14);min-width:120px}
+.conv-del-form{margin:0}
+.conv-del{display:block;width:100%;text-align:left;border:none;background:none;color:#B3402F;cursor:pointer;
+  font:inherit;font-size:13px;padding:6px 10px;border-radius:6px}
+.conv-del:hover{background:#F6E8E4}
+.folder>.conv-row,.folder>.folder{margin-left:10px}
 .folder-label{list-style:none;cursor:pointer;font-size:11px;letter-spacing:.04em;text-transform:uppercase;
   color:var(--muted);padding:8px 8px 4px;user-select:none}
 .folder-label::-webkit-details-marker{display:none}
@@ -448,6 +463,23 @@ def _dialog_tree(names):
     return root
 
 
+def _dialog_leaf(label, full, active):
+    """A dialog row: the open link + a ⋯ menu (currently just Delete)."""
+    return Div(
+        A(label, href=f"/open?dialog={quote(full)}",
+          cls=f"conv{' active' if full == active else ''}"),
+        Details(
+            Summary("⋯", cls="conv-dots", title="Dialog actions"),
+            Div(Form(Input(type="hidden", name="dialog", value=full),
+                     Button("🗑  Delete", type="submit", cls="conv-del"),
+                     method="post", action="/dialog/delete", cls="conv-del-form",
+                     onsubmit="return confirm('Delete this dialog and all its cells? "
+                              "This cannot be undone.')"),
+                cls="conv-menu"),
+            cls="conv-actions"),
+        cls="conv-row")
+
+
 def _render_dialog_nodes(node, active):
     """Recursively render a dialog-tree node: folders (collapsible) then leaves."""
     out = []
@@ -461,8 +493,7 @@ def _render_dialog_nodes(node, active):
             )
         )
     for label, full in sorted(node["leaves"]):
-        out.append(A(label, href=f"/open?dialog={quote(full)}",
-                     cls=f"conv{' active' if full == active else ''}"))
+        out.append(_dialog_leaf(label, full, active))
     return out
 
 
@@ -1659,6 +1690,20 @@ def new_dialog():
         n += 1
     STATE["dialog"] = f"untitled/dialog-{n}"
     STATE["backend"].messages(STATE["dialog"])  # touch -> create
+    return Page()
+
+
+@rt("/dialog/delete", methods=["post"])
+def dialog_delete(dialog: str):
+    """Delete a whole dialog. If it was the active one, fall back to another (or a
+    fresh demo/welcome if none remain)."""
+    backend = STATE["backend"]
+    if hasattr(backend, "delete_dialog"):
+        backend.delete_dialog(dialog)
+    if STATE["dialog"] == dialog:
+        remaining = backend.list_dialogs()
+        STATE["dialog"] = remaining[0] if remaining else "demo/welcome"
+        backend.messages(STATE["dialog"])       # touch -> ensure it exists
     return Page()
 
 

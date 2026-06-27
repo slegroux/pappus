@@ -1226,6 +1226,40 @@ def test_dialog_tree_nests_and_drops_empty_segments():
     assert app._dialog_tree(["/"])["leaves"] == []      # only-slashes name is skipped
 
 
+def test_delete_dialog_removes_it():
+    b = MockBackend()
+    b.add("d/keep", "x", "code")
+    b.add("d/gone", "y", "code")
+    assert b.delete_dialog("d/gone") is True
+    assert "d/gone" not in b.list_dialogs() and "d/keep" in b.list_dialogs()
+    assert b.delete_dialog("d/gone") is False        # already gone
+
+
+def test_dialog_delete_route_switches_active_then_falls_back():
+    import sidekick.app as app
+    bk = app.STATE["backend"]
+    a = "del/a"; c = "del/b"
+    bk.messages(a); bk.add(a, "1", "code")
+    bk.messages(c); bk.add(c, "2", "code")
+    app.STATE["dialog"] = a
+    app.dialog_delete(dialog=a)                       # delete the active dialog
+    assert a not in bk.list_dialogs()
+    assert app.STATE["dialog"] != a                  # switched to a survivor
+    # deleting every remaining dialog falls back to a fresh demo/welcome
+    for d in list(bk.list_dialogs()):
+        app.STATE["dialog"] = d
+        app.dialog_delete(dialog=d)
+    assert app.STATE["dialog"] == "demo/welcome"
+
+
+def test_sidebar_renders_delete_menu():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    h = to_xml(app._dialog_leaf("welcome", "demo/welcome", "demo/welcome"))
+    assert "/dialog/delete" in h and "Delete" in h and 'name="dialog"' in h
+    assert 'value="demo/welcome"' in h               # posts the right dialog
+
+
 def test_paper_panel_shows_stepper_progress():
     import sidekick.app as app
     from fasthtml.common import to_xml
