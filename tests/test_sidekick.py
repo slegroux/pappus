@@ -974,3 +974,49 @@ def test_clean_md_strips_marker_html_noise():
     assert "#page-" not in clean                      # all dead cross-refs gone
     assert "# Title" in clean and "Author*" in clean and "Xi" in clean
     assert r"\[7\]" in clean and "link" in clean      # citation/link text kept
+
+
+# ---- insert cell below + section import ------------------------------------
+def test_insert_places_cell_after_anchor():
+    b = MockBackend()
+    a = b.add("d/x", "1", "code")
+    c = b.add("d/x", "3", "code")
+    m = b.insert("d/x", "2", "note", after_id=a.id)
+    assert [x.id for x in b.messages("d/x")] == [a.id, m.id, c.id]
+    assert m.msg_type == "note" and m.content == "2"
+
+
+def test_cell_insert_route_inserts_and_opens_editor():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    app.STATE["dialog"] = "ins/route"
+    bk = app.STATE["backend"]
+    bk.messages("ins/route")
+    a = bk.add("ins/route", "para", "note")
+    html = to_xml(app.cell_insert(id=a.id, msg_type="code"))
+    cells = bk.messages("ins/route")
+    assert len(cells) == 2 and cells[1].msg_type == "code"
+    assert f'id="ta-{cells[1].id}"' in html              # new cell rendered as an editor
+
+
+def test_split_sections_groups_under_headings():
+    from sidekick import paper as pl
+    md = "intro line\n\n# A\n\npara a1\n\npara a2\n\n## B\n\npara b1"
+    secs = pl.split_sections(md)
+    assert len(secs) == 3                                # intro, A(+content), B(+content)
+    assert secs[0] == "intro line"
+    assert secs[1].startswith("# A") and "para a2" in secs[1]
+    assert secs[2].startswith("## B") and "para b1" in secs[2]
+
+
+def test_paper_import_section_mode_fewer_cells_than_para():
+    import sidekick.app as app
+    md = "# Title\n\np1\n\np2\n\n## Sub\n\np3\n\np4"
+    app.STATE["paper"] = {"name": "x.pdf", "status": "ready", "md": md}
+    app.paper_import(mode="section")
+    sec_cells = len(app.STATE["backend"].messages(app.STATE["dialog"]))
+    app.STATE["paper"] = {"name": "x.pdf", "status": "ready", "md": md}
+    app.paper_import(mode="para")
+    para_cells = len(app.STATE["backend"].messages(app.STATE["dialog"]))
+    assert sec_cells == 2 and para_cells == 6 and sec_cells < para_cells
+    app.STATE["paper"] = None

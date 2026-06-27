@@ -95,6 +95,7 @@ STATE = {
     "msg_type": "prompt",
     "pending_stream": None,   # (dialog, msg_id) whose answer is being streamed live
     "paper": None,            # {name, status, md, engine} for the reading panel
+    "editing": None,          # cell id to render in edit mode once (just-inserted cell)
 }
 
 
@@ -135,7 +136,7 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
 .app.paper-open .paper{display:flex;flex-direction:column}
 .paper-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}
 .paper-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
-.paper-import{margin:0}
+.paper-import{margin:0;display:flex;align-items:center;gap:5px}
 .paper-name{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .paper-converting{margin-top:14px;color:var(--muted);font-size:13px;font-style:italic}
 .paper-body{margin-top:10px;font-size:13.5px;line-height:1.6}
@@ -297,6 +298,8 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .cell-btn.run{background:var(--accent);color:#fff;border-color:var(--accent)}
 .cell-btn.run:hover{filter:brightness(1.05);color:#fff}
 .cell-btn.del:hover{border-color:#C0584B;color:#C0584B}
+.cell-btn.ins{color:#2C6B45}
+.cell-btn.ins:hover{border-color:#BFE0CC;background:#E6F2EA}
 .cell-btn.ctx.off{color:#B0784F;border-color:#E3C7AE;background:#FBF3E7}
 .cell-btn.pin.on{color:#2C6B45;border-color:#BFE0CC;background:#E6F2EA}
 .tok{margin-left:2px;font-variant-numeric:tabular-nums}
@@ -400,9 +403,13 @@ _TAG = {"note": "note", "code": "code", "prompt": "Ask AI"}
 
 
 def _ctx_buttons(m):
-    """Mute / Pin / Delete — available in both rendered and edit modes."""
+    """Insert / Mute / Pin / Delete — available in both rendered and edit modes."""
     mid = m.id
     return [
+        Button("＋code", type="button", cls="cell-btn ins",
+               title="Insert a code cell below",
+               hx_post="/cell/insert", hx_vals=json.dumps({"id": mid, "msg_type": "code"}),
+               hx_target="#stream", hx_swap="outerHTML"),
         Button("Muted" if m.muted else "In context", type="button",
                cls="cell-btn ctx" + (" off" if m.muted else ""),
                title="Toggle whether this cell is sent to the AI as notebook context",
@@ -681,11 +688,14 @@ def _ctx_meter(msgs):
 
 def Stream():
     msgs = STATE["backend"].messages(STATE["dialog"])
+    editing = STATE.pop("editing", None)            # a just-inserted cell opens in edit mode
+    STATE["editing"] = None
     if not msgs:
         inner = Div("Start the conversation — write code, ask the AI, or jot a note.",
                     cls="empty")
     else:
-        inner = Div(*[MsgRow(m) for m in msgs], _ctx_meter(msgs), cls="wrap")
+        rows = [_cell_edit(m) if m.id == editing else MsgRow(m) for m in msgs]
+        inner = Div(*rows, _ctx_meter(msgs), cls="wrap")
     return Div(inner, Script(STREAM_JS), cls="stream", id="stream")
 
 
@@ -909,9 +919,14 @@ def PaperPanel():
         return Div(cls="paper", id="paperPanel")
     actions = []
     if p.get("status") == "ready":
-        actions.append(Form(Button("Import ¶ → notebook", cls="cell-btn run", type="submit"),
-                            method="post", action="/paper/import", cls="paper-import",
-                            title="One note cell per paragraph, in a new dialog"))
+        # one form, two submit buttons: import by paragraph (¶) or by section (§)
+        actions.append(Form(
+            Span("Import:", cls="muted small"),
+            Button("¶", cls="cell-btn run", type="submit", name="mode", value="para",
+                   title="One note cell per paragraph"),
+            Button("§", cls="cell-btn", type="submit", name="mode", value="section",
+                   title="One note cell per section (heading + its content)"),
+            method="post", action="/paper/import", cls="paper-import"))
     actions.append(A("✕", href="/paper/close", cls="gear", title="Close paper"))
     head = Div(Span(p["name"], cls="paper-name"), Div(*actions, cls="paper-actions"),
                cls="paper-head")
@@ -1329,6 +1344,16 @@ def cell_exec(id: str):
     return Stream()
 
 
+@rt("/cell/insert", methods=["post"])
+def cell_insert(id: str, msg_type: str = "code"):
+    """Insert a new (empty) cell right after `id` and open it in edit mode."""
+    backend = STATE["backend"]
+    if hasattr(backend, "insert"):
+        m = backend.insert(STATE["dialog"], "", msg_type, after_id=id)
+        STATE["editing"] = m.id
+    return Stream()
+
+
 @rt("/cell/move", methods=["post"])
 def cell_move(ids: str = ""):
     """Persist a new cell order after a drag. SortableJS has already reordered the
@@ -1437,19 +1462,20 @@ def _unique_dialog(backend, base: str) -> str:
 
 
 @rt("/paper/import", methods=["post"])
-def paper_import():
-    """Import the open paper into a new dialog: one note cell per paragraph/block,
-    then switch to it. The headings become the dialog's table of contents."""
+def paper_import(mode: str = "para"):
+    """Import the open paper into a new dialog as note cells, then switch to it.
+    mode='para' → one cell per paragraph/block; mode='section' → one cell per
+    heading-and-its-content. Headings become the dialog's table of contents."""
     p = STATE.get("paper")
     if not p or p.get("status") != "ready" or not (p.get("md") or "").strip():
         return Page()
-    blocks = paperlib.split_blocks(p["md"])
+    chunks = (paperlib.split_sections if mode == "section" else paperlib.split_blocks)(p["md"])
     backend = STATE["backend"]
     base = os.path.splitext(p.get("name", "paper"))[0]
     name = _unique_dialog(backend, f"paper/{_safe_name(base)}")
     backend.messages(name)                       # create the dialog
-    for b in blocks:
-        backend.add(name, b, "note")
+    for c in chunks:
+        backend.add(name, c, "note")
     STATE["dialog"] = name
     STATE["paper"] = None                        # it's in the notebook now; close the panel
     return Page()

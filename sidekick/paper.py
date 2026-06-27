@@ -81,6 +81,21 @@ def split_blocks(md: str) -> list[str]:
     return [b for b in blocks if b and not _IMG_ONLY.match(b)]
 
 
+def split_sections(md: str) -> list[str]:
+    """Group blocks into sections: each heading plus the blocks under it (until the
+    next heading) become one cell. Content before the first heading is its own cell."""
+    sections, cur = [], []
+    for b in split_blocks(md):
+        if b.lstrip().startswith("#") and cur:
+            sections.append("\n\n".join(cur))
+            cur = [b]
+        else:
+            cur.append(b)
+    if cur:
+        sections.append("\n\n".join(cur))
+    return [s for s in sections if s.strip()]
+
+
 def _clean_md(md: str) -> str:
     """Strip marker's raw-HTML noise so it doesn't show literally under our
     (safe) escape=True rendering: page-anchor spans and sup/sub tags."""
