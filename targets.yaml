@@ -20,11 +20,13 @@ default: local
 # the SolveIt server; `label` is what the UI shows. Reorder/extend freely.
 default_model: claude
 models:
-  - id: claude    # Anthropic
+  - id: claude        # Anthropic API (uses ANTHROPIC_API_KEY / prepaid credits)
     label: Claude
-  - id: glm       # Zhipu GLM
+  - id: claude-cli    # Claude via the `claude` CLI — your subscription (Max), no API credits
+    label: Claude (Max)
+  - id: glm           # Zhipu GLM
     label: GLM
-  - id: codex     # OpenAI Codex
+  - id: codex         # OpenAI Codex
     label: Codex
 
 # `backend` picks how the client talks to a target:

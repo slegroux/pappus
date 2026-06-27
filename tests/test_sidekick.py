@@ -52,7 +52,7 @@ def test_token_from_env(monkeypatch):
 
 def test_models_and_default():
     ids = [m["id"] for m in targets.list_models()]
-    assert ids == ["claude", "glm", "codex"]
+    assert ids == ["claude", "claude-cli", "glm", "codex"]
     assert targets.default_model() == "claude"
 
 
@@ -352,6 +352,157 @@ def test_cell_mute_route_toggles():
     assert m.muted is False
 
 
+# ---- Claude via the `claude` CLI (subscription / Max plan) -----------------
+# The CLI session/command logic lives in sidekick.claude_cli; the kernel server
+# routes the `claude-cli` model to it. Tests drive the module directly, plus one
+# that asserts run_prompt delegates.
+def _mk_cli_run(capture, result="ok", session_id="sid", returncode=0,
+                is_error=False, stdout=None):
+    """Build a fake _run_cli that records the argv/env and returns a JSON result."""
+    import json as _json
+    from types import SimpleNamespace
+
+    def run(cmd, cwd, env, timeout):
+        capture.append({"cmd": cmd, "cwd": cwd, "env": env, "timeout": timeout})
+        body = _json.dumps({"result": result, "session_id": session_id,
+                            "is_error": is_error})
+        return SimpleNamespace(returncode=returncode,
+                               stdout=body if stdout is None else stdout, stderr="")
+    return run
+
+
+def _mk_cli_popen(capture, deltas, session_id="sid", is_error=False):
+    """Build a fake _popen whose stdout emits stream-json lines for `deltas`."""
+    import json as _json
+    from types import SimpleNamespace
+
+    def popen(cmd, cwd, env):
+        capture.append({"cmd": cmd, "cwd": cwd, "env": env})
+        lines = []
+        for d in deltas:
+            lines.append(_json.dumps({"type": "stream_event",
+                "event": {"type": "content_block_delta",
+                          "delta": {"type": "text_delta", "text": d}}}) + "\n")
+        lines.append(_json.dumps({"type": "result", "session_id": session_id,
+                                  "is_error": is_error,
+                                  "result": "".join(deltas)}) + "\n")
+        return SimpleNamespace(stdout=iter(lines), wait=lambda timeout=None: 0)
+    return popen
+
+
+def test_claude_cli_fresh_session_sends_full_context(monkeypatch):
+    import sidekick.claude_cli as cc
+    cc.CLI_SESSIONS.pop("cli/d1", None)
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/bin/claude")
+    monkeypatch.delenv("SIDEKICK_CLAUDE_CLI_MODEL", raising=False)
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-should-be-dropped")
+    cap = []
+    monkeypatch.setattr(cc, "_run_cli", _mk_cli_run(cap, result="a1", session_id="sid-1"))
+
+    out = cc.call("cli/d1", "what is x?", context="<code>x=1</code>")
+    assert out == "a1"
+    cmd = cap[-1]["cmd"]
+    assert "--session-id" in cmd and "--resume" not in cmd      # brand-new session
+    sys_arg = cmd[cmd.index("--append-system-prompt") + 1]
+    assert "<code>x=1</code>" in sys_arg                        # full context shipped
+    assert cmd[-1] == "what is x?"                              # prompt is the positional
+    assert "ANTHROPIC_API_KEY" not in cap[-1]["env"]            # forced onto subscription
+    # lean mode: no MCP servers, no user settings (hooks/auto-memory) -> faster TTFT
+    assert "--strict-mcp-config" in cmd
+    assert cmd[cmd.index("--setting-sources") + 1] == "project"
+    assert cc.CLI_SESSIONS["cli/d1"] == {"id": "sid-1", "sent": "<code>x=1</code>"}
+
+
+def test_claude_cli_appended_cells_resume_with_only_the_delta(monkeypatch):
+    import sidekick.claude_cli as cc
+    cc.CLI_SESSIONS["cli/d2"] = {"id": "sid-9", "sent": "<code>x=1</code>"}
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/bin/claude")
+    cap = []
+    monkeypatch.setattr(cc, "_run_cli", _mk_cli_run(cap, result="a2", session_id="sid-9"))
+
+    new_ctx = "<code>x=1</code>\n<code>y=2</code>"
+    cc.call("cli/d2", "and y?", context=new_ctx)
+    cmd = cap[-1]["cmd"]
+    assert "--resume" in cmd and "sid-9" in cmd                 # continues the session
+    assert "--session-id" not in cmd
+    assert "--append-system-prompt" not in cmd                 # no full re-send
+    user_msg = cmd[-1]
+    assert "y=2" in user_msg and "and y?" in user_msg          # only the new cell + question
+    assert "x=1" not in user_msg                               # old cell not re-sent
+    assert cc.CLI_SESSIONS["cli/d2"]["sent"] == new_ctx
+
+
+def test_claude_cli_edit_above_starts_a_fresh_session(monkeypatch):
+    import sidekick.claude_cli as cc
+    cc.CLI_SESSIONS["cli/d3"] = {"id": "sid-old",
+                                 "sent": "<code>x=1</code>\n<code>y=2</code>"}
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/bin/claude")
+    cap = []
+    monkeypatch.setattr(cc, "_run_cli", _mk_cli_run(cap, result="a3", session_id="sid-new"))
+
+    edited = "<code>x=99</code>\n<code>y=2</code>"              # not a prefix-extension
+    cc.call("cli/d3", "q", context=edited)
+    cmd = cap[-1]["cmd"]
+    assert "--session-id" in cmd and "--resume" not in cmd      # reset, not resumed
+    assert cc.CLI_SESSIONS["cli/d3"] == {"id": "sid-new", "sent": edited}
+
+
+def test_claude_cli_missing_binary_is_friendly(monkeypatch):
+    import sidekick.claude_cli as cc
+    monkeypatch.setattr(cc, "claude_bin", lambda: None)
+    out = cc.call("cli/d4", "q", context="")
+    assert "claude" in out.lower() and "PATH" in out
+
+
+def test_claude_cli_surfaces_error_output(monkeypatch):
+    import sidekick.claude_cli as cc
+    cc.CLI_SESSIONS.pop("cli/d5", None)
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/bin/claude")
+    monkeypatch.setattr(cc, "_run_cli", _mk_cli_run([], is_error=True,
+                                                    result="rate limit reached"))
+    out = cc.call("cli/d5", "q", context="<code>x=1</code>")
+    assert "error" in out.lower() and "rate limit" in out
+    assert "cli/d5" not in cc.CLI_SESSIONS          # failed turn doesn't record a session
+
+
+def test_run_prompt_routes_claude_cli_to_the_module(monkeypatch):
+    # The kernel server delegates the `claude-cli` model to sidekick.claude_cli.
+    import server.kernel_server as ks
+    import sidekick.claude_cli as cc
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/bin/claude")
+    monkeypatch.setattr(cc, "_run_cli", _mk_cli_run([], result="routed", session_id="s"))
+    assert ks.run_prompt("cli/route", "q", "claude-cli", context="c") == "routed"
+    assert ks.CLI_SESSIONS is cc.CLI_SESSIONS        # server shares the one session store
+
+
+def test_claude_cli_stream_yields_deltas_and_records_session(monkeypatch):
+    import sidekick.claude_cli as cc
+    cc.CLI_SESSIONS.pop("cli/s1", None)
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/bin/claude")
+    cap = []
+    monkeypatch.setattr(cc, "_popen",
+                        _mk_cli_popen(cap, ["Hel", "lo ", "world"], session_id="sid-s1"))
+
+    chunks = list(cc.stream("cli/s1", "hi?", context="<code>x=1</code>"))
+    assert chunks == ["Hel", "lo ", "world"]               # streamed in order
+    cmd = cap[-1]["cmd"]
+    assert "stream-json" in cmd and "--session-id" in cmd   # streaming, fresh session
+    assert cc.CLI_SESSIONS["cli/s1"] == {"id": "sid-s1", "sent": "<code>x=1</code>"}
+
+
+def test_claude_cli_stream_resumes_on_append(monkeypatch):
+    import sidekick.claude_cli as cc
+    cc.CLI_SESSIONS["cli/s2"] = {"id": "sid-7", "sent": "<code>x=1</code>"}
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/bin/claude")
+    cap = []
+    monkeypatch.setattr(cc, "_popen", _mk_cli_popen(cap, ["ok"], session_id="sid-7"))
+
+    list(cc.stream("cli/s2", "more?", context="<code>x=1</code>\n<code>y=2</code>"))
+    cmd = cap[-1]["cmd"]
+    assert "--resume" in cmd and "sid-7" in cmd             # streaming resume
+    assert "y=2" in cmd[-1] and "x=1" not in cmd[-1]        # only the delta
+
+
 def test_run_prompt_surfaces_context_when_no_key(monkeypatch, tmp_path):
     import server.kernel_server as ks
     monkeypatch.setenv("SIDEKICK_SECRETS", str(tmp_path / "none.json"))
@@ -362,6 +513,57 @@ def test_run_prompt_surfaces_context_when_no_key(monkeypatch, tmp_path):
 
 
 # ---- secrets store ----------------------------------------------------------
+# ---- streaming AI answers (claude-cli + SSE) -------------------------------
+def test_send_prompt_with_claude_cli_defers_to_stream():
+    import sidekick.app as app
+    app.STATE["dialog"] = "stream/send"
+    app.STATE["backend"].messages("stream/send")
+    app.STATE["pending_stream"] = None
+    app.send(content="hello?", msg_type="prompt", model="claude-cli")
+    m = app.STATE["backend"].messages("stream/send")[-1]
+    assert m.model == "claude-cli"
+    assert m.output == ""                                 # NOT executed inline
+    assert app.STATE["pending_stream"] == ("stream/send", m.id)
+    app.STATE["pending_stream"] = None
+
+
+def test_msgrow_renders_sse_placeholder_for_pending_prompt():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    app.STATE["dialog"] = "stream/row"
+    b = app.STATE["backend"]
+    b.messages("stream/row")
+    m = b.add("stream/row", "q?", "prompt", model="claude-cli")
+    app.STATE["pending_stream"] = ("stream/row", m.id)
+    html = to_xml(app.MsgRow(m))
+    assert "data-stream-url" in html and "/stream?dialog=" in html
+    app.STATE["pending_stream"] = None
+
+
+def test_stream_route_emits_deltas_and_persists_output(monkeypatch):
+    import asyncio
+    import sidekick.app as app
+    app.STATE["dialog"] = "stream/route"
+    b = app.STATE["backend"]
+    b.messages("stream/route")
+    m = b.add("stream/route", "add x and y?", "prompt", model="claude-cli")
+    app.STATE["pending_stream"] = ("stream/route", m.id)
+    monkeypatch.setattr(app, "stream_claude", lambda d, c, ctx: iter(["4", "2"]))
+
+    resp = app.stream_answer(dialog="stream/route", id=m.id)
+
+    async def collect():
+        out = []
+        async for chunk in resp.body_iterator:
+            out.append(chunk.decode() if isinstance(chunk, bytes) else chunk)
+        return "".join(out)
+    body = asyncio.run(collect())
+    assert "event: msg" in body and "event: done" in body
+    assert "42" in body                                  # cumulative render reached "42"
+    assert m.output == "42"                              # persisted for reloads
+    assert app.STATE["pending_stream"] is None           # cleared on completion
+
+
 def test_secrets_save_load_and_status(tmp_path, monkeypatch):
     from sidekick import secrets_store
     monkeypatch.setenv("SIDEKICK_SECRETS", str(tmp_path / "s.json"))

@@ -10,12 +10,13 @@ The whole point: the target switcher in the top-right flips between your laptop
 from __future__ import annotations
 
 import json
-import os
+from urllib.parse import quote
 
 from fasthtml.common import *
 
 from .targets import get_target, list_targets, list_models, default_model
-from .client import connect
+from .client import connect, build_context, _InMemoryBackend
+from .claude_cli import stream as stream_claude, CLI_MODELS
 from . import secrets_store
 
 
@@ -48,7 +49,14 @@ STATE = {
     "dialog": "demo/welcome",
     "model": default_model(),
     "msg_type": "prompt",
+    "pending_stream": None,   # (dialog, msg_id) whose answer is being streamed live
 }
+
+
+def _can_stream(backend, model) -> bool:
+    """Stream a prompt's answer only for the subscription CLI model on an in-process
+    backend (mock/kernel) — its answer doesn't need the remote SolveIt server."""
+    return model in CLI_MODELS and isinstance(backend, _InMemoryBackend)
 
 
 def use_target(name: str):
@@ -281,7 +289,17 @@ def MsgRow(m):
     head = Div(Span("Ask AI", cls="tag"),
                _cell_actions(mid, run_label="Ask", muted=m.muted), cls="who")
     body = [head, _cell_textarea(m)]
-    if m.output:
+    pending = STATE.get("pending_stream") == (STATE["dialog"], mid)
+    if pending and not (m.output or "").strip():
+        # Live answer: a vanilla EventSource (see STREAM_JS) connects to /stream
+        # and replaces this bubble's innerHTML as tokens arrive.
+        who = m.model or "Claude (Max)"
+        body.append(Div(
+            Div(Span(who, cls="tag"), cls="who"),
+            Div(NotStr("▌"), cls="bubble md", id=f"ans-{mid}",
+                **{"data-stream-url": f"/stream?dialog={quote(STATE['dialog'])}&id={mid}"}),
+            cls="answer"))
+    elif m.output:
         who = m.model or "SolveIt AI"
         body.append(Div(Div(Span(who, cls="tag"), cls="who"),
                         Div(render_md(m.output), cls="bubble md"), cls="answer"))
@@ -296,6 +314,22 @@ STREAM_JS = """
   function autosize(el){ el.style.height='auto'; el.style.height=el.scrollHeight+'px'; }
   function sizeAll(){ document.querySelectorAll('.cell-edit').forEach(autosize); }
   if(!hasFieldSizing) requestAnimationFrame(sizeAll);           // wait for final width
+
+  // Live AI answers: connect a vanilla EventSource for each streaming bubble.
+  // 'msg' events carry the cumulative rendered markdown; 'done' closes the stream.
+  // Runs on every #stream (re)render so newly-inserted placeholders get wired.
+  document.querySelectorAll('[data-stream-url]').forEach(function(el){
+    if(el.__streaming) return; el.__streaming = true;
+    var es = new EventSource(el.getAttribute('data-stream-url'));
+    es.addEventListener('msg', function(e){
+      el.innerHTML = e.data;
+      var s = el.closest('.stream'); if(s) s.scrollTop = s.scrollHeight;
+    });
+    es.addEventListener('done', function(){
+      es.close(); el.removeAttribute('data-stream-url'); el.__streaming = false;
+    });
+    es.onerror = function(){ es.close(); };
+  });
 
   if(window.__sidekickCells) return;                            // bind document listeners once
   window.__sidekickCells = true;
@@ -551,7 +585,11 @@ def send(content: str, msg_type: str = "prompt", model: str = None):
         backend = STATE["backend"]
         use_model = STATE["model"] if msg_type == "prompt" else None
         m = backend.add(STATE["dialog"], content, msg_type, model=use_model)
-        if msg_type in ("code", "prompt"):
+        if msg_type == "prompt" and _can_stream(backend, use_model):
+            # Defer the AI call: the page renders an SSE-wired answer that streams
+            # tokens in (the browser opens /stream), instead of blocking here.
+            STATE["pending_stream"] = (STATE["dialog"], m.id)
+        elif msg_type in ("code", "prompt"):
             backend.exec(STATE["dialog"], m.id)
     return Page()
 
@@ -570,9 +608,42 @@ def cell_run(id: str, content: str = ""):
     if hasattr(backend, "update"):
         backend.update(STATE["dialog"], id, content)
     m = _msg_by_id(backend, STATE["dialog"], id)
-    if m is not None and m.msg_type in ("code", "prompt"):
+    if m is not None and m.msg_type == "prompt" and _can_stream(backend, m.model):
+        STATE["pending_stream"] = (STATE["dialog"], id)   # re-ask, streamed live
+    elif m is not None and m.msg_type in ("code", "prompt"):
         backend.exec(STATE["dialog"], id)
     return Stream()
+
+
+@rt("/stream")
+def stream_answer(dialog: str, id: str):
+    """Server-Sent-Events: stream a prompt's AI answer token-by-token.
+
+    The browser's EventSource (see STREAM_JS) connects here for a cell whose
+    answer is pending. We build the notebook context up to that cell, stream the
+    deltas from the `claude` CLI, and emit cumulative rendered markdown as `msg`
+    events — finishing with a `done` event so the client closes the connection.
+    """
+    backend = STATE["backend"]
+    m = _msg_by_id(backend, dialog, id)
+    context = build_context(backend.messages(dialog), upto_id=id) if m else ""
+
+    def gen():
+        if m is None:
+            yield sse_message(Div(""), event="done")
+            return
+        acc = ""
+        for delta in stream_claude(dialog, m.content, context):
+            acc += delta
+            # str() unwraps NotStr -> raw (already-safe) markdown HTML for the data lines
+            yield sse_message(str(render_md(acc)), event="msg")
+        m.output = acc or m.output                       # persist for reloads
+        if STATE.get("pending_stream") == (dialog, id):
+            STATE["pending_stream"] = None
+        yield sse_message(str(render_md(m.output)), event="msg")   # final state
+        yield sse_message(Div(""), event="done")
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
 
 
 @rt("/cell/save", methods=["post"])

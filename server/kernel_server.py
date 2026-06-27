@@ -27,6 +27,8 @@ import os
 import contextlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
+from sidekick import claude_cli   # CLI (subscription) Claude + shared notebook preamble
+
 # Per-dialog execution namespaces — this is the "kernel" state.
 KERNELS: dict[str, dict] = {}
 
@@ -68,17 +70,12 @@ MODEL_NAMES = {
 }
 
 
-# Prepended to the notebook context so the model knows what it's reading.
-_SYSTEM_PREAMBLE = (
-    "You are an AI assistant embedded in a computational notebook — a SolveIt-style "
-    "dialog of code, output, notes, and prior Q&A. The notebook so far is below, in "
-    "order. Use it as context to answer the user's question; refer to variables, "
-    "results, and notes already present.\n\n"
-)
-
-
-def _system(context: str) -> str | None:
-    return (_SYSTEM_PREAMBLE + context) if context else None
+# Subscription-backed Claude (the `claude` CLI) and the shared notebook-context
+# preamble both live in sidekick.claude_cli, so the web app's streaming path and
+# this server's blocking path share one session store + system prompt.
+CLI_MODELS = claude_cli.CLI_MODELS
+CLI_SESSIONS = claude_cli.CLI_SESSIONS     # same dict the app's SSE path advances
+_system = claude_cli.system                # preamble + context, used by the API callers
 
 
 def _call_claude(key: str, content: str, context: str = "") -> str:
@@ -126,6 +123,9 @@ def run_prompt(dialog: str, content: str, model: str, context: str = "") -> str:
     prompt); it's passed to the model as a system preamble. All three providers
     make real calls when keyed."""
     import importlib
+
+    if model in CLI_MODELS:               # subscription-backed Claude (no API key)
+        return claude_cli.call(dialog, content, context)
 
     try:
         from sidekick.secrets_store import key_for_model, PROVIDERS
@@ -192,12 +192,16 @@ class Handler(BaseHTTPRequestHandler):
                              payload.get("context", ""))
             return self._send(200, {"output": out, "model": payload.get("model", "claude")})
         if path == "/reset":
-            KERNELS.pop(payload.get("dialog", ""), None)
+            d = payload.get("dialog", "")
+            KERNELS.pop(d, None)
+            CLI_SESSIONS.pop(d, None)         # drop the CLI session too
             return self._send(200, {"ok": True})
         if path == "/rename":
             old, new = payload.get("old", ""), payload.get("new", "")
             if old in KERNELS and new:
                 KERNELS[new] = KERNELS.pop(old)
+            if old in CLI_SESSIONS and new:    # carry the session to the new name
+                CLI_SESSIONS[new] = CLI_SESSIONS.pop(old)
             return self._send(200, {"ok": True})
         return self._send(404, {"error": "not found"})
 
