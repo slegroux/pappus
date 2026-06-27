@@ -1136,6 +1136,16 @@ def test_paper_step_noop_when_not_ready_or_empty():
     app.STATE["paper"] = None
 
 
+def test_paper_toggle_only_shows_when_a_paper_is_loaded():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    app.STATE["paper"] = None
+    assert 'id="tgl-paper"' not in to_xml(app.Page())          # no paper -> no 📖 toggle
+    app.STATE["paper"] = {"name": "p.pdf", "status": "ready", "md": "# A\n\nx", "engine": "pypdf"}
+    assert 'id="tgl-paper"' in to_xml(app.Page())              # paper loaded -> toggle appears
+    app.STATE["paper"] = None
+
+
 def test_dialog_tree_nests_and_drops_empty_segments():
     import sidekick.app as app
     t = app._dialog_tree(["a/b", "a/c", "top"])

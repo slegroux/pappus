@@ -1429,9 +1429,11 @@ def Page():
                 Div(Span("🗂", cls="gear tgl", id="tgl-side",
                          title="Show/hide the dialogs panel",
                          onclick="toggleCol('no-side','sidekick_noside')"),
-                    Span("📖", cls="gear tgl", id="tgl-paper",
-                         title="Show/hide the paper (PDF / markdown) viewer",
-                         onclick="toggleCol('no-paper','sidekick_nopaper')"),
+                    # only meaningful once a paper is loaded
+                    (Span("📖", cls="gear tgl", id="tgl-paper",
+                          title="Show/hide the paper (PDF / markdown) viewer",
+                          onclick="toggleCol('no-paper','sidekick_nopaper')")
+                     if STATE.get("paper") else None),
                     Span("☰", cls="gear tgl toc-toggle", id="tgl-toc",
                          title="Show/hide the table of contents",
                          onclick="toggleCol('toc-open','sidekick_toc')"),
