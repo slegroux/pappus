@@ -209,6 +209,78 @@ def test_cell_delete_route_removes_cell():
     assert len(b.messages("cell/del")) == before - 1
 
 
+# ---- LiveBackend <-> solveit_client mapping --------------------------------
+# These lock how we map onto solveit_client.core without needing a live SolveIt
+# server (or the package installed): a fake Dialog/Message mirrors the real one,
+# where message fields live in `m.data` with keys id/msg_type/content/output.
+class _FakeMsg:
+    def __init__(self, data):
+        self.data = data
+        self.exec_called = self.deleted = False
+        self.updated = None
+
+    def exec(self):
+        self.exec_called = True
+        self.data["output"] = "42"          # server fills output on run
+        return self
+
+    def update(self, **kw):
+        self.data.update(kw)
+        self.updated = kw
+        return ("msg", "diff")              # real API returns a MsgDiff
+
+    def delete(self):
+        self.deleted = True
+        return self
+
+
+class _FakeDlg:
+    def __init__(self):
+        self._msgs = [_FakeMsg({"id": "m1", "msg_type": "code", "content": "6*7", "output": ""})]
+
+    @property
+    def messages(self):
+        return self._msgs
+
+    def read_msg(self, n=0, id=None):
+        return next(m for m in self._msgs if m.data["id"] == id)
+
+    def add_msg(self, content, msg_type="code"):   # NB: no `model` kwarg, like the real API
+        m = _FakeMsg({"id": "m2", "msg_type": msg_type, "content": content, "output": ""})
+        self._msgs.append(m)
+        return m
+
+
+def _live_backend_with(fake):
+    from sidekick.client import LiveBackend
+    b = LiveBackend.__new__(LiveBackend)   # bypass __init__: no solveit_client / no network
+    b._dlg = lambda dialog: fake
+    return b
+
+
+def test_live_backend_reads_fields_from_message_data():
+    m = _live_backend_with(_FakeDlg()).messages("d")[0]
+    assert (m.id, m.msg_type, m.content) == ("m1", "code", "6*7")
+
+
+def test_live_backend_add_keeps_model_but_does_not_pass_it_to_add_msg():
+    # add_msg() has no `model` param; forwarding one would TypeError. add() must
+    # keep model on our Msg (for display) without sending it to SolveIt.
+    m = _live_backend_with(_FakeDlg()).add("d", "x=1", "prompt", model="glm")
+    assert m.content == "x=1" and m.model == "glm"
+
+
+def test_live_backend_exec_update_delete_call_real_methods():
+    fake = _FakeDlg()
+    b = _live_backend_with(fake)
+    out = b.exec("d", "m1")
+    assert out.output == "42" and fake._msgs[0].exec_called
+    b.update("d", "m1", "7*6")
+    assert fake._msgs[0].data["content"] == "7*6" and fake._msgs[0].updated == {"content": "7*6"}
+    b.delete("d", "m1")
+    assert fake._msgs[0].deleted
+
+
 # ---- secrets store ----------------------------------------------------------
 def test_secrets_save_load_and_status(tmp_path, monkeypatch):
     from sidekick import secrets_store

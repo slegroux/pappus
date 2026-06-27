@@ -100,8 +100,24 @@ class MockBackend(_InMemoryBackend):
         return m
 
 
+def _live_msg(m, model: str | None = None) -> Msg:
+    """Build our Msg from a solveit_client Message.
+
+    solveit_client stores message fields in `m.data` (and exposes them via
+    attribute access); the field names match SolveIt's own CLI:
+    `['id', 'msg_type', 'content', 'output']`.
+    """
+    d = getattr(m, "data", None) or {}
+    return Msg(d.get("id", ""), d.get("msg_type", "code") or "code",
+               d.get("content", "") or "", d.get("output", "") or "", model)
+
+
 class LiveBackend:
-    """Adapter onto solveit_client.SolveItClient."""
+    """Adapter onto solveit_client — Answer.AI's real SolveIt server.
+
+    Maps our backend protocol onto `solveit_client.core` (SolveItClient / Dialog
+    / Message). Used when a target sets `backend: solveit`.
+    """
 
     live = True
 
@@ -112,70 +128,37 @@ class LiveBackend:
         self.sic = SolveItClient(target.url, token=target.token)
 
     def list_dialogs(self) -> list[str]:
-        # solveit_client doesn't expose a stable list endpoint across versions;
-        # the UI lets you open/create by name, so we return what we know.
+        # SolveIt's client has no list-dialogs endpoint; the UI opens/creates by
+        # name, so there's nothing reliable to enumerate.
         return []
 
     def _dlg(self, dialog: str):
-        return self.sic.create_dialog(dialog)  # create_dialog opens if it exists
+        # create_dialog is SolveIt's open-or-create: it returns the existing
+        # dialog if `dialog` already exists, else makes it. Our UI addresses
+        # dialogs purely by name, so this is the single entry point we need.
+        return self.sic.create_dialog(dialog)
 
     def messages(self, dialog: str) -> list[Msg]:
-        dlg = self._dlg(dialog)
-        out = []
-        for m in dlg.messages:
-            d = m if isinstance(m, dict) else m.__dict__
-            out.append(Msg(d.get("id", ""), d.get("msg_type", "code"),
-                           d.get("content", ""), d.get("output", "")))
-        return out
+        return [_live_msg(m) for m in self._dlg(dialog).messages]
 
     def add(self, dialog: str, content: str, msg_type: str, model: str | None = None) -> Msg:
-        # Pass model only for prompts, and only if this solveit_client build
-        # accepts it — older versions don't, so we degrade gracefully.
-        kw = {"msg_type": msg_type}
-        if model and msg_type == "prompt":
-            kw["model"] = model
-        try:
-            d = self._dlg(dialog).add_msg(content, **kw)
-        except TypeError:
-            kw.pop("model", None)
-            d = self._dlg(dialog).add_msg(content, **kw)
-        d = d if isinstance(d, dict) else d.__dict__
-        return Msg(d.get("id", ""), msg_type, content, d.get("output", ""), model)
+        # add_msg has no `model` parameter — SolveIt selects the AI per dialog,
+        # not per message — so `model` stays on our own Msg for display only.
+        m = self._dlg(dialog).add_msg(content, msg_type=msg_type)
+        return _live_msg(m, model if msg_type == "prompt" else None)
 
     def exec(self, dialog: str, msg_id: str) -> Msg:
-        dlg = self._dlg(dialog)
-        m = dlg.read_msg(id=msg_id)
-        m.exec()
-        d = m if isinstance(m, dict) else m.__dict__
-        return Msg(d.get("id", msg_id), d.get("msg_type", "code"),
-                   d.get("content", ""), d.get("output", ""))
+        m = self._dlg(dialog).read_msg(id=msg_id)
+        m.exec()                 # queues + polls to completion, refreshing m.data
+        return _live_msg(m)
 
-    def update(self, dialog: str, msg_id: str, content: str) -> Msg | None:
-        # solveit_client's edit API varies across versions; try the common
-        # shapes and degrade to a no-op rather than break the UI.
-        dlg = self._dlg(dialog)
-        try:
-            m = dlg.read_msg(id=msg_id)
-            if hasattr(m, "update"):
-                m.update(content=content)
-            elif hasattr(dlg, "update_msg"):
-                dlg.update_msg(msg_id, content)
-            else:
-                return None
-        except Exception:  # noqa: BLE001 — older clients may not support edits
-            return None
-        return Msg(msg_id, "code", content)
+    def update(self, dialog: str, msg_id: str, content: str) -> Msg:
+        m = self._dlg(dialog).read_msg(id=msg_id)
+        m.update(content=content)   # refreshes m.data with the edited content
+        return _live_msg(m)
 
     def delete(self, dialog: str, msg_id: str) -> None:
-        dlg = self._dlg(dialog)
-        try:
-            m = dlg.read_msg(id=msg_id)
-            if hasattr(m, "delete"):
-                m.delete()
-            elif hasattr(dlg, "delete_msg"):
-                dlg.delete_msg(msg_id)
-        except Exception:  # noqa: BLE001 — best effort across client versions
-            pass
+        self._dlg(dialog).read_msg(id=msg_id).delete()
 
 
 class HttpKernelBackend(_InMemoryBackend):
