@@ -53,7 +53,7 @@ def test_token_from_env(monkeypatch):
 def test_models_and_default():
     ids = [m["id"] for m in targets.list_models()]
     assert ids == ["claude", "glm", "codex"]
-    assert targets.default_model() == "claude"
+    assert targets.default_model() == "codex"
 
 
 def test_unknown_target_raises():

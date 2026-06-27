@@ -188,6 +188,11 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .code-view .highlight{margin:0;border-radius:11px;overflow:auto}
 .code-view .highlight pre{margin:0;padding:11px 14px;border-radius:11px;
   font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;line-height:1.5}
+/* CodeMirror: highlight-while-editing for code cells (matches the rendered look) */
+.CodeMirror{height:auto;border:1px solid #3a3933;border-radius:11px;
+  font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;line-height:1.5}
+.CodeMirror-scroll{min-height:auto}
+.CodeMirror-lines{padding:9px 0}
 .cell-btn{font-size:12px;border:1px solid var(--line);background:#fff;border-radius:7px;padding:3px 11px;
   cursor:pointer;color:var(--muted);line-height:1.6}
 .cell-btn:hover{border-color:#d4d0c4;color:var(--ink)}
@@ -370,7 +375,7 @@ def MsgRow(m):
 
 
 def _cell_edit(m):
-    """A cell switched into edit mode: a raw textarea + Save/Run/Ask + Cancel."""
+    """A cell switched into edit mode: a raw editor + Save/Run/Ask + Cancel."""
     mid = m.id
     path = "/cell/save" if m.msg_type == "note" else "/cell/run"
     primary = [
@@ -380,12 +385,47 @@ def _cell_edit(m):
         Button("Cancel", type="button", cls="cell-btn",
                hx_get=f"/cell/view?id={mid}", hx_target=f"#cell-{mid}", hx_swap="outerHTML"),
     ]
-    focus = Script(f"(function(){{var t=document.getElementById('ta-{mid}');"
-                   f"if(t){{t.focus();var n=t.value.length;t.setSelectionRange(n,n);}}}})()")
+    # Code cells get CodeMirror (highlight-while-editing); notes/prompts just focus.
+    js = (_CODE_EDITOR_JS if m.msg_type == "code" else _FOCUS_JS).replace("__MID__", mid)
     return Div(_head(m, primary, show_actions=True),
                _cell_textarea(m, code=(m.msg_type == "code")),
-               *_output_views(m), focus,
+               *_output_views(m), Script(js),
                cls=_rowcls(m), id=f"cell-{mid}")
+
+
+# Editor init for an edit-mode cell. CodeMirror highlights Python as you type and
+# keeps the underlying textarea synced (so htmx hx-include still posts the source);
+# if CodeMirror didn't load, fall back to focusing the plain textarea.
+_CODE_EDITOR_JS = """
+(function(){
+  var ta = document.getElementById('ta-__MID__');
+  if(!ta) return;
+  function runCell(){
+    var row = ta.closest('.row');
+    var btn = row && row.querySelector('.cell-btn.run');
+    if(btn) btn.click();
+  }
+  if(window.CodeMirror){
+    var cm = CodeMirror.fromTextArea(ta, {
+      mode: 'python', theme: 'monokai', lineNumbers: false,
+      viewportMargin: Infinity, indentUnit: 4, lineWrapping: true,
+      extraKeys: { 'Cmd-Enter': function(){ cm.save(); runCell(); },
+                   'Ctrl-Enter': function(){ cm.save(); runCell(); } }
+    });
+    cm.on('change', function(){ cm.save(); });   // keep textarea current for hx-include
+    setTimeout(function(){ cm.refresh(); cm.focus(); cm.setCursor(cm.lineCount(), 0); }, 0);
+  } else {
+    ta.focus(); var n = ta.value.length; ta.setSelectionRange(n, n);
+  }
+})();
+"""
+
+_FOCUS_JS = """
+(function(){
+  var t = document.getElementById('ta-__MID__');
+  if(t){ t.focus(); var n = t.value.length; t.setSelectionRange(n, n); }
+})();
+"""
 
 
 STREAM_JS = """
@@ -568,7 +608,16 @@ def Page():
         # hx-post buttons render but do nothing, since we return a full Html
         # document and FastHTML only auto-injects those headers when it wraps
         # body content itself.
-        Head(Title("SolveIt Sidekick"), *app.hdrs, Style(CSS)),
+        # CodeMirror gives syntax-highlight-while-editing for code cells; if it
+        # fails to load (offline) the editor degrades to a plain textarea.
+        Head(Title("SolveIt Sidekick"), *app.hdrs,
+             Link(rel="stylesheet",
+                  href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css"),
+             Link(rel="stylesheet",
+                  href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/monokai.min.css"),
+             Script(src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"),
+             Script(src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"),
+             Style(CSS)),
         Body(Div(
             Sidebar(),
             Div(
