@@ -892,7 +892,7 @@ STREAM_JS = """
       values: {id: id, msg_type: 'code', where: where}});
   }
   document.addEventListener('keydown', function(e){
-    if(e.metaKey || e.ctrlKey) return;
+    if((e.metaKey || e.ctrlKey) && e.key !== 'Enter') return;   // allow Cmd/Ctrl+Enter through
     var inEditor = window.__inEditor(e.target);
 
     if(e.key === 'Escape'){                        // leave edit mode -> command mode
@@ -917,12 +917,19 @@ STREAM_JS = """
     } else if(e.key === 'ArrowUp' || e.key === 'k'){
       e.preventDefault();
       window.__selectCell(ids[idx < 0 ? ids.length - 1 : Math.max(0, idx - 1)], true);
-    } else if(e.key === 'Enter'){                  // enter edit mode / focus the editor
+    } else if(e.key === 'Enter'){
       if(idx < 0) return;
       e.preventDefault();
       var row = document.getElementById('cell-' + window.__selCell);
+      if(e.shiftKey || e.metaKey || e.ctrlKey){    // Jupyter: run the cell, don't edit it
+        var rb = row && row.querySelector('.cell-btn.run');
+        if(rb) rb.click();                         // code/prompt run; a note is already rendered
+        if(e.shiftKey && !e.metaKey && !e.ctrlKey) // Shift+Enter also advances to the next cell
+          window.__selectCell(ids[Math.min(ids.length - 1, idx + 1)], true);
+        return;
+      }
       var view = row && row.querySelector('.clickedit');
-      if(view){ view.click(); return; }            // rendered cell -> open its editor
+      if(view){ view.click(); return; }            // plain Enter: rendered cell -> open its editor
       var cm = row && row.querySelector('.CodeMirror');
       if(cm && cm.CodeMirror){ cm.CodeMirror.focus(); return; }
       var ta = row && row.querySelector('textarea');
