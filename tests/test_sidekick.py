@@ -174,6 +174,38 @@ def test_delete_removes_the_cell():
     assert a.id not in ids and keep.id in ids
 
 
+def test_fallback_model_is_subscription_not_api():
+    # A model-less prompt must default to the configured default (Claude Max via
+    # the CLI), never silently to the paid Anthropic API ('claude').
+    from sidekick.client import _fallback_model
+    assert _fallback_model() == "claude-cli"
+
+
+def test_model_label_resolves_id_to_friendly_name():
+    import sidekick.app as app
+    assert app._model_label("claude-cli") == "Claude (Max)"
+    assert app._model_label("claude") == "Claude"
+    assert app._model_label(None) == "Claude (Max)"      # model-less -> default label
+    assert app._model_label("nope") == "nope"            # unknown id passes through
+
+
+def test_kernel_prompt_without_model_routes_to_subscription():
+    from sidekick.client import HttpKernelBackend, Msg
+    b = HttpKernelBackend.__new__(HttpKernelBackend)     # skip __init__ (no live target)
+    b._dialogs, b._undo, b._store_key = {}, [], None
+    sent = {}
+
+    def fake_post(path, body):
+        sent["path"], sent["body"] = path, body
+        return {"output": "ok"}
+
+    b._post, b._save = fake_post, lambda: None
+    b._dialogs["d"] = [Msg(id="_x", msg_type="prompt", content="hi", model=None)]
+    b.exec("d", "_x")
+    assert sent["path"] == "/prompt"
+    assert sent["body"]["model"] == "claude-cli"          # not "claude" (the API path)
+
+
 def test_undo_restores_deleted_cell_at_its_position():
     b = MockBackend()
     a = b.add("u/x", "a = 1", "code")

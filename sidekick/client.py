@@ -14,7 +14,17 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from .targets import Target
+from .targets import Target, default_model
+
+
+def _fallback_model() -> str:
+    """The model to assume for a prompt cell that has none recorded. Follows the
+    user's configured default (Claude Max via the CLI, out of the box) so a
+    model-less cell never silently routes to the paid Anthropic API."""
+    try:
+        return default_model()
+    except Exception:  # noqa: BLE001 — no/unreadable config: keep the subscription default
+        return "claude-cli"
 
 
 @dataclass
@@ -391,7 +401,8 @@ class HttpKernelBackend(_InMemoryBackend):
             # the way a real SolveIt dialog does.
             context = build_context(self._dialogs.get(dialog, []), upto_id=msg_id)
             r = self._post("/prompt", {"dialog": dialog, "content": m.content,
-                                       "model": m.model or "claude", "context": context})
+                                       "model": m.model or _fallback_model(),
+                                       "context": context})
             m.output = r["output"]
         self._save()                         # persist the new output/plots
         return m

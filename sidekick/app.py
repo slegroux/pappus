@@ -464,6 +464,20 @@ def _ctx_buttons(m):
     ]
 
 
+def _model_label(mid: str | None, default: str = "Claude (Max)") -> str:
+    """Friendly label for a model id (e.g. 'claude-cli' -> 'Claude (Max)'). Falls
+    back to the configured default's label so a model-less answer never mislabels."""
+    if not mid:
+        return default
+    try:
+        for m in list_models():
+            if m["id"] == mid:
+                return m["label"]
+    except Exception:  # noqa: BLE001 — config issue: show the id rather than crash
+        pass
+    return mid
+
+
 def _rich_view(item):
     """Render one rich kernel output (plot/image/dataframe)."""
     t, data = item.get("type", ""), item.get("data", "")
@@ -506,14 +520,14 @@ def _output_views(m):
         if pending and not (m.output or "").strip():
             # Live answer: a vanilla EventSource (see STREAM_JS) connects to /stream
             # and replaces this bubble's innerHTML as tokens arrive.
-            who = m.model or "Claude (Max)"
+            who = _model_label(m.model)
             out.append(Div(
                 Div(Span(who, cls="tag"), cls="who"),
                 Div(NotStr("▌"), cls="bubble md", id=f"ans-{m.id}",
                     **{"data-stream-url": f"/stream?dialog={quote(STATE['dialog'])}&id={m.id}"}),
                 cls="answer"))
         elif m.output:
-            who = m.model or "SolveIt AI"
+            who = _model_label(m.model, default="SolveIt AI")
             out.append(Div(Div(Span(who, cls="tag"), cls="who"),
                            Div(render_md(m.output), cls="bubble md"), cls="answer"))
     return out
