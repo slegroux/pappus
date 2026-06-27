@@ -1103,6 +1103,39 @@ def test_paper_import_selection_adds_note_and_code():
     app.STATE["paper"] = None
 
 
+def test_cell_export_route_toggles_directive_and_keeps_output():
+    import sidekick.app as app
+    app.STATE["dialog"] = "cell/exp"
+    b = app.STATE["backend"]; b.messages("cell/exp")
+    m = b.add("cell/exp", "def f(): return 1", "code"); m.output = "ran"
+    app.cell_export(id=m.id)
+    got = b.messages("cell/exp")[0]
+    assert app.export.has_export(got.content)
+    assert got.output == "ran"                          # in-memory toggle must NOT clear output
+    app.cell_export(id=m.id)
+    assert not app.export.has_export(b.messages("cell/exp")[0].content)
+
+
+def test_cell_export_route_ignores_non_code():
+    import sidekick.app as app
+    app.STATE["dialog"] = "cell/exp2"
+    b = app.STATE["backend"]; b.messages("cell/exp2")
+    m = b.add("cell/exp2", "# just a note", "note")
+    app.cell_export(id=m.id)
+    assert b.messages("cell/exp2")[0].content == "# just a note"   # unchanged
+
+
+def test_paper_step_noop_when_not_ready_or_empty():
+    import sidekick.app as app
+    app.STATE["paper"] = {"name": "x.pdf", "status": "converting"}
+    app.paper_step()
+    assert "dialog" not in app.STATE["paper"]            # nothing imported while converting
+    app.STATE["paper"] = {"name": "x.pdf", "status": "ready", "md": "   "}
+    app.paper_step()
+    assert "dialog" not in app.STATE["paper"]            # nothing imported from empty md
+    app.STATE["paper"] = None
+
+
 def test_dialog_tree_nests_and_drops_empty_segments():
     import sidekick.app as app
     t = app._dialog_tree(["a/b", "a/c", "top"])
