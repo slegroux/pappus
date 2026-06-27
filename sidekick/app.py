@@ -538,11 +538,22 @@ function setMode(v){
     el.classList.toggle('sel', el.getAttribute('data-val') === v);
   });
 }
+var COMPOSER_MODES = ['prompt','code','note'];   // order matches the chips: Ask AI / Code / Note
+function cycleMode(dir){
+  var i = COMPOSER_MODES.indexOf(document.getElementById('msgType').value);
+  if(i < 0) i = 0;
+  setMode(COMPOSER_MODES[(i + dir + COMPOSER_MODES.length) % COMPOSER_MODES.length]);
+}
 (function(){
   var ta = document.getElementById('composerInput');
   if(!ta) return;
   ta.focus();
   ta.addEventListener('keydown', function(e){
+    if(e.key === 'Tab'){                 // Tab cycles Ask AI -> Code -> Note (Shift+Tab back)
+      e.preventDefault();
+      cycleMode(e.shiftKey ? -1 : 1);
+      return;
+    }
     if(e.key === 'Enter' && !e.shiftKey){
       e.preventDefault();
       if(ta.value.trim()) document.getElementById('composerForm').submit();
