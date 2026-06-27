@@ -170,12 +170,16 @@ def tangle(msgs: list, pkg_name: str) -> tuple[dict[str, str], list[str]]:
 
 
 def _header(pkg_name: str, source_url: str | None, dialog_name: str | None) -> str:
+    # Provenance as comment lines, not a docstring: dialog_name / source_url are
+    # user-controlled, and a `"""` (or trailing `\`) in them would terminate a
+    # docstring early, producing an invalid / injected module. A `#` comment is
+    # injection-proof for single-line content (newlines flattened to spaces).
     lines = [f"Part of the `{pkg_name}` package, generated from a SolveIt dialog."]
     if dialog_name:
         lines.append(f"Source dialog: {dialog_name}")
     if source_url:
         lines.append(f"Derived from: {source_url}")
-    return '"""' + "\n".join(lines) + '\n"""\n\n'
+    return "".join(f"# {ln.replace(chr(10), ' ')}\n" for ln in lines) + "\n"
 
 
 def dialog_to_package(msgs: list, pkg_name: str, source_url: str | None = None,
@@ -196,14 +200,19 @@ def dialog_to_package(msgs: list, pkg_name: str, source_url: str | None = None,
     all_imports: set[str] = set()
     init_lines: list[str] = []
     all_names: list[str] = []
+    taken: set[str] = set()                  # names already re-exported by an earlier module
     for mod, src in modules.items():
         body = _header(pkg, source_url, dialog_name) + src
         files[f"src/{pkg}/{mod}.py"] = body
         all_imports |= _imports(src)
-        names = _public_names(src)
-        all_names += names
-        if names:
-            init_lines.append(f"from .{mod} import {', '.join(names)}")
+        # Re-export only names not already taken: two modules defining `f` would
+        # otherwise shadow each other at the package top level and duplicate `f`
+        # in __all__. First definition wins; the module itself is still importable.
+        fresh = [n for n in _public_names(src) if n not in taken]
+        taken.update(fresh)
+        all_names += fresh
+        if fresh:
+            init_lines.append(f"from .{mod} import {', '.join(fresh)}")
         else:
             init_lines.append(f"from . import {mod}  # noqa: F401")
 

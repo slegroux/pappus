@@ -88,6 +88,31 @@ def test_provenance_header_and_source():
     assert "adder-dialog" in files["src/adder/core.py"]
 
 
+def test_hostile_dialog_name_produces_valid_module():
+    # A dialog name containing triple-quotes / backslashes must not break the
+    # generated module (no docstring injection / SyntaxError).
+    import ast
+    evil = 'evil"""\\n+__import__(\'os\').system("x")#'
+    files = export.dialog_to_package(
+        [Msg(id="_c", msg_type="code", content="#| export\nx = 1")],
+        "pkg", dialog_name=evil, source_url='">>>"')
+    for rel, content in files.items():
+        if rel.endswith(".py"):
+            ast.parse(content)                       # every module stays valid Python
+    assert evil.replace("\n", " ") in files["src/pkg/core.py"]   # provenance preserved
+
+
+def test_duplicate_export_names_deduped_across_modules():
+    # Two modules each defining `f`: __init__ must not duplicate it or shadow-import.
+    import ast
+    msgs = [Msg(id="_a", msg_type="code", content="#| export m1\ndef f(): return 1"),
+            Msg(id="_b", msg_type="code", content="#| export m2\ndef f(): return 2")]
+    init = export.dialog_to_package(msgs, "p")["src/p/__init__.py"]
+    ast.parse(init)                                  # valid
+    assert init.count('"f"') == 1                    # f appears once in __all__
+    assert init.count("import f") == 1               # re-exported once (first wins)
+
+
 def test_generated_package_imports(tmp_path):
     """The tangled package must actually import and expose its symbols."""
     files = export.dialog_to_package(_dialog(), "adder")
