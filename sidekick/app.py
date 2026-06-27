@@ -191,6 +191,10 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
 .title-edit:focus{border-color:var(--accent);background:var(--panel)}
 .gear{text-decoration:none;font-size:18px;color:var(--muted);line-height:1}
 .gear:hover{color:var(--ink)}
+.gear.tgl{cursor:pointer;border-radius:7px;padding:2px 4px;transition:opacity .12s,background .12s}
+/* a panel-toggle whose panel is hidden: dimmed, so what's collapsed is obvious */
+.gear.tgl.off{opacity:.34}
+.gear.tgl.off:hover{opacity:1;background:var(--chip)}
 /* export dropdown */
 .export{position:relative}
 .export>summary{list-style:none;cursor:pointer}
@@ -1045,11 +1049,25 @@ window.buildTOC = function(){
     list.appendChild(a);
   });
 };
+// Dim a toggle's icon when its panel is hidden, so what's collapsed is obvious
+// at a glance — and one click on the dimmed icon brings the panel back.
+window.syncToggles = function(){
+  var app = document.querySelector('.app');
+  if(!app) return;
+  function set(id, hidden){
+    var b = document.getElementById(id);
+    if(b) b.classList.toggle('off', hidden);
+  }
+  set('tgl-side', app.classList.contains('no-side'));
+  set('tgl-content', app.classList.contains('no-content'));
+  set('tgl-toc', !app.classList.contains('toc-open'));
+};
 window.toggleTOC = function(){
   var app = document.querySelector('.app');
   if(!app) return;
   var open = app.classList.toggle('toc-open');
   try { localStorage.setItem('sidekick_toc', open ? '1' : '0'); } catch(e){}
+  window.syncToggles();
 };
 // Generic column toggle (hide dialogs / notebook), persisted in localStorage.
 window.toggleCol = function(cls, key){
@@ -1057,6 +1075,7 @@ window.toggleCol = function(cls, key){
   if(!app) return;
   var on = app.classList.toggle(cls);
   try { localStorage.setItem(key, on ? '1' : '0'); } catch(e){}
+  window.syncToggles();
 };
 (function(){
   var app = document.querySelector('.app');
@@ -1069,6 +1088,7 @@ window.toggleCol = function(cls, key){
   restore('sidekick_toc', 'toc-open', true);          // TOC default open
   restore('sidekick_noside', 'no-side', false);       // dialogs default shown
   restore('sidekick_nocontent', 'no-content', false); // notebook default shown
+  window.syncToggles();
   window.buildTOC();
 })();
 """
@@ -1168,13 +1188,16 @@ def Page():
             # global top bar — above all columns, so its toggles stay reachable
             # even when the dialogs or notebook columns are hidden.
             Div(
-                Div(Span("🗂", cls="gear", title="Show/hide the dialogs panel",
+                Div(Span("🗂", cls="gear tgl", id="tgl-side",
+                         title="Show/hide the dialogs panel",
                          onclick="toggleCol('no-side','sidekick_noside')"),
-                    Span("📓", cls="gear", title="Show/hide the notebook panel",
+                    Span("📓", cls="gear tgl", id="tgl-content",
+                         title="Show/hide the notebook panel",
                          onclick="toggleCol('no-content','sidekick_nocontent')"),
                     TitleEditor(),
                     cls="topbar-left"),
-                Div(Span("☰", cls="gear toc-toggle", title="Toggle table of contents",
+                Div(Span("☰", cls="gear tgl toc-toggle", id="tgl-toc",
+                         title="Show/hide the table of contents",
                          onclick="toggleTOC()"),
                     Details(Summary("📄", cls="gear", title="Open a paper (PDF)"),
                             Form(Label("Choose a PDF…", cls="paper-file-label"),
