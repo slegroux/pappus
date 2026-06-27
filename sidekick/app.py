@@ -174,9 +174,14 @@ body.col-resizing{cursor:col-resize;user-select:none}
 .sel-btn.import{background:var(--accent);color:#fff;font-weight:600}
 .sel-btn:not(.import){background:var(--panel);color:var(--ink);border:1px solid var(--line)}
 /* the 📄 topbar icon IS the file picker: a label wrapping a hidden file input */
-.paper-form{display:inline-flex;align-items:center;margin:0}
-.paper-pick{cursor:pointer}
 .paper-file{display:none}
+/* "open a source" dropdown: a PDF file pick or a web-page URL */
+.src-form{position:absolute;right:0;top:28px;z-index:30;display:flex;flex-direction:column;gap:8px;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;min-width:248px;
+  box-shadow:0 6px 18px rgba(0,0,0,.12)}
+.src-file-label{font-size:13px;font-weight:600;color:var(--accent);cursor:pointer}
+.src-url{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;font-size:13px;outline:none}
+.src-url:focus{border-color:var(--accent)}
 /* table of contents (right column, toggleable, full-height so it stays in view) */
 .toc{display:none;background:var(--sidebar);border-left:1px solid var(--line);
   padding:16px 14px;overflow:auto}
@@ -1439,13 +1444,21 @@ def Page():
                          onclick="toggleCol('toc-open','sidekick_toc')"),
                     TitleEditor(),
                     cls="topbar-left"),
-                Div(Form(Label("📄",
-                              Input(type="file", name="pdf", accept="application/pdf,.pdf",
-                                    cls="paper-file",
-                                    onchange="try{localStorage.removeItem('sidekick_nopaper')}catch(e){};this.form.submit()"),
-                              cls="gear paper-pick", title="Open a paper (PDF) — choose a file"),
-                         method="post", action="/paper/open",
-                         enctype="multipart/form-data", cls="paper-form"),
+                Div(Details(
+                        Summary("📄", cls="gear", title="Open a source — a PDF or a web page"),
+                        Form(
+                            Label("Choose a PDF…",
+                                  Input(type="file", name="pdf", accept="application/pdf,.pdf",
+                                        cls="paper-file",
+                                        onchange="try{localStorage.removeItem('sidekick_nopaper')}catch(e){};this.form.submit()"),
+                                  cls="src-file-label"),
+                            Span("or a web page / blog", cls="ins-col-head"),
+                            Input(name="url", type="url", placeholder="https://…", cls="src-url"),
+                            Button("Open URL", cls="cell-btn run", type="submit"),
+                            method="post", action="/paper/open", enctype="multipart/form-data",
+                            cls="src-form",
+                            onsubmit="try{localStorage.removeItem('sidekick_nopaper')}catch(e){}"),
+                        cls="export"),
                     Details(Summary("⬇", cls="gear", title="Export this dialog"),
                             Div(A("Jupyter notebook (.ipynb)", href="/export/ipynb"),
                                 A("Markdown (.md)", href="/export/md"),
@@ -1882,6 +1895,36 @@ def _convert_paper_async(path: str, name: str | None = None):
     threading.Thread(target=work, daemon=True).start()
 
 
+def _url_name(url: str) -> str:
+    """A readable panel/dialog name for a web page: its last path segment, else host."""
+    from urllib.parse import urlparse
+    u = urlparse(url)
+    seg = [s for s in u.path.split("/") if s]
+    base = os.path.splitext(seg[-1])[0] if seg else u.netloc
+    return base or u.netloc or "page"
+
+
+def _convert_url_async(url: str, name: str):
+    """Fetch + convert a web page to markdown in a background thread (same panel
+    lifecycle as a PDF: 'converting' → 'ready'/'error', polled by the panel)."""
+    STATE["paper"] = {"name": name, "status": "converting", "source": url}
+
+    def work():
+        try:
+            md, engine = paperlib.convert_url(url)
+            if md.strip():
+                STATE["paper"] = {"name": name, "status": "ready", "md": md,
+                                  "engine": engine, "source": url}
+            else:
+                STATE["paper"] = {"name": name, "status": "ready", "engine": "error",
+                                  "md": f"**Couldn't extract anything from** `{url}`"}
+        except Exception as e:  # noqa: BLE001 — surface fetch/extract failures in the panel
+            STATE["paper"] = {"name": name, "status": "ready", "engine": "error",
+                              "md": f"Could not open `{url}`:\n\n```\n{e}\n```"}
+
+    threading.Thread(target=work, daemon=True).start()
+
+
 def _save_upload(pdf) -> tuple[str, str] | None:
     """Save an uploaded PDF under the papers cache (keyed by content hash so the
     same file re-uses its conversion). Returns (path, display_name) or None."""
@@ -1900,19 +1943,22 @@ def _save_upload(pdf) -> tuple[str, str] | None:
 
 
 @rt("/paper/open", methods=["post"])
-def paper_open(pdf: UploadFile = None, path: str = ""):
-    src, name = None, None
+def paper_open(pdf: UploadFile = None, path: str = "", url: str = ""):
     up = _save_upload(pdf)                       # an uploaded file takes precedence
     if up:
-        src, name = up
-    elif path.strip():
+        _convert_paper_async(*up)
+        return Page()
+    if url.strip():                              # a web page / blog URL
+        u = url.strip()
+        _convert_url_async(u, _url_name(u))
+        return Page()
+    if path.strip():                             # a local file path (kept for callers/tests)
         src = os.path.expanduser(path.strip())
-        name = os.path.basename(src)
-    if src and not os.path.exists(src):          # clear feedback for a bad path
-        STATE["paper"] = {"name": name or src, "status": "ready", "engine": "error",
-                          "md": f"**File not found:** `{src}`"}
-    elif src:
-        _convert_paper_async(src, name)
+        if not os.path.exists(src):
+            STATE["paper"] = {"name": os.path.basename(src) or src, "status": "ready",
+                              "engine": "error", "md": f"**File not found:** `{src}`"}
+        else:
+            _convert_paper_async(src, os.path.basename(src))
     return Page()
 
 

@@ -1034,6 +1034,56 @@ def test_paper_empty_conversion_is_not_cached(monkeypatch, tmp_path):
     assert engine2 == "pypdf" and "Now it works" in md2
 
 
+def test_convert_url_uses_trafilatura_then_caches(monkeypatch, tmp_path):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    from sidekick import paper as pl
+    monkeypatch.setattr(pl, "_trafilatura_extract", lambda u: "# Post\n\nbody")
+    md, engine = pl.convert_url("https://blog.example.com/post")
+    assert engine == "trafilatura" and "Post" in md
+    monkeypatch.setattr(pl, "_trafilatura_extract", lambda u: "SHOULD NOT RUN")
+    md2, engine2 = pl.convert_url("https://blog.example.com/post")     # cache hit
+    assert engine2 == "cache" and md2 == md
+
+
+def test_convert_url_falls_back_to_bs4(monkeypatch, tmp_path):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    from sidekick import paper as pl
+    monkeypatch.setattr(pl, "_trafilatura_extract", lambda u: None)      # not installed / failed
+    monkeypatch.setattr(pl, "_html_to_md_fallback", lambda u: "# Heuristic\n\ntext")
+    md, engine = pl.convert_url("https://x.example.com/a")
+    assert engine == "bs4" and "Heuristic" in md
+
+
+def test_convert_url_empty_not_cached(monkeypatch, tmp_path):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    from sidekick import paper as pl
+    monkeypatch.setattr(pl, "_trafilatura_extract", lambda u: None)
+    monkeypatch.setattr(pl, "_html_to_md_fallback", lambda u: "   ")
+    pl.convert_url("https://empty.example.com")
+    assert not pl._url_cache_path("https://empty.example.com").exists()
+
+
+def test_url_name_is_readable():
+    import sidekick.app as app
+    assert app._url_name("https://www.fast.ai/posts/2025-11-07-solveit.html") == "2025-11-07-solveit"
+    assert app._url_name("https://example.com/") == "example.com"
+    assert app._url_name("https://example.com") == "example.com"
+
+
+def test_paper_open_route_accepts_url(monkeypatch):
+    import time, sidekick.app as app
+    app.STATE["paper"] = None
+    monkeypatch.setattr(app.paperlib, "convert_url", lambda u: ("# Web\n\npara", "trafilatura"))
+    app.paper_open(url="https://blog.example.com/great-post")
+    for _ in range(100):
+        if (app.STATE["paper"] or {}).get("status") == "ready":
+            break
+        time.sleep(0.02)
+    assert app.STATE["paper"]["md"] == "# Web\n\npara"
+    assert app.STATE["paper"]["name"] == "great-post" and app.STATE["paper"]["source"].endswith("great-post")
+    app.STATE["paper"] = None
+
+
 def test_paper_uses_marker_when_available(monkeypatch, tmp_path):
     monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
     from sidekick import paper as pl

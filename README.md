@@ -106,8 +106,10 @@ Sidekick keeps two kinds of dependency apart, because they serve different jobs:
 |-------|----------|------------------|
 | (base) | FastHTML, uvicorn, mistune, pygments, AI SDKs | wherever the **app** runs |
 | `kernel` (alias `ml`) | numpy, pandas, matplotlib, scikit-learn, scipy, torch | wherever the **kernel** runs |
+| `paper` | marker-pdf | app, for high-quality PDF → markdown |
+| `web` | trafilatura | app, for clean web-page/blog → markdown |
 | `solveit` | solveit_client | app, to talk to a real SolveIt server |
-| `all` | kernel + solveit | a full local workstation |
+| `all` | kernel + paper + web + solveit | a full local workstation |
 
 ```bash
 # one machine, one venv: give the kernel the coding stack
@@ -224,10 +226,16 @@ Cells, outputs, plots, and pin/mute flags are all restored. (The mock fallback
 used when no server is reachable stays ephemeral; a real **solveit** target keeps
 its dialogs on the SolveIt server.)
 
-## Reading papers
+## Reading papers (and web pages)
 
-Open a PDF with the **📄** button (it opens a file picker) and it appears in a
-left reading column. **Highlight any passage** and a small toolbar pops up:
+Open a source with the **📄** button — either **choose a PDF** or **paste a web
+page / blog URL** — and it appears in a left reading column. Web pages are
+fetched and reduced to just the main article (no nav/ads/footer): with the
+**`web`** extra (`uv pip install "solveit-sidekick[web]"`) that's done by
+**trafilatura** (clean, keeps headings/code/links); without it, a built-in
+**bs4 + markdownify** fallback handles it. Either way the page becomes markdown
+in the same reader, so the stepper, highlight-import, and TOC all work the same
+as for a PDF. **Highlight any passage** and a small toolbar pops up:
 
 - **→ Notebook** — import the highlighted passage as a **note**, followed by an
   **empty code cell that opens focused**, so you can *reimplement that idea

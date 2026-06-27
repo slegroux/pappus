@@ -134,3 +134,60 @@ def convert(path: str) -> tuple[str, str]:
         except OSError:
             pass
     return _clean_md(md), engine
+
+
+# ---- web pages / blogs → markdown -------------------------------------------
+def _url_cache_path(url: str) -> Path:
+    key = hashlib.sha1(url.encode()).hexdigest()[:16]
+    return _cache_dir() / f"url-{key}.md"
+
+
+def _trafilatura_extract(url: str) -> str | None:
+    """The main article as markdown via trafilatura, or None if unavailable."""
+    try:
+        import trafilatura
+        html = trafilatura.fetch_url(url)
+        if not html:
+            return None
+        return trafilatura.extract(html, output_format="markdown", include_links=True,
+                                   include_formatting=True, include_tables=True)
+    except Exception:  # noqa: BLE001 — not installed, or an extraction error → fall back
+        return None
+
+
+def _html_to_md_fallback(url: str) -> str:
+    """No-extra fallback: fetch, drop page chrome, markdownify the main content."""
+    import urllib.request
+    from bs4 import BeautifulSoup
+    from markdownify import markdownify
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (solveit-sidekick)"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        html = r.read().decode("utf-8", "replace")
+    soup = BeautifulSoup(html, "html.parser")
+    for tag in soup(["script", "style", "nav", "header", "footer", "aside", "form", "noscript"]):
+        tag.decompose()
+    main = soup.find("article") or soup.find("main") or soup.body or soup
+    return markdownify(str(main), heading_style="ATX").strip()
+
+
+def convert_url(url: str) -> tuple[str, str]:
+    """Return (markdown, engine) for a web page — article extraction via trafilatura
+    (engine 'trafilatura'), falling back to a bs4 + markdownify heuristic ('bs4').
+    Cached on disk by URL; empty results aren't cached so a transient fetch can retry."""
+    cp = _url_cache_path(url)
+    if cp.exists():
+        try:
+            return _clean_md(cp.read_text()), "cache"
+        except OSError:
+            pass
+    md, engine = _trafilatura_extract(url), "trafilatura"
+    if not (md and md.strip()):
+        md, engine = _html_to_md_fallback(url), "bs4"
+    md = md or ""
+    if md.strip():
+        try:
+            cp.parent.mkdir(parents=True, exist_ok=True)
+            cp.write_text(md)
+        except OSError:
+            pass
+    return _clean_md(md), engine
