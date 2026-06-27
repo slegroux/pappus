@@ -81,11 +81,12 @@ def split_blocks(md: str) -> list[str]:
     return [b for b in blocks if b and not _IMG_ONLY.match(b)]
 
 
-def split_sections(md: str) -> list[str]:
+def split_sections(md: str, blocks: list[str] | None = None) -> list[str]:
     """Group blocks into sections: each heading plus the blocks under it (until the
-    next heading) become one cell. Content before the first heading is its own cell."""
+    next heading) become one cell. Content before the first heading is its own cell.
+    Pass `blocks` (from a prior split_blocks) to avoid re-splitting the same md."""
     sections, cur = [], []
-    for b in split_blocks(md):
+    for b in (split_blocks(md) if blocks is None else blocks):
         if b.lstrip().startswith("#") and cur:
             sections.append("\n\n".join(cur))
             cur = [b]

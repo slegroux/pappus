@@ -1253,6 +1253,22 @@ window.toggleCol = function(cls, key){
 """
 
 
+def _paper_blocks(p: dict) -> list[str]:
+    """Block-split of the open paper, memoized on the paper state (md is immutable
+    once ready, so the split is computed once instead of on every render)."""
+    if "blocks" not in p:
+        p["blocks"] = paperlib.split_blocks(p.get("md", ""))
+    return p["blocks"]
+
+
+def _paper_sections(p: dict) -> list[str]:
+    """Section-split of the open paper, memoized — reuses the cached blocks so the
+    document isn't walked twice."""
+    if "sections" not in p:
+        p["sections"] = paperlib.split_sections(p.get("md", ""), blocks=_paper_blocks(p))
+    return p["sections"]
+
+
 def PaperPanel():
     """Left reading column: the open paper as rendered markdown, or a converting
     spinner that polls until ready. Selecting text shows an 'Ask AI' button."""
@@ -1264,7 +1280,7 @@ def PaperPanel():
         # The primary flow is highlight → import (see the badge + selection toolbar).
         # The sequential stepper and whole-paper bulk import live in this menu so the
         # header stays clean.
-        n = len(paperlib.split_sections(p.get("md", "")))
+        n = len(_paper_sections(p))
         step = p.get("step", 0)
         if step < n:
             stepper = Form(
@@ -1304,8 +1320,7 @@ def PaperPanel():
     # Render block-by-block, each block carrying its *source markdown* in data-md,
     # so a highlight can be imported as real markdown (headings/formatting kept)
     # rather than the rendered plain text.
-    blocks = paperlib.split_blocks(p.get("md", ""))
-    body = Div(*[Div(render_md(b), cls="pblock", **{"data-md": b}) for b in blocks],
+    body = Div(*[Div(render_md(b), cls="pblock", **{"data-md": b}) for b in _paper_blocks(p)],
                cls="paper-body md", id="paperBody")
     return Div(head, badge, body, Script(PAPER_JS), cls="paper", id="paperPanel")
 
@@ -1951,7 +1966,7 @@ def paper_step():
     p = STATE.get("paper")
     if not p or p.get("status") != "ready" or not (p.get("md") or "").strip():
         return Page()
-    sections = paperlib.split_sections(p["md"])
+    sections = _paper_sections(p)                # cached; same split the panel counts
     i = p.get("step", 0)
     if i >= len(sections):
         return Page()                            # nothing left to bring in

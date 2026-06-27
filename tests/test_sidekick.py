@@ -995,6 +995,30 @@ def test_paper_convert_caches_and_falls_back(monkeypatch, tmp_path):
     assert engine2 == "cache" and md2 == md
 
 
+def test_split_sections_accepts_precomputed_blocks():
+    from sidekick import paper as pl
+    md = "# A\n\na1\n\n## B\n\nb1\n\nb2\n\n# C\n\nc1"
+    blocks = pl.split_blocks(md)
+    assert pl.split_sections(md, blocks=blocks) == pl.split_sections(md)
+
+
+def test_paper_split_is_memoized_on_state(monkeypatch):
+    import sidekick.app as app
+    calls = {"blocks": 0, "sections": 0}
+    real_b, real_s = app.paperlib.split_blocks, app.paperlib.split_sections
+    monkeypatch.setattr(app.paperlib, "split_blocks",
+                        lambda md: (calls.__setitem__("blocks", calls["blocks"] + 1) or real_b(md)))
+    monkeypatch.setattr(app.paperlib, "split_sections",
+                        lambda md, blocks=None: (calls.__setitem__("sections", calls["sections"] + 1)
+                                                 or real_s(md, blocks)))
+    app.STATE["paper"] = {"name": "p.pdf", "status": "ready",
+                          "md": "# A\n\na\n\n# B\n\nb", "engine": "pypdf"}
+    from fasthtml.common import to_xml
+    to_xml(app.PaperPanel()); to_xml(app.PaperPanel()); to_xml(app.PaperPanel())   # 3 renders
+    assert calls["blocks"] == 1 and calls["sections"] == 1      # split once, not per render
+    app.STATE["paper"] = None
+
+
 def test_paper_empty_conversion_is_not_cached(monkeypatch, tmp_path):
     # An empty extraction (image-only/scanned PDF) must NOT be cached, or the paper
     # would be blank forever (cache key is path+mtime; uploads are content-deduped).
