@@ -931,3 +931,46 @@ def test_paper_open_bad_path_reports_not_found():
     app.paper_open(path="/no/such/file.pdf")
     assert app.STATE["paper"]["engine"] == "error" and "not found" in app.STATE["paper"]["md"].lower()
     app.STATE["paper"] = None
+
+
+# ---- import paper into notebook (one note cell per paragraph) ---------------
+def test_split_blocks_paragraphs_and_fences():
+    from sidekick import paper as pl
+    md = "# Title\n\nFirst para.\n\nSecond para\nwraps two lines.\n\n```python\na = 1\n\nb = 2\n```\n\n![](fig.png)"
+    blocks = pl.split_blocks(md)
+    assert blocks[0] == "# Title"
+    assert blocks[1] == "First para."
+    assert blocks[2] == "Second para\nwraps two lines."          # multi-line para kept together
+    assert "a = 1\n\nb = 2" in blocks[3]                          # blank line inside fence preserved
+    assert not any("fig.png" in b for b in blocks)               # figure-only block dropped
+
+
+def test_paper_import_creates_one_note_per_block(monkeypatch):
+    import sidekick.app as app
+    app.STATE["paper"] = {"name": "attention.pdf", "status": "ready",
+                          "md": "# Attention\n\nThe transformer.\n\n## Heads\n\nMulti-head."}
+    app.paper_import()
+    dlg = app.STATE["dialog"]
+    assert dlg == "paper/attention"
+    cells = app.STATE["backend"].messages(dlg)
+    assert [c.msg_type for c in cells] == ["note", "note", "note", "note"]
+    assert cells[0].content == "# Attention" and cells[2].content == "## Heads"
+    assert app.STATE["paper"] is None                            # panel closed after import
+
+
+def test_paper_import_unique_dialog_name():
+    import sidekick.app as app
+    b = app.STATE["backend"]
+    b.messages("paper/dup")                                      # pre-existing
+    assert app._unique_dialog(b, "paper/dup").startswith("paper/dup-")
+
+
+def test_clean_md_strips_marker_html_noise():
+    from sidekick import paper as pl
+    dirty = ('# Title <span id="page-2-0"></span>\n\nAuthor<sup>*</sup> and X<sub>i</sub>\n\n'
+             r"recurrent [\[7\]](#page-10-1) nets and [link](#page-3-0).")
+    clean = pl._clean_md(dirty)
+    assert "<span" not in clean and "<sup>" not in clean and "<sub>" not in clean
+    assert "#page-" not in clean                      # all dead cross-refs gone
+    assert "# Title" in clean and "Author*" in clean and "Xi" in clean
+    assert r"\[7\]" in clean and "link" in clean      # citation/link text kept

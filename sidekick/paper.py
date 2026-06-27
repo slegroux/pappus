@@ -52,14 +52,54 @@ def _pypdf_convert(path: str) -> str:
     return "\n\n".join(pages).strip()
 
 
+import re
+
+_IMG_ONLY = re.compile(r"^!\[[^\]]*\]\([^)]*\)$")
+
+
+def split_blocks(md: str) -> list[str]:
+    """Split markdown into block-level chunks (paragraphs, headings, equations,
+    tables, lists) — one per note cell. Blank lines separate blocks, but fenced
+    code (```), kept intact. Figure-only image placeholders are dropped."""
+    blocks, cur, in_fence = [], [], False
+    for line in (md or "").splitlines():
+        if line.strip().startswith("```"):
+            in_fence = not in_fence
+            cur.append(line)
+            continue
+        if in_fence:
+            cur.append(line)
+            continue
+        if line.strip() == "":
+            if cur:
+                blocks.append("\n".join(cur).strip())
+                cur = []
+        else:
+            cur.append(line)
+    if cur:
+        blocks.append("\n".join(cur).strip())
+    return [b for b in blocks if b and not _IMG_ONLY.match(b)]
+
+
+def _clean_md(md: str) -> str:
+    """Strip marker's raw-HTML noise so it doesn't show literally under our
+    (safe) escape=True rendering: page-anchor spans and sup/sub tags."""
+    md = re.sub(r'<span id="page-\d+-\d+">\s*</span>', "", md or "")
+    # dead cross-ref links → their text (handles escaped brackets in citations like [\[13\]])
+    md = re.sub(r"\[((?:\\.|[^\]])*)\]\(#page-[\d-]+\)", r"\1", md)
+    md = re.sub(r"</?su[pb]>", "", md)
+    return md
+
+
 def convert(path: str) -> tuple[str, str]:
     """Return (markdown, engine) for `path`, using the on-disk cache when present.
-    engine is 'cache', 'marker', or 'pypdf'."""
+    engine is 'cache', 'marker', or 'pypdf'. The cache stores marker's raw output;
+    cleaning is applied on every return so improvements reach cached papers too."""
     p = Path(path).expanduser()
     cp = cache_path(p)
     if cp.exists():
         try:
-            return cp.read_text(), "cache"
+            return _clean_md(cp.read_text()), "cache"
         except OSError:
             pass
     md = _marker_convert(str(p))
@@ -72,4 +112,4 @@ def convert(path: str) -> tuple[str, str]:
         cp.write_text(md)
     except OSError:
         pass
-    return md, engine
+    return _clean_md(md), engine

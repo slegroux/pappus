@@ -133,7 +133,9 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
 /* paper reading panel (left column, toggled open when a paper is loaded) */
 .paper{display:none;background:var(--panel);border-right:1px solid var(--line);overflow:auto;height:100vh;padding:16px 18px}
 .app.paper-open .paper{display:flex;flex-direction:column}
-.paper-head{display:flex;align-items:center;justify-content:space-between;margin-bottom:4px}
+.paper-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}
+.paper-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.paper-import{margin:0}
 .paper-name{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .paper-converting{margin-top:14px;color:var(--muted);font-size:13px;font-style:italic}
 .paper-body{margin-top:10px;font-size:13.5px;line-height:1.6}
@@ -905,8 +907,13 @@ def PaperPanel():
     p = STATE.get("paper")
     if not p:
         return Div(cls="paper", id="paperPanel")
-    head = Div(Span(p["name"], cls="paper-name"),
-               A("✕", href="/paper/close", cls="gear", title="Close paper"),
+    actions = []
+    if p.get("status") == "ready":
+        actions.append(Form(Button("Import ¶ → notebook", cls="cell-btn run", type="submit"),
+                            method="post", action="/paper/import", cls="paper-import",
+                            title="One note cell per paragraph, in a new dialog"))
+    actions.append(A("✕", href="/paper/close", cls="gear", title="Close paper"))
+    head = Div(Span(p["name"], cls="paper-name"), Div(*actions, cls="paper-actions"),
                cls="paper-head")
     if p.get("status") == "converting":
         body = Div("Converting… first time runs the model and can take a bit.",
@@ -1411,6 +1418,40 @@ def paper_status():
 @rt("/paper/close")
 def paper_close():
     STATE["paper"] = None
+    return Page()
+
+
+def _safe_name(s: str) -> str:
+    s = "".join(c if (c.isalnum() or c in "-_") else "-" for c in s).strip("-").lower()
+    return s or "paper"
+
+
+def _unique_dialog(backend, base: str) -> str:
+    existing = set(backend.list_dialogs())
+    if base not in existing:
+        return base
+    n = 2
+    while f"{base}-{n}" in existing:
+        n += 1
+    return f"{base}-{n}"
+
+
+@rt("/paper/import", methods=["post"])
+def paper_import():
+    """Import the open paper into a new dialog: one note cell per paragraph/block,
+    then switch to it. The headings become the dialog's table of contents."""
+    p = STATE.get("paper")
+    if not p or p.get("status") != "ready" or not (p.get("md") or "").strip():
+        return Page()
+    blocks = paperlib.split_blocks(p["md"])
+    backend = STATE["backend"]
+    base = os.path.splitext(p.get("name", "paper"))[0]
+    name = _unique_dialog(backend, f"paper/{_safe_name(base)}")
+    backend.messages(name)                       # create the dialog
+    for b in blocks:
+        backend.add(name, b, "note")
+    STATE["dialog"] = name
+    STATE["paper"] = None                        # it's in the notebook now; close the panel
     return Page()
 
 
