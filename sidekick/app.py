@@ -874,24 +874,9 @@ def Page():
         # hx-post buttons render but do nothing, since we return a full Html
         # document and FastHTML only auto-injects those headers when it wraps
         # body content itself.
-        # CodeMirror gives syntax-highlight-while-editing for code cells; if it
-        # fails to load (offline) the editor degrades to a plain textarea.
-        Head(Title("SolveIt Sidekick"), *app.hdrs,
-             Link(rel="stylesheet",
-                  href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.css"),
-             Link(rel="stylesheet",
-                  href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/monokai.min.css"),
-             Script(src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"),
-             Script(src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"),
-             Script(src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/display/placeholder.min.js"),
-             # KaTeX renders LaTeX in AI answers / notes; degrades to raw text offline.
-             Link(rel="stylesheet",
-                  href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css"),
-             Script(src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"),
-             Script(src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"),
-             # SortableJS: drag cells to reorder (degrades to no-drag offline).
-             Script(src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.6/Sortable.min.js"),
-             Style(CSS)),
+        # app.hdrs carries everything (htmx + CodeMirror + KaTeX + Sortable),
+        # all served locally from /vendor — see _LOCAL_HDRS. Fully offline.
+        Head(Title("SolveIt Sidekick"), *app.hdrs, Style(CSS)),
         Body(Div(
             Sidebar(),
             Div(
@@ -915,7 +900,43 @@ def Page():
 
 
 # ---- routes -----------------------------------------------------------------
-app, rt = fast_app(pico=False)
+# All front-end assets are vendored under sidekick/static/vendor and served from
+# /vendor, so the app is fully offline — no CDN. This REPLACES FastHTML's default
+# CDN headers (default_hdrs=False): local htmx + fasthtml.js, then CodeMirror,
+# KaTeX, and Sortable.
+_VENDOR_DIR = Path(__file__).parent / "static" / "vendor"
+_LOCAL_HDRS = (
+    Meta(charset="utf-8"),
+    Meta(name="viewport", content="width=device-width, initial-scale=1, viewport-fit=cover"),
+    Script(src="/vendor/htmx.min.js"),
+    Script(src="/vendor/fasthtml.js"),
+    Script(src="/vendor/surreal.js"),
+    Script(src="/vendor/css-scope.js"),
+    Link(rel="stylesheet", href="/vendor/codemirror.min.css"),
+    Link(rel="stylesheet", href="/vendor/monokai.min.css"),
+    Script(src="/vendor/codemirror.min.js"),
+    Script(src="/vendor/python.min.js"),
+    Script(src="/vendor/placeholder.min.js"),
+    Link(rel="stylesheet", href="/vendor/katex.min.css"),
+    Script(src="/vendor/katex.min.js"),
+    Script(src="/vendor/auto-render.min.js"),
+    Script(src="/vendor/sortable.min.js"),
+)
+app, rt = fast_app(pico=False, default_hdrs=False, hdrs=_LOCAL_HDRS)
+# FastHTML registers a generic "/{fname:path}.{ext:static}" route that serves
+# from cwd and would shadow /vendor (404ing our assets). Drop it — we serve our
+# own static files from /vendor below.
+app.routes[:] = [r for r in app.routes if getattr(r, "path", "") != "/{fname:path}.{ext:static}"]
+
+
+@rt("/vendor/{fname:path}")
+def vendor(fname: str):
+    """Serve a vendored front-end asset (with a path-traversal guard)."""
+    from starlette.responses import FileResponse, PlainTextResponse
+    p = (_VENDOR_DIR / fname).resolve()
+    if str(p).startswith(str(_VENDOR_DIR.resolve())) and p.is_file():
+        return FileResponse(p)
+    return PlainTextResponse("not found", status_code=404)
 
 
 @rt("/")
