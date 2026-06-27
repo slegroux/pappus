@@ -1687,7 +1687,9 @@ def stream_answer(dialog: str, id: str):
             acc += delta
             # str() unwraps NotStr -> raw (already-safe) markdown HTML for the data lines
             yield sse_message(str(render_md(acc)), event="msg")
-        m.output = acc or m.output                       # persist for reloads
+        m.output = acc or m.output
+        if hasattr(backend, "_save"):
+            backend._save()                              # flush to disk so a reload keeps the answer
         if STATE.get("pending_stream") == (dialog, id):
             STATE["pending_stream"] = None
         yield sse_message(str(render_md(m.output)), event="msg")   # final state
