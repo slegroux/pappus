@@ -993,6 +993,46 @@ def test_paper_panel_states():
     app.STATE["paper"] = None
 
 
+def test_paper_step_brings_one_section_at_a_time():
+    import sidekick.app as app
+    md = "# A\n\nalpha body\n\n# B\n\nbeta body"     # split_sections -> 2 sections
+    app.STATE["paper"] = {"name": "x.pdf", "status": "ready", "md": md, "engine": "pypdf"}
+
+    from fasthtml.common import to_xml
+    page = to_xml(app.paper_step())                   # step 1
+    dlg = app.STATE["paper"]["dialog"]
+    cells = app.STATE["backend"].messages(dlg)
+    assert app.STATE["paper"]["step"] == 1
+    assert [c.msg_type for c in cells] == ["note", "code"]      # section + reimplement cell
+    assert "# A" in cells[0].content and "alpha body" in cells[0].content
+    assert cells[1].content == ""                              # empty code cell to fill in
+    assert app.STATE["dialog"] == dlg
+    assert f'ta-{cells[1].id}' in page                        # code cell opened in edit mode
+
+    app.paper_step()                                  # step 2 → same dialog, next section
+    cells = app.STATE["backend"].messages(dlg)
+    assert app.STATE["paper"]["step"] == 2
+    assert [c.msg_type for c in cells] == ["note", "code", "note", "code"]
+    assert "# B" in cells[2].content
+
+    app.paper_step()                                  # nothing left → no new cells
+    assert len(app.STATE["backend"].messages(dlg)) == 4
+    app.STATE["paper"] = None
+
+
+def test_paper_panel_shows_stepper_progress():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    md = "# A\n\na\n\n# B\n\nb\n\n# C\n\nc"            # 3 sections
+    app.STATE["paper"] = {"name": "p.pdf", "status": "ready", "md": md, "engine": "pypdf", "step": 1}
+    h = to_xml(app.PaperPanel())
+    assert "/paper/step" in h and "Next section" in h and "1/3" in h
+    app.STATE["paper"]["step"] = 3                    # all consumed
+    h = to_xml(app.PaperPanel())
+    assert "All 3 sections in" in h and "/paper/step" not in h
+    app.STATE["paper"] = None
+
+
 def test_paper_open_and_close_routes(monkeypatch, tmp_path):
     import time, sidekick.app as app
     monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))

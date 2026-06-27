@@ -1144,13 +1144,25 @@ def PaperPanel():
         return Div(cls="paper", id="paperPanel")
     actions = []
     if p.get("status") == "ready":
-        # one form, two submit buttons: import by paragraph (¶) or by section (§)
+        n = len(paperlib.split_sections(p.get("md", "")))
+        step = p.get("step", 0)
+        if step < n:
+            # Progressive, step-by-step reading: bring in the next section + a code
+            # cell to reimplement it (Jeremy Howard's piece-by-piece method).
+            actions.append(Form(
+                Button("Next section ▸", cls="cell-btn run", type="submit",
+                       title="Bring the next section into the notebook as a note + "
+                             "a code cell to reimplement it yourself"),
+                Span(f"{step}/{n}", cls="muted small"),
+                method="post", action="/paper/step", cls="paper-import"))
+        else:
+            actions.append(Span(f"All {n} sections in ✓", cls="muted small"))
+        # secondary: dump the whole paper at once, by paragraph (¶) or section (§)
         actions.append(Form(
-            Span("Import:", cls="muted small"),
-            Button("¶", cls="cell-btn run", type="submit", name="mode", value="para",
-                   title="One note cell per paragraph"),
+            Button("¶", cls="cell-btn", type="submit", name="mode", value="para",
+                   title="Import the whole paper at once — one note per paragraph"),
             Button("§", cls="cell-btn", type="submit", name="mode", value="section",
-                   title="One note cell per section (heading + its content)"),
+                   title="Import the whole paper at once — one note per section"),
             method="post", action="/paper/import", cls="paper-import"))
     actions.append(A("✕", href="/paper/close", cls="gear", title="Close paper"))
     head = Div(Span(p["name"], cls="paper-name"), Div(*actions, cls="paper-actions"),
@@ -1706,6 +1718,34 @@ def _unique_dialog(backend, base: str) -> str:
     while f"{base}-{n}" in existing:
         n += 1
     return f"{base}-{n}"
+
+
+@rt("/paper/step", methods=["post"])
+def paper_step():
+    """Progressive paper reading (Jeremy Howard's piece-by-piece method): pull the
+    *next* section of the open paper into the notebook as a note, plus an empty
+    code cell to reimplement it yourself. Advances a cursor so each click brings
+    the next piece — small steps, instead of dumping the whole paper at once."""
+    p = STATE.get("paper")
+    if not p or p.get("status") != "ready" or not (p.get("md") or "").strip():
+        return Page()
+    sections = paperlib.split_sections(p["md"])
+    i = p.get("step", 0)
+    if i >= len(sections):
+        return Page()                            # nothing left to bring in
+    backend = STATE["backend"]
+    dialog = p.get("dialog")
+    if not dialog:                               # create the paper's dialog on step 1
+        base = os.path.splitext(p.get("name", "paper"))[0]
+        dialog = _unique_dialog(backend, f"paper/{_safe_name(base)}")
+        backend.messages(dialog)
+        p["dialog"] = dialog
+    backend.add(dialog, sections[i], "note")     # the section to read…
+    code = backend.add(dialog, "", "code")       # …and a cell to reimplement it
+    p["step"] = i + 1
+    STATE["dialog"] = dialog
+    STATE["editing"] = code.id                   # open the code cell, focused & in view
+    return Page()
 
 
 @rt("/paper/import", methods=["post"])

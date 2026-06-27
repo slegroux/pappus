@@ -231,6 +231,17 @@ left reading column. Select any passage → an **"Ask AI about this"** button
 drops the quoted paragraph into the composer (Ask AI mode), so your question
 carries the paragraph as context — then run code, plot, and take notes beside it.
 
+### Step through it, the way Jeremy Howard does
+
+The reading panel has a **Next section ▸** button that works the paper the
+*dialogue-engineering* way — small steps, deep understanding — instead of dumping
+the whole thing. Each click brings the **next section** into the notebook as a
+**note**, followed by an **empty code cell that opens focused** so you can
+*reimplement the idea yourself* (writing the code is what builds understanding;
+the AI sees everything above, so "is my version equivalent?" just works). A
+counter (`2/3`) tracks your progress through the paper. Prefer it all at once?
+The **¶** / **§** buttons still bulk-import every paragraph or section as notes.
+
 PDFs are converted to markdown and rendered with the same math/code pipeline as
 the rest of the app. The recommended reader is **marker** — install the **`paper`**
 extra (`uv pip install "solveit-sidekick[paper]"`, also in `[all]`) and it becomes
