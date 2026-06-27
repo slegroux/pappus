@@ -444,7 +444,8 @@ _CODE_EDITOR_JS = """
       mode: 'python', theme: 'monokai', lineNumbers: false,
       viewportMargin: Infinity, indentUnit: 4, lineWrapping: true,
       extraKeys: { 'Cmd-Enter': function(){ cm.save(); runCell(); },
-                   'Ctrl-Enter': function(){ cm.save(); runCell(); } }
+                   'Ctrl-Enter': function(){ cm.save(); runCell(); },
+                   'Shift-Enter': function(){ cm.save(); runCell(); } }   // Jupyter convention
     });
     cm.on('change', function(){ cm.save(); });   // keep textarea current for hx-include
     setTimeout(function(){ cm.refresh(); cm.focus(); cm.setCursor(cm.lineCount(), 0); }, 0);
@@ -532,11 +533,41 @@ def Stream():
 
 
 COMPOSER_JS = """
+var composerCM = null;   // CodeMirror instance while the composer is in Code mode
+
+function _submitComposer(){
+  if(composerCM) composerCM.save();                 // flush editor -> textarea
+  var ta = document.getElementById('composerInput');
+  if(ta && ta.value.trim()) document.getElementById('composerForm').submit();
+}
+function _initComposerCM(){
+  var ta = document.getElementById('composerInput');
+  if(!ta || composerCM || !window.CodeMirror) return;   // offline: stays a plain textarea
+  composerCM = CodeMirror.fromTextArea(ta, {
+    mode: 'python', theme: 'monokai', lineNumbers: false,
+    viewportMargin: Infinity, indentUnit: 4, lineWrapping: true,
+    placeholder: '# code…  Shift+Enter to run · Enter for newline · Tab switches mode',
+    extraKeys: {
+      'Shift-Enter': _submitComposer, 'Cmd-Enter': _submitComposer, 'Ctrl-Enter': _submitComposer,
+      'Tab': function(){ cycleMode(1); }, 'Shift-Tab': function(){ cycleMode(-1); }
+    }
+  });
+  composerCM.on('change', function(){ composerCM.save(); });
+  setTimeout(function(){ composerCM.refresh(); composerCM.focus(); }, 0);
+}
+function _destroyComposerCM(){
+  if(!composerCM) return;
+  composerCM.save();
+  composerCM.toTextArea();                            // restore the plain textarea
+  composerCM = null;
+  var ta = document.getElementById('composerInput'); if(ta) ta.focus();
+}
 function setMode(v){
   document.getElementById('msgType').value = v;
   document.querySelectorAll('#modeChips .mode').forEach(function(el){
     el.classList.toggle('sel', el.getAttribute('data-val') === v);
   });
+  if(v === 'code') _initComposerCM(); else _destroyComposerCM();
 }
 var COMPOSER_MODES = ['prompt','code','note'];   // order matches the chips: Ask AI / Code / Note
 function cycleMode(dir){
@@ -547,18 +578,24 @@ function cycleMode(dir){
 (function(){
   var ta = document.getElementById('composerInput');
   if(!ta) return;
-  ta.focus();
+  // Plain-textarea keys (Ask AI / Note, and the offline Code fallback).
   ta.addEventListener('keydown', function(e){
     if(e.key === 'Tab'){                 // Tab cycles Ask AI -> Code -> Note (Shift+Tab back)
       e.preventDefault();
       cycleMode(e.shiftKey ? -1 : 1);
       return;
     }
-    if(e.key === 'Enter' && !e.shiftKey){
-      e.preventDefault();
-      if(ta.value.trim()) document.getElementById('composerForm').submit();
+    if(e.key === 'Enter'){
+      if(document.getElementById('msgType').value === 'code'){
+        // Jupyter convention: Shift/Cmd/Ctrl+Enter runs, plain Enter = newline
+        if(e.shiftKey || e.metaKey || e.ctrlKey){ e.preventDefault(); _submitComposer(); }
+      } else if(!e.shiftKey){            // chat convention: Enter sends, Shift+Enter = newline
+        e.preventDefault(); _submitComposer();
+      }
     }
   });
+  if(document.getElementById('msgType').value === 'code') _initComposerCM();  // sticky Code mode
+  else ta.focus();
 })();
 """
 
@@ -678,6 +715,7 @@ def Page():
                   href="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/theme/monokai.min.css"),
              Script(src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"),
              Script(src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"),
+             Script(src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/display/placeholder.min.js"),
              Style(CSS)),
         Body(Div(
             Sidebar(),
