@@ -920,6 +920,16 @@ def PaperPanel():
 # with the quoted passage, so the next question carries the paragraph as context.
 PAPER_JS = """
 (function(){
+  // Typeset LaTeX in the paper (marker emits $$/inline math). Runs on each
+  // render/swap; mistune already turned $…$ into \\(…\\), so no bare-$ delimiter.
+  var body = document.getElementById('paperBody');
+  if(body && window.renderMathInElement){
+    try { renderMathInElement(body, { throwOnError:false, delimiters:[
+      {left:'$$', right:'$$', display:true},
+      {left:'\\\\[', right:'\\\\]', display:true},
+      {left:'\\\\(', right:'\\\\)', display:false}
+    ]}); } catch(e){}
+  }
   if(window.__paperSel) return; window.__paperSel = true;
   var btn = null;
   function hide(){ if(btn) btn.style.display = 'none'; }
