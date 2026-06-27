@@ -466,8 +466,7 @@ def SettingsPage(saved=False):
             cls="prov-card",
         ))
     return Html(
-        Head(Title("Settings · SolveIt Sidekick"), Style(CSS),
-             Meta(name="viewport", content="width=device-width, initial-scale=1")),
+        Head(Title("Settings · SolveIt Sidekick"), *app.hdrs, Style(CSS)),
         Body(Div(
             Div(
                 Div(A("←  Back", href="/", cls="back"), Div("Settings", cls="title"),
@@ -498,8 +497,11 @@ def Page():
     banner = (Div("⚠ ", STATE["warning"], " — showing a mock so you can still explore the UI.",
                   cls="banner") if STATE["warning"] else None)
     return Html(
-        Head(Title("SolveIt Sidekick"), Style(CSS),
-             Meta(name="viewport", content="width=device-width, initial-scale=1")),
+        # *app.hdrs carries htmx (+ fasthtml.js): without it the per-cell
+        # hx-post buttons render but do nothing, since we return a full Html
+        # document and FastHTML only auto-injects those headers when it wraps
+        # body content itself.
+        Head(Title("SolveIt Sidekick"), *app.hdrs, Style(CSS)),
         Body(Div(
             Sidebar(),
             Div(

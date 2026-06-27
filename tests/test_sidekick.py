@@ -443,6 +443,16 @@ def test_cell_pin_route_toggles():
     assert m.pinned is False
 
 
+def test_page_includes_htmx_so_cell_buttons_work():
+    # Regression guard: we return a full Html document, so FastHTML does NOT
+    # auto-inject its headers — the page must carry htmx itself, or every
+    # per-cell hx-post button (Run/Mute/Pin/Delete) renders but does nothing.
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    assert "htmx" in to_xml(app.Page()).lower()
+    assert "htmx" in to_xml(app.SettingsPage()).lower()
+
+
 def test_ctx_meter_reports_token_estimate():
     import sidekick.app as app
     from fasthtml.common import to_xml
