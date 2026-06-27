@@ -122,6 +122,22 @@ CSS = """
 body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
   background:var(--bg);color:var(--ink);font-size:15px;line-height:1.55}
 .app{display:grid;grid-template-columns:264px 1fr;height:100vh}
+.app.toc-open{grid-template-columns:264px 1fr 244px}
+/* table of contents (right column, toggleable, full-height so it stays in view) */
+.toc{display:none;background:var(--sidebar);border-left:1px solid var(--line);
+  padding:16px 14px;overflow:auto;height:100vh}
+.app.toc-open .toc{display:flex;flex-direction:column}
+.toc-head{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+.toc-list{display:flex;flex-direction:column;gap:1px}
+.toc-link{display:block;text-decoration:none;color:var(--ink);font-size:13px;padding:4px 8px;border-radius:7px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.toc-link:hover{background:#E8E5DB}
+.toc-h1{font-weight:600}
+.toc-h2{padding-left:18px}
+.toc-h3{padding-left:30px;color:var(--muted)}
+.toc-h4,.toc-h5,.toc-h6{padding-left:42px;color:var(--muted);font-size:12px}
+.toc-empty{font-size:12px;color:var(--muted);font-style:italic;padding:4px 8px}
+.toc-toggle{cursor:pointer}
 /* sidebar */
 .side{background:var(--sidebar);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 12px}
 .brand{display:flex;align-items:center;gap:9px;font-weight:600;padding:6px 8px 14px}
@@ -134,7 +150,7 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
 .conv:hover{background:#E8E5DB} .conv.active{background:#E3DFD3;font-weight:500}
 .side-foot{margin-top:auto;font-size:12px;color:var(--muted);padding:8px}
 /* main */
-.main{display:flex;flex-direction:column;min-width:0}
+.main{display:flex;flex-direction:column;min-width:0;min-height:0}  /* min-height:0 lets .stream scroll, not .main */
 .topbar{display:flex;align-items:center;justify-content:space-between;padding:12px 22px;border-bottom:1px solid var(--line)}
 .title{font-weight:600}
 .title-form{margin:0}
@@ -546,6 +562,7 @@ STREAM_JS = """
   document.querySelectorAll('#stream .md').forEach(function(el){   // already-rendered answers/notes
     renderMath(el); addCopyButtons(el);
   });
+  if(window.buildTOC) window.buildTOC();   // refresh the table of contents on every render
 
   // Live AI answers: connect a vanilla EventSource for each streaming bubble.
   // 'msg' events carry the cumulative rendered markdown; 'done' closes the stream.
@@ -775,6 +792,52 @@ def SettingsPage(saved=False):
     )
 
 
+# Table of contents built from note headings (h1–h6 inside .note-view). Lives in
+# Page() (not #stream), so it persists across htmx swaps; STREAM_JS calls
+# window.buildTOC() on each render to keep it in sync. Toggle state is saved.
+TOC_JS = """
+window.buildTOC = function(){
+  var list = document.getElementById('tocList');
+  if(!list) return;
+  var heads = document.querySelectorAll(
+    '#stream .note-view h1,#stream .note-view h2,#stream .note-view h3,' +
+    '#stream .note-view h4,#stream .note-view h5,#stream .note-view h6');
+  list.innerHTML = '';
+  if(!heads.length){
+    var e = document.createElement('div'); e.className = 'toc-empty';
+    e.textContent = 'No note headings yet — add a note with # headings.';
+    list.appendChild(e); return;
+  }
+  heads.forEach(function(h, i){
+    if(!h.id) h.id = 'toc-h-' + i;
+    var a = document.createElement('a');
+    a.className = 'toc-link toc-' + h.tagName.toLowerCase();
+    a.textContent = h.textContent;
+    a.href = '#' + h.id;
+    a.addEventListener('click', function(ev){
+      ev.preventDefault();
+      h.scrollIntoView({behavior: 'smooth', block: 'start'});
+    });
+    list.appendChild(a);
+  });
+};
+window.toggleTOC = function(){
+  var app = document.querySelector('.app');
+  if(!app) return;
+  var open = app.classList.toggle('toc-open');
+  try { localStorage.setItem('sidekick_toc', open ? '1' : '0'); } catch(e){}
+};
+(function(){
+  var app = document.querySelector('.app');
+  if(!app) return;
+  var saved = null;
+  try { saved = localStorage.getItem('sidekick_toc'); } catch(e){}
+  if(saved !== '0') app.classList.add('toc-open');   // default open
+  window.buildTOC();
+})();
+"""
+
+
 def Page():
     banner = (Div("⚠ ", STATE["warning"], " — showing a mock so you can still explore the UI.",
                   cls="banner") if STATE["warning"] else None)
@@ -803,7 +866,9 @@ def Page():
             Sidebar(),
             Div(
                 Div(TitleEditor(),
-                    Div(A("⚙", href="/settings", cls="gear", title="Settings — API keys"),
+                    Div(Span("☰", cls="gear toc-toggle", title="Toggle table of contents",
+                             onclick="toggleTOC()"),
+                        A("⚙", href="/settings", cls="gear", title="Settings — API keys"),
                         TargetSwitcher(),
                         style="display:flex;align-items:center;gap:12px"),
                     cls="topbar"),
@@ -812,8 +877,10 @@ def Page():
                 Composer(),
                 cls="main",
             ),
+            Div(Div("Contents", cls="toc-head"), Div(id="tocList", cls="toc-list"),
+                cls="toc", id="toc"),
             cls="app",
-        )),
+        ), Script(TOC_JS)),
     )
 
 
