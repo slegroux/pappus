@@ -501,6 +501,13 @@ def _stream_btn(label, post, *, cls="cell-btn", vals=None, title=None, confirm=N
     return Button(label, **a)
 
 
+def _dropdown(summary, *children, title=None, menu_cls="ins-menu"):
+    """A hover-toolbar dropdown: a `.cell-btn` summary over an absolute-positioned
+    menu. Shared by the ＋ insert, ⇆ type, and paper Import… menus."""
+    return Details(Summary(summary, cls="cell-btn", title=title),
+                   Div(*children, cls=menu_cls), cls="ins")
+
+
 def _insert_item(mid, msg_type, where, label):
     return _stream_btn(label, "/cell/insert", cls="ins-item",
                        vals={"id": mid, "msg_type": msg_type, "where": where})
@@ -514,10 +521,8 @@ def _insert_menu(mid):
         _insert_item(mid, "note", where, "Note"),
         _insert_item(mid, "prompt", where, "Ask AI"),
         cls="ins-col")
-    return Details(
-        Summary("＋", cls="cell-btn", title="Insert a cell  ·  a = above, b = below"),
-        Div(col("above", "↑ Above"), col("below", "↓ Below"), cls="ins-menu"),
-        cls="ins")
+    return _dropdown("＋", col("above", "↑ Above"), col("below", "↓ Below"),
+                     title="Insert a cell  ·  a = above, b = below")
 
 
 def _type_menu(m):
@@ -527,12 +532,10 @@ def _type_menu(m):
         cur = (t == m.msg_type)
         return _stream_btn(label, "/cell/type", cls="ins-item" + (" cur" if cur else ""),
                            vals={"id": mid, "msg_type": t})
-    return Details(
-        Summary("⇆", cls="cell-btn", title="Change cell type  ·  y = Code, m = Note, i = Ask AI"),
-        Div(Span("Cell type", cls="ins-col-head"),
-            item("code", "Code"), item("note", "Note"), item("prompt", "Ask AI"),
-            cls="type-menu"),
-        cls="ins")
+    return _dropdown("⇆", Span("Cell type", cls="ins-col-head"),
+                     item("code", "Code"), item("note", "Note"), item("prompt", "Ask AI"),
+                     title="Change cell type  ·  y = Code, m = Note, i = Ask AI",
+                     menu_cls="type-menu")
 
 
 def _ctx_buttons(m):
@@ -1278,13 +1281,12 @@ def PaperPanel():
             Button("§", cls="cell-btn", type="submit", name="mode", value="section",
                    title="Import the whole paper at once — one note per section"),
             method="post", action="/paper/import", cls="paper-import")
-        actions.append(Details(
-            Summary("Import…", cls="cell-btn",
-                    title="Step through by section, or import the whole paper"),
-            Div(Span("Step by step", cls="ins-col-head"), stepper,
-                Span("Or all at once", cls="ins-col-head"), bulk,
-                cls="paper-import-menu"),
-            cls="ins"))
+        actions.append(_dropdown(
+            "Import…",
+            Span("Step by step", cls="ins-col-head"), stepper,
+            Span("Or all at once", cls="ins-col-head"), bulk,
+            title="Step through by section, or import the whole paper",
+            menu_cls="paper-import-menu"))
         # collapse just the paper text — the header (incl. Import) stays put
         actions.append(Span("▾", cls="gear paper-toggle", title="Show/hide the paper text",
                             onclick="toggleCol('paper-collapsed','sidekick_paperhidden')"))
