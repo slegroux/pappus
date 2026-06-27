@@ -987,9 +987,12 @@ def test_paper_panel_states():
     app.STATE["paper"] = {"name": "p.pdf", "status": "converting"}
     h = to_xml(app.PaperPanel())
     assert "Converting" in h and "/paper/status" in h               # polling spinner
-    app.STATE["paper"] = {"name": "p.pdf", "status": "ready", "md": "# Title", "engine": "pypdf"}
+    app.STATE["paper"] = {"name": "p.pdf", "status": "ready",
+                          "md": "# Title\n\nsome **bold** body", "engine": "pypdf"}
     h = to_xml(app.PaperPanel())
     assert "<h1>Title</h1>" in h and "paperBody" in h               # rendered markdown
+    # blocks carry their source markdown so a highlight imports real md, not plain text
+    assert 'class="pblock"' in h and 'data-md="# Title"' in h
     app.STATE["paper"] = None
 
 

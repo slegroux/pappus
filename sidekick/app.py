@@ -1202,7 +1202,12 @@ def PaperPanel():
         return Div(head, body, cls="paper", id="paperPanel")
     badge = Span(f"via {p.get('engine', '?')} · highlight text → import to notebook or ask the AI",
                  cls="muted small paper-badge")
-    body = Div(render_md(p.get("md", "")), cls="paper-body md", id="paperBody")
+    # Render block-by-block, each block carrying its *source markdown* in data-md,
+    # so a highlight can be imported as real markdown (headings/formatting kept)
+    # rather than the rendered plain text.
+    blocks = paperlib.split_blocks(p.get("md", ""))
+    body = Div(*[Div(render_md(b), cls="pblock", **{"data-md": b}) for b in blocks],
+               cls="paper-body md", id="paperBody")
     return Div(head, badge, body, Script(PAPER_JS), cls="paper", id="paperPanel")
 
 
@@ -1221,8 +1226,20 @@ PAPER_JS = """
     ]}); } catch(e){}
   }
   if(window.__paperSel) return; window.__paperSel = true;
-  var bar = null, curText = '';
+  var bar = null, curText = '', curMd = '';
   function hide(){ if(bar) bar.style.display = 'none'; }
+  // Source markdown for the highlighted range: every block the selection touches,
+  // in document order, so the imported note keeps headings/formatting. Snaps to
+  // whole blocks (partial selection of a block still imports that block's source).
+  function selectedMarkdown(sel){
+    var out = [], blocks = document.querySelectorAll('#paperBody .pblock');
+    for(var i = 0; i < blocks.length; i++){
+      try { if(sel.containsNode(blocks[i], true)){
+        var md = blocks[i].getAttribute('data-md'); if(md) out.push(md);
+      }} catch(e){}
+    }
+    return out.join('\\n\\n').trim();
+  }
   function ask(text){
     if(typeof setMode === 'function') setMode('prompt');
     var ta = document.getElementById('composerInput');
@@ -1253,7 +1270,7 @@ PAPER_JS = """
       var b1 = document.createElement('button');
       b1.className = 'sel-btn import'; b1.textContent = '→ Notebook';
       b1.title = 'Import this highlighted passage as a note + a code cell to reimplement it';
-      b1.addEventListener('mousedown', function(e){ e.preventDefault(); toNotebook(curText); });
+      b1.addEventListener('mousedown', function(e){ e.preventDefault(); toNotebook(curMd || curText); });
       var b2 = document.createElement('button');
       b2.className = 'sel-btn'; b2.textContent = 'Ask AI ↗';
       b2.title = 'Drop the passage into the composer as an Ask-AI question';
@@ -1262,6 +1279,7 @@ PAPER_JS = """
       document.body.appendChild(bar);
     }
     curText = text;
+    curMd = selectedMarkdown(sel) || text;     // source markdown for import, plain for ask
     var r = sel.getRangeAt(0).getBoundingClientRect();
     bar.style.top = (window.scrollY + r.bottom + 6) + 'px';
     bar.style.left = (window.scrollX + r.left) + 'px';
