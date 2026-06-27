@@ -1,0 +1,13 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+uv.lock
+.sesskey
+
+# orchestration / tooling state
+.omc/
+
+# scratch design mockups (not part of the app)
+artifact.html
+preview.html

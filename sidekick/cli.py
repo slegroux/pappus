@@ -1,0 +1,80 @@
+"""sidekick CLI — manage tunnels, diagnose connections, launch the UI.
+
+Usage:
+    sidekick targets                 list configured targets
+    sidekick doctor [name]           diagnose a target's connection
+    sidekick up <name>               open the SSH tunnel for a remote target (blocks)
+    sidekick serve                   launch the web UI (http://localhost:8000)
+"""
+from __future__ import annotations
+
+import sys
+
+from .targets import get_target, list_targets, load_config
+
+
+def cmd_targets(_):
+    cfg = load_config()
+    default = cfg.get("default")
+    for name in list_targets():
+        t = get_target(name)
+        kind = f"remote via {t.ssh.host}" if t.is_remote else "local"
+        star = " (default)" if name == default else ""
+        print(f"  {name:8} {t.url:28} [{kind}]{star}")
+    return 0
+
+
+def cmd_doctor(args):
+    from .doctor import run_checks
+    name = args[0] if args else None
+    t = get_target(name)
+    print(f"Diagnosing target '{t.name}' -> {t.url}\n")
+    ok_all = True
+    for ok, label, detail in run_checks(t):
+        print(f"  [{'OK ' if ok else 'XX '}] {label:7} {detail}")
+        ok_all = ok_all and ok
+    print("\n" + ("All checks passed." if ok_all else "Some checks failed — see above."))
+    return 0 if ok_all else 1
+
+
+def cmd_up(args):
+    from .tunnel import open_tunnel, close_tunnel
+    if not args:
+        print("usage: sidekick up <target>", file=sys.stderr)
+        return 2
+    t = get_target(args[0])
+    if not t.is_remote:
+        print(f"Target '{t.name}' is local — no tunnel needed.")
+        return 0
+    print(f"Opening tunnel {t.ssh.host}:{t.ssh.remote_port} -> localhost:{t.ssh.local_port} …")
+    proc = open_tunnel(t)
+    print(f"Tunnel up. Point the UI at target '{t.name}'. Ctrl-C to close.")
+    try:
+        proc.wait()
+    except KeyboardInterrupt:
+        print("\nClosing tunnel…")
+        close_tunnel(proc)
+    return 0
+
+
+def cmd_serve(_):
+    import uvicorn
+    from .app import app
+    print("SolveIt Sidekick UI -> http://localhost:8000")
+    uvicorn.run(app, host="0.0.0.0", port=8000)
+    return 0
+
+
+COMMANDS = {"targets": cmd_targets, "doctor": cmd_doctor, "up": cmd_up, "serve": cmd_serve}
+
+
+def main(argv=None):
+    argv = argv if argv is not None else sys.argv[1:]
+    if not argv or argv[0] not in COMMANDS:
+        print(__doc__)
+        return 0 if not argv else 2
+    return COMMANDS[argv[0]](argv[1:])
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

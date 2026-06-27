@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
+      - name: Run unit + UI tests
+        run: uv run --extra dev --python ${{ matrix.python-version }} pytest -v
+        # uv builds the venv + installs deps from pyproject.toml.
+        # Live integration tests skip automatically: SOLVEIT_LIVE_URL isn't set
+        # here, so no real SolveIt server or tokens are needed for CI to pass.

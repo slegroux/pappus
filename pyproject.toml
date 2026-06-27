@@ -1,0 +1,51 @@
+[project]
+name = "solveit-sidekick"
+version = "0.1.0"
+description = "A Claude-desktop-style interface for SolveIt that runs against your laptop or a remote H100."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "python-fasthtml",
+    "uvicorn",
+    "pyyaml",
+    # LLM provider SDKs are core to the app (Ask AI), so they're always installed.
+    "anthropic",   # claude
+    "openai",      # codex
+    "zhipuai",     # glm
+]
+
+[project.optional-dependencies]
+# `uv run --extra solveit ...` to talk to the real Answer.AI SolveIt server.
+solveit = ["solveit_client"]
+dev = ["pytest"]
+
+# Standard ML / data-science stack the kernel can use. Opt-in because torch is
+# large:  uv run --extra ml python -m server.kernel_server --port 5055
+ml = [
+    "numpy",
+    "pandas",
+    "matplotlib",
+    "scikit-learn",
+    "scipy",
+    "torch",
+]
+
+# Kept for back-compat; the LLM SDKs now live in base dependencies.
+llm = []
+
+# Everything for a full local workstation in one shot.
+all = [
+    "solveit-sidekick[ml]",
+    "solveit-sidekick[solveit]",
+]
+
+[project.scripts]
+sidekick = "sidekick.cli:main"
+
+[tool.uv]
+# Dependency-only project: uv manages the venv without trying to build/install
+# the source tree as a wheel (we run it in-place with `python -m`).
+package = false
+
+[dependency-groups]
+dev = ["pytest"]
