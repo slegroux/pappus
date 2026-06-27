@@ -161,6 +161,15 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
 .title-edit:focus{border-color:var(--accent);background:var(--panel)}
 .gear{text-decoration:none;font-size:18px;color:var(--muted);line-height:1}
 .gear:hover{color:var(--ink)}
+/* export dropdown */
+.export{position:relative}
+.export>summary{list-style:none;cursor:pointer}
+.export>summary::-webkit-details-marker{display:none}
+.export-menu{position:absolute;right:0;top:28px;z-index:20;display:flex;flex-direction:column;gap:2px;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px;min-width:188px;
+  box-shadow:0 6px 18px rgba(0,0,0,.10)}
+.export-menu a{text-decoration:none;color:var(--ink);font-size:13px;padding:6px 10px;border-radius:7px;white-space:nowrap}
+.export-menu a:hover{background:#E8E5DB}
 /* settings */
 .settings-page{min-height:100vh;background:var(--bg);overflow:auto}
 .settings-wrap{max-width:640px;margin:0 auto;padding:28px 22px 60px}
@@ -883,6 +892,11 @@ def Page():
                 Div(TitleEditor(),
                     Div(Span("☰", cls="gear toc-toggle", title="Toggle table of contents",
                              onclick="toggleTOC()"),
+                        Details(Summary("⬇", cls="gear", title="Export this dialog"),
+                                Div(A("Jupyter notebook (.ipynb)", href="/export/ipynb"),
+                                    A("Markdown (.md)", href="/export/md"),
+                                    cls="export-menu"),
+                                cls="export"),
                         A("⚙", href="/settings", cls="gear", title="Settings — API keys"),
                         TargetSwitcher(),
                         style="display:flex;align-items:center;gap:12px"),
@@ -897,6 +911,72 @@ def Page():
             cls="app",
         ), Script(TOC_JS)),
     )
+
+
+# ---- export (.ipynb / .md) --------------------------------------------------
+def _lines(s: str) -> list:
+    """nbformat wants source/text as a list of lines (keeping newlines)."""
+    return (s or "").splitlines(keepends=True)
+
+
+def _code_outputs(m) -> list:
+    outs = []
+    if m.output:
+        outs.append({"output_type": "stream", "name": "stdout", "text": _lines(m.output)})
+    for item in m.rich:
+        t, data = item.get("type", ""), item.get("data", "")
+        if t in ("image/png", "image/jpeg"):
+            outs.append({"output_type": "display_data", "data": {t: data}, "metadata": {}})
+        elif t == "text/html":
+            outs.append({"output_type": "display_data",
+                         "data": {"text/html": _lines(data)}, "metadata": {}})
+    return outs
+
+
+def _prompt_md(m) -> str:
+    md = f"**Prompt:** {m.content}"
+    if m.output:
+        md += f"\n\n**{m.model or 'AI'}:**\n\n{m.output}"
+    return md
+
+
+def to_ipynb(msgs) -> dict:
+    """Export cells to a Jupyter notebook: code→code cells (with outputs/plots),
+    notes→markdown, prompts→markdown (question + AI answer)."""
+    cells = []
+    for m in msgs:
+        cid = (m.id or "").lstrip("_") or "cell"      # nbformat cell id (no leading _)
+        if m.msg_type == "code":
+            cells.append({"id": cid, "cell_type": "code", "metadata": {}, "execution_count": None,
+                          "source": _lines(m.content), "outputs": _code_outputs(m)})
+        elif m.msg_type == "note":
+            cells.append({"id": cid, "cell_type": "markdown", "metadata": {},
+                          "source": _lines(m.content)})
+        else:
+            cells.append({"id": cid, "cell_type": "markdown", "metadata": {},
+                          "source": _lines(_prompt_md(m))})
+    return {"cells": cells, "nbformat": 4, "nbformat_minor": 5,
+            "metadata": {"kernelspec": {"name": "python3", "display_name": "Python 3",
+                                        "language": "python"},
+                         "language_info": {"name": "python"}}}
+
+
+def to_markdown(msgs) -> str:
+    """Export cells to a single Markdown document."""
+    out = []
+    for m in msgs:
+        if m.msg_type == "code":
+            out.append(f"```python\n{m.content}\n```")
+            if m.output:
+                out.append(f"```\n{m.output}\n```")
+            for item in m.rich:
+                if item.get("type", "").startswith("image/"):
+                    out.append(f"![output](data:{item['type']};base64,{item['data']})")
+        elif m.msg_type == "note":
+            out.append(m.content)
+        else:
+            out.append(_prompt_md(m))
+    return "\n\n".join(out) + "\n"
 
 
 # ---- routes -----------------------------------------------------------------
@@ -1146,6 +1226,26 @@ def cell_move(ids: str = ""):
     if order and hasattr(backend, "reorder"):
         backend.reorder(STATE["dialog"], order)
     return ""
+
+
+def _download(body: str, fname: str, media: str):
+    from starlette.responses import Response
+    return Response(body, media_type=media,
+                    headers={"Content-Disposition": f'attachment; filename="{fname}"'})
+
+
+@rt("/export/ipynb")
+def export_ipynb():
+    msgs = STATE["backend"].messages(STATE["dialog"])
+    fname = STATE["dialog"].replace("/", "-") + ".ipynb"
+    return _download(json.dumps(to_ipynb(msgs), indent=1), fname, "application/x-ipynb+json")
+
+
+@rt("/export/md")
+def export_md():
+    msgs = STATE["backend"].messages(STATE["dialog"])
+    fname = STATE["dialog"].replace("/", "-") + ".md"
+    return _download(to_markdown(msgs), fname, "text/markdown; charset=utf-8")
 
 
 if __name__ == "__main__":

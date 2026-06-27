@@ -810,3 +810,49 @@ def test_cell_move_route_reorders():
     c = b.add("cell/move", "2", "code")
     app.cell_move(ids=f"{c.id},{a.id}")
     assert [m.id for m in b.messages("cell/move")] == [c.id, a.id]
+
+
+# ---- export (.ipynb / .md) --------------------------------------------------
+def test_export_ipynb_structure():
+    import json, sidekick.app as app
+    from sidekick.client import Msg
+    msgs = [Msg("n", "note", "# Title"),
+            Msg("c", "code", "print(1)", output="1", rich=[{"type": "image/png", "data": "AAAA"}]),
+            Msg("p", "prompt", "what?", output="because", model="codex")]
+    nb = app.to_ipynb(msgs)
+    assert nb["nbformat"] == 4 and len(nb["cells"]) == 3
+    assert nb["cells"][0]["cell_type"] == "markdown"
+    code = nb["cells"][1]
+    assert code["cell_type"] == "code" and "print(1)" in "".join(code["source"])
+    kinds = []
+    for o in code["outputs"]:
+        kinds.append(o["name"]) if o["output_type"] == "stream" else kinds.extend(o["data"])
+    assert "stdout" in kinds and "image/png" in kinds
+    assert nb["cells"][2]["cell_type"] == "markdown"      # prompt -> markdown Q&A
+    json.dumps(nb)                                         # must be serializable
+
+
+def test_export_markdown():
+    import sidekick.app as app
+    from sidekick.client import Msg
+    md = app.to_markdown([
+        Msg("n", "note", "## Hi"),
+        Msg("c", "code", "x=1", output="ok", rich=[{"type": "image/png", "data": "BBBB"}]),
+        Msg("p", "prompt", "q", output="a", model="glm"),
+    ])
+    assert "## Hi" in md
+    assert "```python\nx=1\n```" in md and "```\nok\n```" in md
+    assert "data:image/png;base64,BBBB" in md
+    assert "**Prompt:** q" in md and "**glm:**" in md
+
+
+def test_export_routes_set_download_headers():
+    import sidekick.app as app
+    app.STATE["dialog"] = "paper/x"
+    b = app.STATE["backend"]
+    b.messages("paper/x")
+    b.add("paper/x", "# Notes", "note")
+    r1, r2 = app.export_ipynb(), app.export_md()
+    assert 'filename="paper-x.ipynb"' in r1.headers["content-disposition"]
+    assert 'filename="paper-x.md"' in r2.headers["content-disposition"]
+    assert r1.media_type.startswith("application/x-ipynb")
