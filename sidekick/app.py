@@ -25,7 +25,9 @@ try:
     import mistune
     # escape=True neutralises raw HTML in the source, so rendering a note or an
     # AI answer can't inject <script> — markdown syntax still renders.
-    _md = mistune.create_markdown(escape=True, plugins=["strikethrough", "table"])
+    # 'math' extracts $…$ / $$…$$ before markdown can mangle underscores etc.,
+    # emitting \(…\) (inline) and $$…$$ (block) for KaTeX to render client-side.
+    _md = mistune.create_markdown(escape=True, plugins=["strikethrough", "table", "math"])
 except Exception:  # noqa: BLE001 — degrade to plain text if mistune is missing
     _md = None
 
@@ -472,6 +474,18 @@ STREAM_JS = """
   function sizeAll(){ document.querySelectorAll('.cell-edit').forEach(autosize); }
   if(!hasFieldSizing) requestAnimationFrame(sizeAll);           // wait for final width
 
+  // KaTeX: render LaTeX in an element (no-op offline / before KaTeX loads).
+  // mistune emits \\(…\\) inline and $$…$$ block, so a single $ is left alone.
+  function renderMath(el){
+    if(!el || !window.renderMathInElement) return;
+    try { renderMathInElement(el, { throwOnError:false, delimiters:[
+      {left:'$$', right:'$$', display:true},
+      {left:'\\\\[', right:'\\\\]', display:true},
+      {left:'\\\\(', right:'\\\\)', display:false}
+    ]}); } catch(e){}
+  }
+  document.querySelectorAll('#stream .md').forEach(renderMath);   // already-rendered answers/notes
+
   // Live AI answers: connect a vanilla EventSource for each streaming bubble.
   // 'msg' events carry the cumulative rendered markdown; 'done' closes the stream.
   // Runs on every #stream (re)render so newly-inserted placeholders get wired.
@@ -480,9 +494,11 @@ STREAM_JS = """
     var es = new EventSource(el.getAttribute('data-stream-url'));
     es.addEventListener('msg', function(e){
       el.innerHTML = e.data;
+      renderMath(el);                                  // typeset math as it streams in
       var s = el.closest('.stream'); if(s) s.scrollTop = s.scrollHeight;
     });
     es.addEventListener('done', function(){
+      renderMath(el);
       es.close(); el.removeAttribute('data-stream-url'); el.__streaming = false;
     });
     es.onerror = function(){ es.close(); };
@@ -716,6 +732,11 @@ def Page():
              Script(src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/codemirror.min.js"),
              Script(src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/mode/python/python.min.js"),
              Script(src="https://cdnjs.cloudflare.com/ajax/libs/codemirror/5.65.16/addon/display/placeholder.min.js"),
+             # KaTeX renders LaTeX in AI answers / notes; degrades to raw text offline.
+             Link(rel="stylesheet",
+                  href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css"),
+             Script(src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"),
+             Script(src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"),
              Style(CSS)),
         Body(Div(
             Sidebar(),
