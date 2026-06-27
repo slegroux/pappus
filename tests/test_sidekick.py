@@ -1046,7 +1046,7 @@ def test_paper_panel_shows_stepper_progress():
     assert "paper-collapsed" in h and "sidekick_paperhidden" in h   # show/hide text toggle
     app.STATE["paper"]["step"] = 3                    # all consumed
     h = to_xml(app.PaperPanel())
-    assert "All 3 sections in" in h and "/paper/step" not in h
+    assert "All 3 sections imported" in h and "/paper/step" not in h
     app.STATE["paper"] = None
 
 

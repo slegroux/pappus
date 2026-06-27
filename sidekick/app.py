@@ -150,6 +150,11 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
 .app.paper-collapsed .paper-body,.app.paper-collapsed .paper-badge{display:none}
 .app.paper-collapsed .paper{flex:0 0 auto}
 .app.paper-collapsed .paper-name{max-width:150px}
+/* secondary import options (stepper + bulk), behind a small "Import…" menu */
+.paper-import-menu{position:absolute;right:0;top:28px;z-index:30;display:flex;flex-direction:column;gap:6px;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;min-width:210px;
+  box-shadow:0 6px 18px rgba(0,0,0,.12)}
+.paper-import-menu .ins-col-head{margin:2px 0 0}
 /* floating toolbar shown when you highlight text in the paper */
 .sel-tools{position:absolute;z-index:60;display:none;gap:6px;box-shadow:0 4px 12px rgba(0,0,0,.20);
   border-radius:8px}
@@ -1156,27 +1161,34 @@ def PaperPanel():
         return Div(cls="paper", id="paperPanel")
     actions = []
     if p.get("status") == "ready":
+        # The primary flow is highlight → import (see the badge + selection toolbar).
+        # The sequential stepper and whole-paper bulk import live in this menu so the
+        # header stays clean.
         n = len(paperlib.split_sections(p.get("md", "")))
         step = p.get("step", 0)
         if step < n:
-            # Progressive, step-by-step reading: bring in the next section + a code
-            # cell to reimplement it (Jeremy Howard's piece-by-piece method).
-            actions.append(Form(
-                Button("Next section ▸", cls="cell-btn run", type="submit",
+            stepper = Form(
+                Button(f"Next section ▸  ({step}/{n})", cls="cell-btn run", type="submit",
                        title="Bring the next section into the notebook as a note + "
                              "a code cell to reimplement it yourself"),
-                Span(f"{step}/{n}", cls="muted small"),
-                method="post", action="/paper/step", cls="paper-import"))
+                method="post", action="/paper/step", cls="paper-import")
         else:
-            actions.append(Span(f"All {n} sections in ✓", cls="muted small"))
-        # secondary: dump the whole paper at once, by paragraph (¶) or section (§)
-        actions.append(Form(
+            stepper = Span(f"All {n} sections imported ✓", cls="muted small")
+        bulk = Form(
+            Span("Whole paper:", cls="muted small"),
             Button("¶", cls="cell-btn", type="submit", name="mode", value="para",
                    title="Import the whole paper at once — one note per paragraph"),
             Button("§", cls="cell-btn", type="submit", name="mode", value="section",
                    title="Import the whole paper at once — one note per section"),
-            method="post", action="/paper/import", cls="paper-import"))
-        # collapse just the paper text — the header (incl. Next section) stays put
+            method="post", action="/paper/import", cls="paper-import")
+        actions.append(Details(
+            Summary("Import…", cls="cell-btn",
+                    title="Step through by section, or import the whole paper"),
+            Div(Span("Step by step", cls="ins-col-head"), stepper,
+                Span("Or all at once", cls="ins-col-head"), bulk,
+                cls="paper-import-menu"),
+            cls="ins"))
+        # collapse just the paper text — the header (incl. Import) stays put
         actions.append(Span("▾", cls="gear paper-toggle", title="Show/hide the paper text",
                             onclick="toggleCol('paper-collapsed','sidekick_paperhidden')"))
     actions.append(A("✕", href="/paper/close", cls="gear", title="Close paper"))
