@@ -265,6 +265,14 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .cell-btn.ctx.off{color:#B0784F;border-color:#E3C7AE;background:#FBF3E7}
 .cell-btn.pin.on{color:#2C6B45;border-color:#BFE0CC;background:#E6F2EA}
 .tok{margin-left:2px;font-variant-numeric:tabular-nums}
+/* drag-to-reorder handle (hover-revealed, like the toolbar) */
+.drag-handle{cursor:grab;color:var(--muted);opacity:0;transition:opacity .12s;
+  user-select:none;font-size:14px;line-height:1;padding:0 3px;margin-left:-6px}
+.row:hover .drag-handle{opacity:.55}
+.drag-handle:hover{opacity:1}
+.drag-handle:active{cursor:grabbing}
+.sortable-ghost{opacity:.35}
+.sortable-chosen{background:#EDEAE1;border-radius:10px}
 /* a cell muted out of the AI's context: dim it, but keep it usable */
 .row.muted .cell-edit,.row.muted .bubble,.row.muted .out,.row.muted .cell-img{opacity:.5}
 .row.muted .tag{opacity:.6}
@@ -397,7 +405,8 @@ def _rowcls(m):
 
 
 def _head(m, primary, show_actions=False):
-    bits = [Span(_TAG[m.msg_type], cls="tag")]
+    bits = [Span("⠿", cls="drag-handle", title="Drag to reorder"),
+            Span(_TAG[m.msg_type], cls="tag")]
     if m.msg_type == "code":
         bits.append(Span(m.id, cls="muted small"))
     bits.append(_tok_badge(m))
@@ -563,6 +572,25 @@ STREAM_JS = """
     renderMath(el); addCopyButtons(el);
   });
   if(window.buildTOC) window.buildTOC();   // refresh the table of contents on every render
+
+  // Drag-to-reorder: SortableJS on the cell list, dragged via each cell's handle.
+  // The wrap is a fresh element on every swap, so init once per wrap.
+  var wrap = document.querySelector('#stream .wrap');
+  if(wrap && window.Sortable && !wrap.__sortable){
+    wrap.__sortable = Sortable.create(wrap, {
+      draggable: '.row', handle: '.drag-handle', animation: 150,
+      ghostClass: 'sortable-ghost', chosenClass: 'sortable-chosen',
+      onEnd: function(){
+        var ids = Array.prototype.map.call(wrap.querySelectorAll('.row'),
+          function(r){ return r.id.replace('cell-', ''); });
+        fetch('/cell/move', {
+          method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: 'ids=' + encodeURIComponent(ids.join(','))
+        }).catch(function(){});            // best-effort; the DOM is already reordered
+        if(window.buildTOC) window.buildTOC();
+      }
+    });
+  }
 
   // Live AI answers: connect a vanilla EventSource for each streaming bubble.
   // 'msg' events carry the cumulative rendered markdown; 'done' closes the stream.
@@ -861,6 +889,8 @@ def Page():
                   href="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.css"),
              Script(src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/katex.min.js"),
              Script(src="https://cdnjs.cloudflare.com/ajax/libs/KaTeX/0.16.9/contrib/auto-render.min.js"),
+             # SortableJS: drag cells to reorder (degrades to no-drag offline).
+             Script(src="https://cdnjs.cloudflare.com/ajax/libs/Sortable/1.15.6/Sortable.min.js"),
              Style(CSS)),
         Body(Div(
             Sidebar(),
@@ -1084,6 +1114,17 @@ def cell_exec(id: str):
     elif m is not None:
         backend.exec(STATE["dialog"], id)
     return Stream()
+
+
+@rt("/cell/move", methods=["post"])
+def cell_move(ids: str = ""):
+    """Persist a new cell order after a drag. SortableJS has already reordered the
+    DOM, so we just save the order — no re-render needed (returns empty)."""
+    backend = STATE["backend"]
+    order = [i for i in ids.split(",") if i]
+    if order and hasattr(backend, "reorder"):
+        backend.reorder(STATE["dialog"], order)
+    return ""
 
 
 if __name__ == "__main__":

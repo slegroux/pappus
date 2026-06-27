@@ -230,6 +230,18 @@ class _InMemoryBackend:
         _rename_in(self._dialogs, old, new)
         self._save()
 
+    def reorder(self, dialog: str, ordered_ids: list[str]) -> None:
+        """Reorder a dialog's cells to match `ordered_ids` (from a drag). Any id
+        not listed is appended in its original order, so we never drop a cell."""
+        lst = self._dialogs.get(dialog)
+        if not lst:
+            return
+        by_id = {m.id: m for m in lst}
+        listed = set(ordered_ids)
+        self._dialogs[dialog] = ([by_id[i] for i in ordered_ids if i in by_id]
+                                 + [m for m in lst if m.id not in listed])
+        self._save()
+
 
 class MockBackend(_InMemoryBackend):
     """In-memory stand-in so the UI runs with no SolveIt server."""

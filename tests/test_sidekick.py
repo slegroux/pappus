@@ -786,3 +786,27 @@ def test_kernel_loopback_detection():
     import server.kernel_server as ks
     assert ks._is_loopback("127.0.0.1") and ks._is_loopback("localhost")
     assert not ks._is_loopback("0.0.0.0") and not ks._is_loopback("1.2.3.4")
+
+
+# ---- drag-to-reorder --------------------------------------------------------
+def test_reorder_moves_cells_and_never_drops():
+    b = MockBackend()
+    a = b.add("d/x", "1", "code")
+    bb = b.add("d/x", "2", "code")
+    c = b.add("d/x", "3", "code")
+    b.reorder("d/x", [c.id, a.id, bb.id])
+    assert [m.id for m in b.messages("d/x")] == [c.id, a.id, bb.id]
+    b.reorder("d/x", [bb.id])                       # omitted ids are kept, not lost
+    ids = [m.id for m in b.messages("d/x")]
+    assert ids[0] == bb.id and set(ids) == {a.id, bb.id, c.id}
+
+
+def test_cell_move_route_reorders():
+    import sidekick.app as app
+    app.STATE["dialog"] = "cell/move"
+    b = app.STATE["backend"]
+    b.messages("cell/move")
+    a = b.add("cell/move", "1", "code")
+    c = b.add("cell/move", "2", "code")
+    app.cell_move(ids=f"{c.id},{a.id}")
+    assert [m.id for m in b.messages("cell/move")] == [c.id, a.id]
