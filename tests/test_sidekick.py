@@ -899,7 +899,8 @@ def test_paper_open_and_close_routes(monkeypatch, tmp_path):
     import time, sidekick.app as app
     monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
     monkeypatch.setattr(app.paperlib, "convert", lambda p: ("# Paper", "pypdf"))
-    app.paper_open(path=str(tmp_path / "a.pdf"))
+    pdf = tmp_path / "a.pdf"; pdf.write_bytes(b"%PDF-1.4 fake")   # must exist now
+    app.paper_open(path=str(pdf))
     for _ in range(100):
         if (app.STATE["paper"] or {}).get("status") == "ready":
             break
@@ -907,3 +908,26 @@ def test_paper_open_and_close_routes(monkeypatch, tmp_path):
     assert app.STATE["paper"]["status"] == "ready" and app.STATE["paper"]["md"] == "# Paper"
     app.paper_close()
     assert app.STATE["paper"] is None
+
+
+def test_paper_open_accepts_upload(monkeypatch, tmp_path):
+    import time, sidekick.app as app
+    from starlette.testclient import TestClient
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    monkeypatch.setattr(app.paperlib, "convert", lambda p: ("# Uploaded", "pypdf"))
+    app.STATE["paper"] = None
+    c = TestClient(app.app)
+    c.post("/paper/open", files={"pdf": ("mypaper.pdf", b"%PDF-1.4 data", "application/pdf")})
+    for _ in range(100):
+        if (app.STATE["paper"] or {}).get("status") == "ready":
+            break
+        time.sleep(0.02)
+    assert app.STATE["paper"]["name"] == "mypaper.pdf" and app.STATE["paper"]["md"] == "# Uploaded"
+    app.STATE["paper"] = None
+
+
+def test_paper_open_bad_path_reports_not_found():
+    import sidekick.app as app
+    app.paper_open(path="/no/such/file.pdf")
+    assert app.STATE["paper"]["engine"] == "error" and "not found" in app.STATE["paper"]["md"].lower()
+    app.STATE["paper"] = None

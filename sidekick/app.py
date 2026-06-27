@@ -15,6 +15,7 @@ import threading
 from urllib.parse import quote
 
 from fasthtml.common import *
+from starlette.datastructures import UploadFile
 
 from .targets import get_target, list_targets, list_models, default_model
 from .client import connect, build_context, est_tokens, _InMemoryBackend
@@ -144,6 +145,8 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
   box-shadow:0 6px 18px rgba(0,0,0,.10)}
 .paper-path{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;font-size:13px;outline:none}
 .paper-path:focus{border-color:var(--accent)}
+.paper-file-label{font-size:12px;color:var(--muted);font-weight:600}
+.paper-file{font-size:12px;cursor:pointer}
 /* table of contents (right column, toggleable, full-height so it stays in view) */
 .toc{display:none;background:var(--sidebar);border-left:1px solid var(--line);
   padding:16px 14px;overflow:auto;height:100vh}
@@ -984,10 +987,15 @@ def Page():
                     Div(Span("☰", cls="gear toc-toggle", title="Toggle table of contents",
                              onclick="toggleTOC()"),
                         Details(Summary("📄", cls="gear", title="Open a paper (PDF)"),
-                                Form(Input(name="path", placeholder="/path/to/paper.pdf",
+                                Form(Label("Choose a PDF…", cls="paper-file-label"),
+                                     Input(type="file", name="pdf",
+                                           accept="application/pdf,.pdf",
+                                           cls="paper-file", onchange="this.form.submit()"),
+                                     Input(name="path", placeholder="…or paste a file path",
                                            cls="paper-path"),
-                                     Button("Open", cls="cell-btn run", type="submit"),
-                                     method="post", action="/paper/open", cls="paper-form"),
+                                     Button("Open path", cls="cell-btn run", type="submit"),
+                                     method="post", action="/paper/open",
+                                     enctype="multipart/form-data", cls="paper-form"),
                                 cls="export"),
                         Details(Summary("⬇", cls="gear", title="Export this dialog"),
                                 Div(A("Jupyter notebook (.ipynb)", href="/export/ipynb"),
@@ -1345,10 +1353,10 @@ def export_md():
     return _download(to_markdown(msgs), fname, "text/markdown; charset=utf-8")
 
 
-def _convert_paper_async(path: str):
+def _convert_paper_async(path: str, name: str | None = None):
     """Convert a PDF in a background thread (marker can take a while), updating
     STATE['paper'] from 'converting' to 'ready'/'error'. The panel polls."""
-    name = os.path.basename(path)
+    name = name or os.path.basename(path)
     STATE["paper"] = {"name": name, "status": "converting"}
 
     def work():
@@ -1362,11 +1370,36 @@ def _convert_paper_async(path: str):
     threading.Thread(target=work, daemon=True).start()
 
 
+def _save_upload(pdf) -> tuple[str, str] | None:
+    """Save an uploaded PDF under the papers cache (keyed by content hash so the
+    same file re-uses its conversion). Returns (path, display_name) or None."""
+    if pdf is None or not getattr(pdf, "filename", ""):
+        return None
+    data = pdf.file.read()
+    if not data:
+        return None
+    import hashlib
+    updir = paperlib._cache_dir() / "uploads"
+    updir.mkdir(parents=True, exist_ok=True)
+    dst = updir / (hashlib.sha1(data).hexdigest()[:16] + ".pdf")
+    dst.write_bytes(data)
+    return str(dst), pdf.filename
+
+
 @rt("/paper/open", methods=["post"])
-def paper_open(path: str = ""):
-    path = os.path.expanduser((path or "").strip())
-    if path:
-        _convert_paper_async(path)
+def paper_open(pdf: UploadFile = None, path: str = ""):
+    src, name = None, None
+    up = _save_upload(pdf)                       # an uploaded file takes precedence
+    if up:
+        src, name = up
+    elif path.strip():
+        src = os.path.expanduser(path.strip())
+        name = os.path.basename(src)
+    if src and not os.path.exists(src):          # clear feedback for a bad path
+        STATE["paper"] = {"name": name or src, "status": "ready", "engine": "error",
+                          "md": f"**File not found:** `{src}`"}
+    elif src:
+        _convert_paper_async(src, name)
     return Page()
 
 
