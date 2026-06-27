@@ -1020,6 +1020,22 @@ def test_paper_step_brings_one_section_at_a_time():
     app.STATE["paper"] = None
 
 
+def test_paper_import_selection_adds_note_and_code():
+    import sidekick.app as app
+    app.STATE["paper"] = {"name": "sel.pdf", "status": "ready", "md": "# whole\n\nbig paper",
+                          "engine": "pypdf"}
+    app.paper_import_selection(text="  just this bit I care about  ")
+    dlg = app.STATE["paper"]["dialog"]
+    cells = app.STATE["backend"].messages(dlg)
+    assert [c.msg_type for c in cells] == ["note", "code"]
+    assert cells[0].content == "just this bit I care about"      # trimmed selection
+    assert cells[1].content == "" and app.STATE["dialog"] == dlg
+    # empty / no-paper selections are no-ops
+    app.paper_import_selection(text="   ")
+    assert len(app.STATE["backend"].messages(dlg)) == 2
+    app.STATE["paper"] = None
+
+
 def test_paper_panel_shows_stepper_progress():
     import sidekick.app as app
     from fasthtml.common import to_xml

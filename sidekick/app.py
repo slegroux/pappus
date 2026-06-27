@@ -150,8 +150,12 @@ body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
 .app.paper-collapsed .paper-body,.app.paper-collapsed .paper-badge{display:none}
 .app.paper-collapsed .paper{flex:0 0 auto}
 .app.paper-collapsed .paper-name{max-width:150px}
-.ask-sel-btn{position:absolute;z-index:60;background:var(--accent);color:#fff;border:none;border-radius:8px;
-  padding:5px 11px;font-size:12px;cursor:pointer;box-shadow:0 4px 12px rgba(0,0,0,.20);display:none}
+/* floating toolbar shown when you highlight text in the paper */
+.sel-tools{position:absolute;z-index:60;display:none;gap:6px;box-shadow:0 4px 12px rgba(0,0,0,.20);
+  border-radius:8px}
+.sel-btn{border:none;border-radius:8px;padding:5px 11px;font-size:12px;cursor:pointer;white-space:nowrap}
+.sel-btn.import{background:var(--accent);color:#fff;font-weight:600}
+.sel-btn:not(.import){background:var(--panel);color:var(--ink);border:1px solid var(--line)}
 /* the 📄 topbar icon IS the file picker: a label wrapping a hidden file input */
 .paper-form{display:inline-flex;align-items:center;margin:0}
 .paper-pick{cursor:pointer}
@@ -1184,7 +1188,7 @@ def PaperPanel():
                    hx_get="/paper/status", hx_trigger="every 2s",
                    hx_target="#paperPanel", hx_swap="outerHTML")
         return Div(head, body, cls="paper", id="paperPanel")
-    badge = Span(f"via {p.get('engine', '?')} · select text to ask the AI",
+    badge = Span(f"via {p.get('engine', '?')} · highlight text → import to notebook or ask the AI",
                  cls="muted small paper-badge")
     body = Div(render_md(p.get("md", "")), cls="paper-body md", id="paperBody")
     return Div(head, badge, body, Script(PAPER_JS), cls="paper", id="paperPanel")
@@ -1205,8 +1209,8 @@ PAPER_JS = """
     ]}); } catch(e){}
   }
   if(window.__paperSel) return; window.__paperSel = true;
-  var btn = null;
-  function hide(){ if(btn) btn.style.display = 'none'; }
+  var bar = null, curText = '';
+  function hide(){ if(bar) bar.style.display = 'none'; }
   function ask(text){
     if(typeof setMode === 'function') setMode('prompt');
     var ta = document.getElementById('composerInput');
@@ -1218,22 +1222,38 @@ PAPER_JS = """
     }
     hide();
   }
+  function toNotebook(text){
+    // full-page POST so the new code cell opens focused (the Page render keeps
+    // STATE['editing'], which an htmx/fetch round-trip would consume early).
+    var f = document.createElement('form');
+    f.method = 'POST'; f.action = '/paper/import-selection';
+    var i = document.createElement('input');
+    i.type = 'hidden'; i.name = 'text'; i.value = text;
+    f.appendChild(i); document.body.appendChild(f); f.submit();
+  }
   document.addEventListener('mouseup', function(){
     var paper = document.getElementById('paperBody');
     var sel = window.getSelection();
     var text = sel ? sel.toString().trim() : '';
     if(!paper || !text || !sel.anchorNode || !paper.contains(sel.anchorNode)){ hide(); return; }
-    if(!btn){
-      btn = document.createElement('button');
-      btn.className = 'ask-sel-btn'; btn.textContent = 'Ask AI about this ↗';
-      btn.addEventListener('mousedown', function(e){ e.preventDefault(); ask(btn.__t); });
-      document.body.appendChild(btn);
+    if(!bar){
+      bar = document.createElement('div'); bar.className = 'sel-tools';
+      var b1 = document.createElement('button');
+      b1.className = 'sel-btn import'; b1.textContent = '→ Notebook';
+      b1.title = 'Import this highlighted passage as a note + a code cell to reimplement it';
+      b1.addEventListener('mousedown', function(e){ e.preventDefault(); toNotebook(curText); });
+      var b2 = document.createElement('button');
+      b2.className = 'sel-btn'; b2.textContent = 'Ask AI ↗';
+      b2.title = 'Drop the passage into the composer as an Ask-AI question';
+      b2.addEventListener('mousedown', function(e){ e.preventDefault(); ask(curText); });
+      bar.appendChild(b1); bar.appendChild(b2);
+      document.body.appendChild(bar);
     }
-    btn.__t = text;
+    curText = text;
     var r = sel.getRangeAt(0).getBoundingClientRect();
-    btn.style.top = (window.scrollY + r.bottom + 6) + 'px';
-    btn.style.left = (window.scrollX + r.left) + 'px';
-    btn.style.display = 'block';
+    bar.style.top = (window.scrollY + r.bottom + 6) + 'px';
+    bar.style.left = (window.scrollX + r.left) + 'px';
+    bar.style.display = 'flex';
   });
 })();
 """
@@ -1733,6 +1753,30 @@ def _unique_dialog(backend, base: str) -> str:
     return f"{base}-{n}"
 
 
+def _paper_dialog(backend, p: dict) -> str:
+    """The dialog that the open paper's imported cells go into — a `paper/<name>`
+    dialog, created on first use and remembered on the paper state."""
+    dialog = p.get("dialog")
+    if not dialog:
+        base = os.path.splitext(p.get("name", "paper"))[0]
+        dialog = _unique_dialog(backend, f"paper/{_safe_name(base)}")
+        backend.messages(dialog)
+        p["dialog"] = dialog
+    return dialog
+
+
+def _append_passage(p: dict, text: str):
+    """Add a passage to the paper's dialog as a note + an empty code cell to
+    reimplement it, then open that code cell focused. Shared by the section
+    stepper and the highlight-to-import flow."""
+    backend = STATE["backend"]
+    dialog = _paper_dialog(backend, p)
+    backend.add(dialog, text, "note")            # the passage to read…
+    code = backend.add(dialog, "", "code")       # …and a cell to reimplement it
+    STATE["dialog"] = dialog
+    STATE["editing"] = code.id                   # open the code cell, focused & in view
+
+
 @rt("/paper/step", methods=["post"])
 def paper_step():
     """Progressive paper reading (Jeremy Howard's piece-by-piece method): pull the
@@ -1746,18 +1790,20 @@ def paper_step():
     i = p.get("step", 0)
     if i >= len(sections):
         return Page()                            # nothing left to bring in
-    backend = STATE["backend"]
-    dialog = p.get("dialog")
-    if not dialog:                               # create the paper's dialog on step 1
-        base = os.path.splitext(p.get("name", "paper"))[0]
-        dialog = _unique_dialog(backend, f"paper/{_safe_name(base)}")
-        backend.messages(dialog)
-        p["dialog"] = dialog
-    backend.add(dialog, sections[i], "note")     # the section to read…
-    code = backend.add(dialog, "", "code")       # …and a cell to reimplement it
+    _append_passage(p, sections[i])              # note + code cell, opened focused
     p["step"] = i + 1
-    STATE["dialog"] = dialog
-    STATE["editing"] = code.id                   # open the code cell, focused & in view
+    return Page()
+
+
+@rt("/paper/import-selection", methods=["post"])
+def paper_import_selection(text: str = ""):
+    """Import a passage the user highlighted in the paper into the notebook as a
+    note + a code cell to reimplement it — cherry-pick the parts that matter,
+    instead of stepping through the whole paper."""
+    text = (text or "").strip()
+    p = STATE.get("paper")
+    if text and p and p.get("status") == "ready":
+        _append_passage(p, text)
     return Page()
 
 

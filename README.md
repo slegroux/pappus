@@ -227,20 +227,27 @@ its dialogs on the SolveIt server.)
 ## Reading papers
 
 Open a PDF with the **📄** button (it opens a file picker) and it appears in a
-left reading column. Select any passage → an **"Ask AI about this"** button
-drops the quoted paragraph into the composer (Ask AI mode), so your question
-carries the paragraph as context — then run code, plot, and take notes beside it.
+left reading column. **Highlight any passage** and a small toolbar pops up:
 
-### Step through it, the way Jeremy Howard does
+- **→ Notebook** — import the highlighted passage as a **note**, followed by an
+  **empty code cell that opens focused**, so you can *reimplement that idea
+  yourself*. This is the cherry-pick flow: pull in only the parts that matter,
+  skip the rest of the paper.
+- **Ask AI ↗** — drop the quoted passage into the composer (Ask AI mode), so your
+  next question carries it as context.
 
-The reading panel has a **Next section ▸** button that works the paper the
+You can hide the paper text with the **▾** toggle (the header — name, controls —
+stays put) to give the notebook more room.
+
+### Or step through it, the way Jeremy Howard does
+
+Prefer to go front-to-back? The **Next section ▸** button works the paper the
 *dialogue-engineering* way — small steps, deep understanding — instead of dumping
 the whole thing. Each click brings the **next section** into the notebook as a
-**note**, followed by an **empty code cell that opens focused** so you can
-*reimplement the idea yourself* (writing the code is what builds understanding;
-the AI sees everything above, so "is my version equivalent?" just works). A
-counter (`2/3`) tracks your progress through the paper. Prefer it all at once?
-The **¶** / **§** buttons still bulk-import every paragraph or section as notes.
+**note** + a focused **code cell** to reimplement, and a counter (`2/3`) tracks
+your progress (the AI sees everything above, so "is my version equivalent?" just
+works). Prefer it all at once? The **¶** / **§** buttons bulk-import every
+paragraph or section as notes.
 
 PDFs are converted to markdown and rendered with the same math/code pipeline as
 the rest of the app. The recommended reader is **marker** — install the **`paper`**
