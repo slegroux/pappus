@@ -64,13 +64,19 @@ a small **SolveIt-compatible kernel server** that genuinely executes code. It's
 the fastest way to see the interface go *live* (green LED) end-to-end:
 
 ```bash
+# one command — start the kernel server AND the UI together (Ctrl+C stops both):
+just dev        # → kernel on :5055, UI on http://localhost:8000
+
+# …or the two steps by hand:
 # terminal 1 — start the kernel server (--extra kernel adds numpy/torch/etc.)
 uv run --extra kernel python -m server.kernel_server --port 5055
-
 # terminal 2 — verify and launch
 uv run python -m sidekick.cli doctor kernel      # -> all checks pass
 SIDEKICK_TARGET=kernel uv run python -m sidekick.cli serve
 ```
+
+> `just dev` needs [`just`](https://github.com/casey/just) (`brew install just`).
+> Run `just` to see all recipes (`dev`, `kernel`, `ui`, `test`, `doctor`).
 
 The LLM SDKs (anthropic/openai/zhipuai) are in the base install, so Ask AI works
 as soon as you add a key in Settings — no extra flag needed.
