@@ -236,6 +236,22 @@ to keep it in context even when older cells are trimmed.
 This applies to the bundled **kernel** backend. On a real **solveit** target,
 SolveIt's server assembles the dialog context itself.
 
+#### The AI can edit cells (Max plan)
+
+Ask AI doesn't only *answer* — it can **edit the notebook for you**. Ask it to
+"fix the bug in that cell," "vectorise this loop," or "add a test below," and it
+rewrites the target cell (or inserts a new one) in place; the notebook refreshes
+to show the change. This is the same idea as SolveIt's `dialoghelper`, which
+gives its AI tools to manipulate the dialog — here it runs on your **Claude Max
+subscription** (no API credits) via the `claude` CLI plus a tiny, local
+[MCP server](server/mcp_cells.py) exposing `list_cells` / `update_cell` /
+`str_replace` / `insert_cell`.
+
+It only touches cells when you **explicitly ask**; an ordinary question is still
+answered in text. The tools are loopback-only and token-guarded, and active only
+on the `claude-cli` (subscription) model. Set `SIDEKICK_CELL_TOOLS=0` to turn
+them off (e.g. for the leanest time-to-first-token).
+
 #### Rich output
 
 Code cells render **plots and rich values inline**, not just text: matplotlib
