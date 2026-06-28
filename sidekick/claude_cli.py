@@ -241,10 +241,12 @@ def call(dialog: str, content: str, context: str = "") -> str:
 
 
 def _popen(cmd, cwd, env):
-    """Streaming subprocess.Popen (one place for tests to patch)."""
+    """Streaming subprocess.Popen (one place for tests to patch). bufsize=1 makes
+    the pipe line-buffered so each stream-json line is readable the moment Claude
+    flushes it — paired with readline() below, tokens arrive without read-ahead lag."""
     import subprocess
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                            stdin=subprocess.DEVNULL, text=True, cwd=cwd, env=env)
+                            stdin=subprocess.DEVNULL, text=True, bufsize=1, cwd=cwd, env=env)
 
 
 def stream(dialog: str, content: str, context: str = ""):
@@ -266,7 +268,9 @@ def stream(dialog: str, content: str, context: str = ""):
         return
 
     final_sid, got_any = sid, False
-    for line in p.stdout:
+    # readline() (not `for line in p.stdout`) avoids the iterator's read-ahead
+    # buffer, so each line surfaces as soon as Claude emits it — real streaming.
+    for line in iter(p.stdout.readline, ""):
         try:
             ev = json.loads(line)
         except (ValueError, TypeError):
