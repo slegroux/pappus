@@ -1345,16 +1345,42 @@ def Stream():
 COMPOSER_JS = """
 var composerCM = null;   // CodeMirror instance while the composer is in Code mode
 
+// Drop an immediate "Thinking…" wheel into the stream the instant you send an
+// Ask-AI prompt — before any server round-trip. The htmx response then swaps all
+// of #stream and replaces it: with the streaming answer (Claude Max) or the final
+// answer (blocking API models, which otherwise showed no indicator at all). So a
+// wheel is always visible while you wait, regardless of model or speed.
+function _showPendingSpinner(){
+  var stream = document.getElementById('stream');
+  if(!stream || document.getElementById('pending-spinner')) return;
+  var box = stream.querySelector('.wrap') || stream;
+  var d = document.createElement('div');
+  d.id = 'pending-spinner'; d.className = 'row';
+  d.innerHTML = '<div class="answer"><div class="bubble md"><span class="thinking">' +
+                '<span class="spinner"></span>Thinking…</span></div></div>';
+  box.appendChild(d);
+  stream.scrollTop = stream.scrollHeight;
+}
 function _submitComposer(){
   if(composerCM) composerCM.save();                 // flush editor -> textarea
   var ta = document.getElementById('composerInput');
   if(!ta || !ta.value.trim()) return;
+  var isPrompt = (document.getElementById('msgType').value === 'prompt');
   // requestSubmit() fires the submit event so htmx posts and swaps just #stream
   // (no full-page reload). htmx serializes the form synchronously, so it's safe
   // to clear the composer right after.
   document.getElementById('composerForm').requestSubmit();
+  if(isPrompt) _showPendingSpinner();               // instant feedback until the swap lands
   ta.value = '';
   if(composerCM) composerCM.setValue('');
+}
+// A successful /send swaps #stream and so removes the optimistic spinner; but if
+// the request errors (no swap), clear the stray wheel so it can't hang forever.
+if(!window.__pendingSpinnerCleanup){
+  window.__pendingSpinnerCleanup = true;
+  document.addEventListener('htmx:afterRequest', function(){
+    var s = document.getElementById('pending-spinner'); if(s) s.remove();
+  });
 }
 function _initComposerCM(){
   var ta = document.getElementById('composerInput');
