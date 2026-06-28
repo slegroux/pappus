@@ -1385,6 +1385,18 @@ function cycleMode(dir){
   if(i < 0) i = 0;
   setMode(COMPOSER_MODES[(i + dir + COMPOSER_MODES.length) % COMPOSER_MODES.length]);
 }
+// Shared by the paper-panel toolbar and the dialog-stream selection bubble: drop a
+// quoted passage into the composer as an Ask-AI prompt (switches to prompt mode,
+// which also tears down the Code editor so the textarea holds the quote).
+window.__askComposer = function(text){
+  setMode('prompt');
+  var ta = document.getElementById('composerInput');
+  if(!ta) return;
+  var quote = String(text || '').split('\\n').map(function(l){ return '> ' + l; }).join('\\n');
+  ta.value = quote + '\\n\\n';
+  ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+  ta.scrollIntoView({block: 'center'});
+};
 (function(){
   var ta = document.getElementById('composerInput');
   if(!ta) return;
@@ -1403,6 +1415,46 @@ function cycleMode(dir){
   });
   if(document.getElementById('msgType').value === 'code') _initComposerCM();  // sticky Code mode
   else ta.focus();
+})();
+"""
+
+
+# A floating "Ask AI ↗" bubble over text selected in the dialog stream — the paper
+# panel's selection toolbar, but for the conversation itself. Attaches once at the
+# document level so it survives #stream htmx swaps, and reuses __askComposer.
+STREAM_SEL_JS = """
+(function(){
+  if(window.__streamSel) return; window.__streamSel = true;
+  var bar = null, curText = '';
+  function hide(){ if(bar) bar.style.display = 'none'; }
+  document.addEventListener('mouseup', function(ev){
+    if(bar && ev.target && bar.contains(ev.target)) return;       // a click on the bubble itself
+    var stream = document.getElementById('stream');
+    var sel = window.getSelection();
+    var text = sel ? sel.toString().trim() : '';
+    if(!stream || !text || !sel.anchorNode || !stream.contains(sel.anchorNode)){ hide(); return; }
+    // Don't intrude while editing a cell — CodeMirror / the textarea own their selection UX.
+    var n = sel.anchorNode, el = n && (n.nodeType === 3 ? n.parentElement : n);
+    if(el && el.closest && el.closest('.CodeMirror, .cell-edit')){ hide(); return; }
+    if(!bar){
+      bar = document.createElement('div'); bar.className = 'sel-tools';
+      var b = document.createElement('button');
+      b.className = 'sel-btn import'; b.textContent = 'Ask AI ↗';
+      b.title = 'Drop the selected text into the composer as an Ask-AI question';
+      b.addEventListener('mousedown', function(e){
+        e.preventDefault();                                        // keep the selection alive
+        if(window.__askComposer) window.__askComposer(curText);
+        hide();
+      });
+      bar.appendChild(b);
+      document.body.appendChild(bar);
+    }
+    curText = text;
+    var r = sel.getRangeAt(0).getBoundingClientRect();
+    bar.style.top = (window.scrollY + r.bottom + 6) + 'px';
+    bar.style.left = (window.scrollX + r.left) + 'px';
+    bar.style.display = 'flex';
+  });
 })();
 """
 
@@ -1733,14 +1785,7 @@ PAPER_JS = """
     return out.join('\\n\\n').trim();
   }
   function ask(text){
-    if(typeof setMode === 'function') setMode('prompt');
-    var ta = document.getElementById('composerInput');
-    if(ta){
-      var quote = text.split('\\n').map(function(l){ return '> ' + l; }).join('\\n');
-      ta.value = quote + '\\n\\n';
-      ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
-      ta.scrollIntoView({block: 'center'});
-    }
+    if(window.__askComposer) window.__askComposer(text);   // shared composer prefill
     hide();
   }
   function toNotebook(text){
@@ -1937,6 +1982,7 @@ _LOCAL_HDRS = (
     Script(src="/vendor/placeholder.min.js"),
     Script(src="/vendor/show-hint.min.js"),     # Ctrl+Space completion dropdown
     Script(COMPLETE_JS),                          # defines window.__kernelHint
+    Script(STREAM_SEL_JS),                        # Ask-AI bubble over dialog-stream selections
     Link(rel="stylesheet", href="/vendor/katex.min.css"),
     Script(src="/vendor/katex.min.js"),
     Script(src="/vendor/auto-render.min.js"),
