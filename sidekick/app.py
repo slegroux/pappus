@@ -1348,7 +1348,13 @@ var composerCM = null;   // CodeMirror instance while the composer is in Code mo
 function _submitComposer(){
   if(composerCM) composerCM.save();                 // flush editor -> textarea
   var ta = document.getElementById('composerInput');
-  if(ta && ta.value.trim()) document.getElementById('composerForm').submit();
+  if(!ta || !ta.value.trim()) return;
+  // requestSubmit() fires the submit event so htmx posts and swaps just #stream
+  // (no full-page reload). htmx serializes the form synchronously, so it's safe
+  // to clear the composer right after.
+  document.getElementById('composerForm').requestSubmit();
+  ta.value = '';
+  if(composerCM) composerCM.setValue('');
 }
 function _initComposerCM(){
   var ta = document.getElementById('composerInput');
@@ -1485,11 +1491,15 @@ def Composer():
             Div(
                 Div(mode("prompt", "Ask AI"), mode("code", "Code"),
                     mode("note", "Note"), cls="modes", id="modeChips"),
-                Div(ModelSelect(), Button("↑", cls="send", type="submit"),
+                Div(ModelSelect(), Button("↑", cls="send", type="button",
+                                          onclick="_submitComposer()"),
                     style="display:flex;align-items:center;gap:8px"),
                 cls="row2",
             ),
+            # htmx swaps just #stream (no full-page reload) so the answer streams
+            # sooner; native method/action stays as a no-JS fallback.
             method="post", action="/send", id="composerForm", cls="box",
+            hx_post="/send", hx_target="#stream", hx_swap="outerHTML",
         ),
         Div("Connected to ", Strong(STATE["target_name"]),
             " · switch target top-right to move between laptop and H100", cls="hint"),
@@ -2102,7 +2112,7 @@ def dialog_delete_bulk(names: str = "[]"):
 
 
 @rt("/send", methods=["post"])
-def send(content: str, msg_type: str = "prompt", model: str = None):
+def send(content: str, msg_type: str = "prompt", model: str = None, htmx=None):
     content = (content or "").strip()
     if model:
         STATE["model"] = model           # remember last-used model
@@ -2112,14 +2122,16 @@ def send(content: str, msg_type: str = "prompt", model: str = None):
         backend = STATE["backend"]
         use_model = STATE["model"] if msg_type == "prompt" else None
         m = backend.add(STATE["dialog"], content, msg_type, model=use_model)
-        STATE["scroll_to"] = m.id            # /send full-reloads → scroll to the new cell
+        STATE["scroll_to"] = m.id            # render scrolls to the new cell
         if msg_type == "prompt" and _can_stream(backend, use_model):
             # Defer the AI call: the page renders an SSE-wired answer that streams
             # tokens in (the browser opens /stream), instead of blocking here.
             STATE["pending_stream"] = (STATE["dialog"], m.id)
         elif msg_type in ("code", "prompt"):
             backend.exec(STATE["dialog"], m.id)
-    return Page()
+    # The composer posts via htmx → swap just #stream (no full-page reload, so the
+    # answer starts streaming sooner). A no-JS submit gets the whole page.
+    return Stream() if (htmx and htmx.request) else Page()
 
 
 def _msg_by_id(backend, dialog: str, mid: str):
@@ -2171,7 +2183,7 @@ def stream_answer(dialog: str, id: str):
             return
         STATE["cells_dirty"] = False                     # the AI's tools may flip this
         acc = ""
-        for delta in stream_claude(dialog, m.content, context):
+        for delta in stream_claude(dialog, m.content, context, model=m.model):
             acc += delta
             # str() unwraps NotStr -> raw (already-safe) markdown HTML for the data lines
             yield sse_message(str(render_md(acc)), event="msg")
