@@ -14,6 +14,30 @@ ui_port     := "8000"
 default:
     @just --list
 
+# Start the app (kernel + UI) in the BACKGROUND; pairs with `just stop`.
+start:
+    #!/usr/bin/env bash
+    set -uo pipefail
+    LOG="$HOME/Library/Logs/SolveItSidekick"; mkdir -p "$LOG"
+    up(){ curl -s -o /dev/null "http://localhost:$1/" 2>/dev/null; }
+    if up {{ui_port}}; then
+        echo "✓ already running → http://localhost:{{ui_port}}"; open "http://localhost:{{ui_port}}" || true; exit 0
+    fi
+    if ! up {{kernel_port}}; then
+        echo "▶ kernel server → :{{kernel_port}}  (logs: $LOG/kernel.log)"
+        nohup uv run --extra kernel python -m server.kernel_server --port {{kernel_port}} >"$LOG/kernel.log" 2>&1 &
+        for i in $(seq 1 120); do up {{kernel_port}} && break; sleep 0.5; done
+    fi
+    echo "▶ web UI → http://localhost:{{ui_port}}  (logs: $LOG/ui.log)"
+    nohup env SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} uv run python -m sidekick.cli serve >"$LOG/ui.log" 2>&1 &
+    for i in $(seq 1 60); do up {{ui_port}} && break; sleep 0.5; done
+    if up {{ui_port}}; then
+        echo "✓ running in the background → http://localhost:{{ui_port}}   (stop with: just stop)"
+        open "http://localhost:{{ui_port}}" || true
+    else
+        echo "✗ UI didn't come up — check $LOG/ui.log"; exit 1
+    fi
+
 # Start the kernel server (backend) + the web UI together; Ctrl+C stops both.
 dev:
     #!/usr/bin/env bash
@@ -48,7 +72,7 @@ test:
 doctor:
     uv run python -m sidekick.cli doctor kernel
 
-# Stop the kernel server and the UI (whatever is listening on their ports).
+# Stop the app — the kernel server and the UI (pairs with `just start`).
 stop:
     #!/usr/bin/env bash
     for p in {{kernel_port}} {{ui_port}}; do
@@ -57,8 +81,7 @@ stop:
                        || echo ":$p already free"
     done
 
-# Build a double-click "SolveIt Sidekick.app" that starts both servers and opens
-# the browser (Quit stops them). Re-run after moving the project to refresh paths.
+# Build a double-click "SolveIt Sidekick.app" launcher (starts servers, opens browser).
 app:
     #!/usr/bin/env bash
     set -euo pipefail

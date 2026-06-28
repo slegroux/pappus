@@ -76,7 +76,9 @@ SIDEKICK_TARGET=kernel uv run python -m sidekick.cli serve
 ```
 
 > `just dev` needs [`just`](https://github.com/casey/just) (`brew install just`).
-> Run `just` to see all recipes (`dev`, `kernel`, `ui`, `test`, `doctor`, `stop`).
+> `just dev` runs in the **foreground** (Ctrl+C stops). To run it like a service,
+> use the background pair **`just start`** / **`just stop`**. Run `just` to see all
+> recipes (`start`, `stop`, `dev`, `app`, `kernel`, `ui`, `test`, `doctor`).
 
 ### Run it like a Mac app
 
