@@ -182,6 +182,15 @@ Every message is a live cell, like a notebook:
 Edits and runs swap only the conversation (via htmx), so re-running a cell never
 reloads the whole page.
 
+#### Collapsible sections
+
+A **note that starts with a markdown heading** (`#`, `##`, …) becomes a section
+header with a **▾ caret**: click it to fold every cell beneath it, down to the
+next heading of the **same or higher level** (so collapsing a `#` folds its `##`
+subsections too). The header shows an **"N hidden"** pill, and the collapsed state
+is **remembered per dialog**. Folding is **view-only** — hidden cells still run
+and still count toward the AI context (use **Mute** to drop a cell from context).
+
 #### Keyboard shortcuts (Jupyter-style)
 
 The notebook has a **command mode** and an **edit mode**, like Jupyter:
