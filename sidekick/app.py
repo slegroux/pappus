@@ -30,23 +30,44 @@ try:
     from pygments import highlight as _pyg_highlight
     from pygments.lexers import get_lexer_by_name, PythonLexer
     from pygments.formatters import HtmlFormatter
+    from pygments.styles import get_style_by_name
     from pygments.util import ClassNotFound
+
+    # Two palettes, so the *background* alone tells you whether code can run:
+    #  • runnable code cells   → dark monokai (matches --code-bg)
+    #  • illustrative code in an AI answer / note → a light style on the app's own
+    #    light background, so it reads as prose rather than an executable cell.
     # noclasses=True inlines the token colors, so no separate stylesheet is needed.
     _pyg_fmt = HtmlFormatter(noclasses=True, style="monokai")
 
-    def _highlight(src: str, lang: str = "") -> str:
-        """Highlight `src` with Pygments (monokai). No language → Python (this is
-        a Python notebook); an unknown language → plain text."""
+    class _LightCodeStyle(get_style_by_name("friendly")):
+        # Keep this hex in sync with --md-code-bg in the CSS below.
+        background_color = "#EAE6DA"
+
+    _pyg_fmt_light = HtmlFormatter(noclasses=True, style=_LightCodeStyle)
+
+    def _highlight(src: str, lang: str = "", fmt=None) -> str:
+        """Highlight `src` with Pygments. No language → Python (this is a Python
+        notebook); an unknown language → plain text. `fmt` selects the palette,
+        defaulting to the dark monokai used by runnable code cells."""
         try:
             lexer = get_lexer_by_name(lang) if lang else PythonLexer()
         except ClassNotFound:
             lexer = get_lexer_by_name("text")
-        return _pyg_highlight(src or "", lexer, _pyg_fmt)
+        return _pyg_highlight(src or "", lexer, fmt or _pyg_fmt)
 
     def render_code(src: str):
         return NotStr(_highlight(src, "python"))
+
+    def _highlight_md(src: str, lang: str = "") -> str:
+        """Highlight a markdown-embedded (non-runnable) code block on the light
+        palette, so it's visually distinct from a runnable code cell."""
+        return _highlight(src, lang, _pyg_fmt_light)
 except Exception:  # noqa: BLE001 — degrade to a plain code block if pygments is missing
-    def _highlight(src: str, lang: str = "") -> str | None:
+    def _highlight(src: str, lang: str = "", fmt=None) -> str | None:
+        return None
+
+    def _highlight_md(src: str, lang: str = "") -> str | None:
         return None
 
     def render_code(src: str):
@@ -59,10 +80,11 @@ try:
 
     class _MdRenderer(mistune.HTMLRenderer):
         """Markdown HTML renderer that syntax-highlights fenced code blocks
-        (```python …```) via Pygments — same palette as the code cells."""
+        (```python …```) via Pygments — on the light palette, so illustrative code
+        in an answer/note reads differently from a runnable code cell."""
         def block_code(self, code, info=None):
             lang = (info or "").strip().split(None, 1)[0] if (info or "").strip() else ""
-            html = _highlight(code, lang)
+            html = _highlight_md(code, lang)
             return html if html else super().block_code(code, info)
 
     # escape=True neutralises raw HTML in the source, so rendering a note or an
@@ -139,6 +161,7 @@ CSS = """
 :root{
   --bg:#F0EEE6; --panel:#FAF9F5; --sidebar:#F0EEE6; --ink:#2B2A27; --muted:#73706A;
   --line:#E4E1D8; --accent:#D97757; --accent-ink:#fff; --code-bg:#2B2A27; --code-ink:#EFE9DD;
+  --md-code-bg:#EAE6DA;  /* non-runnable code in answers/notes; sync with _LightCodeStyle */
   --bubble-user:#F5E9E2; --chip:#EDEAE1;
 }
 *{box-sizing:border-box} html,body{margin:0;height:100%}
@@ -466,17 +489,20 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .md p{margin:.35em 0}.md ul,.md ol{margin:.35em 0;padding-left:1.4em}
 .md h1,.md h2,.md h3{margin:.6em 0 .3em;line-height:1.3}
 .md table{border-collapse:collapse;margin:.5em 0}.md th,.md td{border:1px solid var(--line);padding:4px 9px}
-.md pre{background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:12px 14px;overflow:auto;
-  font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px}
+/* Non-runnable code inside an answer/note: light background (not the dark code-cell
+   palette), so it's unmistakably illustrative rather than executable. Covers the
+   plain-<pre> fallback when Pygments is unavailable. */
+.md pre{background:var(--md-code-bg);color:var(--ink);border:1px solid var(--line);border-radius:10px;
+  padding:12px 14px;overflow:auto;font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px}
 /* Pygments-highlighted fenced code blocks in markdown (the .highlight div owns the bg) */
-.md .highlight{border-radius:10px;overflow:auto;margin:.5em 0;position:relative}
+.md .highlight{border:1px solid var(--line);border-radius:10px;overflow:auto;margin:.5em 0;position:relative}
 .md .highlight pre{background:transparent;margin:0;padding:12px 14px}
-/* hover Copy button on code snippets */
+/* hover Copy button on code snippets (light theme, to match the light code bg) */
 .copy-btn{position:absolute;top:7px;right:7px;font-size:11px;line-height:1.4;
-  border:1px solid #3a3933;background:rgba(40,40,36,.75);color:#cfcabb;border-radius:6px;
+  border:1px solid var(--line);background:rgba(250,249,245,.85);color:var(--muted);border-radius:6px;
   padding:2px 9px;cursor:pointer;opacity:0;transition:opacity .12s}
 .md .highlight:hover .copy-btn,.copy-btn:focus{opacity:1}
-.copy-btn:hover{color:#fff;border-color:#6b675c}
+.copy-btn:hover{color:var(--ink);border-color:var(--muted)}
 .md code{font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:.92em}
 .md :not(pre)>code{background:var(--chip);border-radius:5px;padding:1px 5px}
 """
