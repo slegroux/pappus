@@ -239,13 +239,19 @@ SolveIt's server assembles the dialog context itself.
 #### The AI can edit cells (Max plan)
 
 Ask AI doesn't only *answer* — it can **edit the notebook for you**. Ask it to
-"fix the bug in that cell," "vectorise this loop," or "add a test below," and it
+"fix the bug in **cell 3**," "vectorise this loop," or "add a test below," and it
 rewrites the target cell (or inserts a new one) in place; the notebook refreshes
 to show the change. This is the same idea as SolveIt's `dialoghelper`, which
 gives its AI tools to manipulate the dialog — here it runs on your **Claude Max
 subscription** (no API credits) via the `claude` CLI plus a tiny, local
 [MCP server](server/mcp_cells.py) exposing `list_cells` / `update_cell` /
 `str_replace` / `insert_cell`.
+
+**Pointing it at a cell.** Each cell shows a small **number** in its gutter, and
+the AI sees that same number — every cell reaches it tagged `n="3" id="…"`. So
+you can say "fix cell 3," or just describe it ("the `add` function"), and it
+targets the right one without you ever typing an id. Numbers are positional, so
+they renumber when you insert, delete, or reorder cells.
 
 It only touches cells when you **explicitly ask**; an ordinary question is still
 answered in text. The tools are loopback-only and token-guarded, and active only

@@ -111,11 +111,11 @@ def _fmt_cells(cells: list) -> str:
     if not cells:
         return "(the notebook is empty)"
     out = []
-    for i, c in enumerate(cells):
+    for i, c in enumerate(cells, 1):           # 1-based: matches the UI cell number
         src = (c.get("content") or "").rstrip()
         if len(src) > 1200:
             src = src[:1200] + "\n…(truncated)"
-        head = f"[{i}] id={c.get('id')} type={c.get('type')}"
+        head = f"cell {i}  id={c.get('id')}  type={c.get('type')}"
         out.append(f"{head}\n{src}" if src else f"{head}\n(empty)")
     return "\n\n".join(out)
 

@@ -71,10 +71,13 @@ MISSING = ("[Claude (Max plan): the `claude` CLI isn't on PATH. Install Claude C
 _TOOLS_GUIDANCE = (
     "\n\nYou also have MCP tools to edit this notebook directly: list_cells, "
     "update_cell, str_replace, and insert_cell. Use them ONLY when the user "
-    "explicitly asks you to change, fix, refactor, complete, or add a cell. When "
-    "you do edit, call list_cells first to get the exact cell id and current "
-    "source, make the change, then briefly say what you changed. For an ordinary "
-    "question, answer in text — never modify cells unasked."
+    "explicitly asks you to change, fix, refactor, complete, or add a cell. Every "
+    "cell above carries n=\"<number>\" (matching the number the user sees) and "
+    "id=\"<id>\"; the edit tools target a cell by its id. So when the user says "
+    "\"fix cell 3\" or names a function, find that cell's id from the context and "
+    "edit it directly — only call list_cells if the id isn't already clear. After "
+    "editing, briefly say what you changed. For an ordinary question, answer in "
+    "text — never modify cells unasked."
 )
 
 # The MCP tool names Claude must be allowed to call non-interactively in `-p`
