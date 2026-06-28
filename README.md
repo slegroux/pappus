@@ -258,6 +258,24 @@ answered in text. The tools are loopback-only and token-guarded, and active only
 on the `claude-cli` (subscription) model. Set `SIDEKICK_CELL_TOOLS=0` to turn
 them off (e.g. for the leanest time-to-first-token).
 
+#### …but the right hands, not a free-roaming agent
+
+Notice what those cell tools have in common: they edit the **shared notebook you
+can see**, and they never *run* code — you still press run yourself. That's the
+SolveIt posture (the human is the agent; the AI is a thinking partner working in
+small steps), and it's deliberate.
+
+The catch is that the Max-plan path shells out to `claude -p`, which is the full
+Claude Code **agent** — so out of the box it *also* has Write/Edit/Bash. Left
+alone it does what agents do: writes the whole solution to a scratchpad file and
+executes it off-screen, taking the executor's seat you're supposed to hold and
+steamrolling the small-steps [persona](sidekick/claude_cli.py) we append. So the
+sidekick launches it with `--disallowed-tools Write Edit Bash`
+([sidekick/claude_cli.py](sidekick/claude_cli.py)). The line it draws: the AI may
+make **visible, in-notebook** edits when asked, but it can't run code or work
+off-screen. This strips only the *spawned assistant's* hands — your own Claude
+Code tools are untouched.
+
 #### Rich output
 
 Code cells render **plots and rich values inline**, not just text: matplotlib

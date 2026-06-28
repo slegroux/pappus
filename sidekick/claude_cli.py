@@ -77,7 +77,12 @@ _TOOLS_GUIDANCE = (
     "\"fix cell 3\" or names a function, find that cell's id from the context and "
     "edit it directly — only call list_cells if the id isn't already clear. After "
     "editing, briefly say what you changed. For an ordinary question, answer in "
-    "text — never modify cells unasked."
+    "text — never modify cells unasked.\n"
+    "These tools don't change the small-steps contract: edit the one cell the user "
+    "pointed at, in the smallest change that does the job, and stop so they can run "
+    "it. Don't spray a finished multi-cell solution across the notebook with "
+    "insert_cell — that's the autopilot behavior small steps exists to prevent. The "
+    "user still runs every cell; you never execute code."
 )
 
 # The MCP tool names Claude must be allowed to call non-interactively in `-p`
@@ -166,7 +171,17 @@ def _build_cmd(dialog: str, content: str, context: str, stream: bool):
            # plugins). On a heavy global config these add ~1s+ of per-turn latency,
            # and a notebook assistant needs none of them. Subscription auth is
            # unaffected (it's credentials, not a setting source). Big TTFT win.
-           "--strict-mcp-config", "--setting-sources", "project"]
+           "--strict-mcp-config", "--setting-sources", "project",
+           # Notebook tools yes, off-screen tools no. The AI gets cell-editing MCP
+           # tools below (like SolveIt's dialoghelper) — edits that land in the
+           # shared notebook you can see, and never *run* code. But `claude -p` is
+           # the full agent, so left alone it also has Write/Edit/Bash: it writes
+           # the whole solution to a scratchpad file and executes it off-screen,
+           # taking the executor's seat the human is supposed to hold. Deny those
+           # three (the agent's hands, NOT *your* Claude Code tools) so its only
+           # move is the visible, in-notebook kind — the SolveIt contract. The
+           # persona alone loses to the agent's defaults.
+           "--disallowed-tools", "Write", "Edit", "Bash"]
     if stream:                              # stream-json needs these to emit deltas
         cmd += ["--include-partial-messages", "--verbose"]
     tools = _cell_tools_enabled()
