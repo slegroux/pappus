@@ -1641,3 +1641,20 @@ def test_msgrow_shows_cell_number_badge():
     from sidekick.client import Msg
     html = to_xml(app.MsgRow(Msg("_z", "code", "x=1"), num=4))
     assert 'class="cell-num"' in html and ">4<" in html
+
+
+def test_ab_shortcut_inserts_a_note_cell():
+    # the a/b keyboard shortcut posts msg_type:'note' so a quick insert is a
+    # markdown note (use the ＋ menu for code / Ask AI).
+    import sidekick.app as app
+    assert "msg_type: 'note'" in app.STREAM_JS
+    assert "msg_type: 'code'" not in app.STREAM_JS
+
+
+def test_cell_insert_route_creates_note_when_asked():
+    import sidekick.app as app
+    app.STATE["dialog"] = "ins/note"
+    bk = app.STATE["backend"]; bk.messages("ins/note")
+    a = bk.add("ins/note", "x", "code")
+    app.cell_insert(id=a.id, msg_type="note", where="below")
+    assert bk.messages("ins/note")[1].msg_type == "note"
