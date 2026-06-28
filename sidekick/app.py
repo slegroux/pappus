@@ -1244,6 +1244,14 @@ STREAM_JS = """
       if(!row) return;
       e.preventDefault();
       var cid = row.id.replace('cell-', '');
+      // An AI answer is just another markdown view: Esc renders it (clicks the
+      // answer's OWN Save), same as a note — scoped to .answer so it doesn't hit
+      // the prompt row's Ask button. Mirrors the Cmd+Enter handler above.
+      var ans = e.target.closest('.answer');
+      if(ans){
+        var asave = ans.querySelector('.cell-btn.run');
+        if(asave){ window.__selCell = cid; asave.click(); return; }
+      }
       // A note (markdown) cell renders on Esc — same as Save — instead of just
       // dropping focus while it keeps showing the raw source. Code/prompt cells
       // only fall back to command mode (Jupyter never runs code on Esc).
