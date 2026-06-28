@@ -236,6 +236,46 @@ to keep it in context even when older cells are trimmed.
 This applies to the bundled **kernel** backend. On a real **solveit** target,
 SolveIt's server assembles the dialog context itself.
 
+#### The AI can edit cells (Max plan)
+
+Ask AI doesn't only *answer* — it can **edit the notebook for you**. Ask it to
+"fix the bug in **cell 3**," "vectorise this loop," or "add a test below," and it
+rewrites the target cell (or inserts a new one) in place; the notebook refreshes
+to show the change. This is the same idea as SolveIt's `dialoghelper`, which
+gives its AI tools to manipulate the dialog — here it runs on your **Claude Max
+subscription** (no API credits) via the `claude` CLI plus a tiny, local
+[MCP server](server/mcp_cells.py) exposing `list_cells` / `update_cell` /
+`str_replace` / `insert_cell`.
+
+**Pointing it at a cell.** Each cell shows a small **number** in its gutter, and
+the AI sees that same number — every cell reaches it tagged `n="3" id="…"`. So
+you can say "fix cell 3," or just describe it ("the `add` function"), and it
+targets the right one without you ever typing an id. Numbers are positional, so
+they renumber when you insert, delete, or reorder cells.
+
+It only touches cells when you **explicitly ask**; an ordinary question is still
+answered in text. The tools are loopback-only and token-guarded, and active only
+on the `claude-cli` (subscription) model. Set `SIDEKICK_CELL_TOOLS=0` to turn
+them off (e.g. for the leanest time-to-first-token).
+
+#### …but the right hands, not a free-roaming agent
+
+Notice what those cell tools have in common: they edit the **shared notebook you
+can see**, and they never *run* code — you still press run yourself. That's the
+SolveIt posture (the human is the agent; the AI is a thinking partner working in
+small steps), and it's deliberate.
+
+The catch is that the Max-plan path shells out to `claude -p`, which is the full
+Claude Code **agent** — so out of the box it *also* has Write/Edit/Bash. Left
+alone it does what agents do: writes the whole solution to a scratchpad file and
+executes it off-screen, taking the executor's seat you're supposed to hold and
+steamrolling the small-steps [persona](sidekick/claude_cli.py) we append. So the
+sidekick launches it with `--disallowed-tools Write Edit Bash`
+([sidekick/claude_cli.py](sidekick/claude_cli.py)). The line it draws: the AI may
+make **visible, in-notebook** edits when asked, but it can't run code or work
+off-screen. This strips only the *spawned assistant's* hands — your own Claude
+Code tools are untouched.
+
 #### Rich output
 
 Code cells render **plots and rich values inline**, not just text: matplotlib

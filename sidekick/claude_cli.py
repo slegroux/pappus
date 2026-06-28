@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import uuid
 
 CLI_MODELS = {"claude-cli"}
@@ -63,6 +64,62 @@ _CONTEXT_INTRO = (
 
 MISSING = ("[Claude (Max plan): the `claude` CLI isn't on PATH. Install Claude Code "
            "and run `claude` once to sign in to your subscription.]")
+
+# Appended after the persona whenever the cell-editing MCP tools are live. Keeps
+# the default Ask-AI experience unchanged: the model only touches cells on
+# request — like SolveIt's dialoghelper, which acts only when you ask it to.
+_TOOLS_GUIDANCE = (
+    "\n\nYou also have MCP tools to edit this notebook directly: list_cells, "
+    "update_cell, str_replace, and insert_cell. Use them ONLY when the user "
+    "explicitly asks you to change, fix, refactor, complete, or add a cell. Every "
+    "cell above carries n=\"<number>\" (matching the number the user sees) and "
+    "id=\"<id>\"; the edit tools target a cell by its id. So when the user says "
+    "\"fix cell 3\" or names a function, find that cell's id from the context and "
+    "edit it directly — only call list_cells if the id isn't already clear. After "
+    "editing, briefly say what you changed. For an ordinary question, answer in "
+    "text — never modify cells unasked.\n"
+    "These tools don't change the small-steps contract: edit the one cell the user "
+    "pointed at, in the smallest change that does the job, and stop so they can run "
+    "it. Don't spray a finished multi-cell solution across the notebook with "
+    "insert_cell — that's the autopilot behavior small steps exists to prevent. The "
+    "user still runs every cell; you never execute code."
+)
+
+# The MCP tool names Claude must be allowed to call non-interactively in `-p`
+# mode (server key "cells" + tool name → mcp__cells__<tool>).
+_ALLOWED_TOOLS = [f"mcp__cells__{t}"
+                  for t in ("list_cells", "update_cell", "str_replace", "insert_cell")]
+
+
+def _cell_tools_enabled() -> bool:
+    """Cell-editing tools are live only inside the web-app process, which sets the
+    shared token + loopback URL when it boots (see app._init_cell_tools). The
+    kernel server imports this module but never sets them, so its path stays lean.
+    Set SIDEKICK_CELL_TOOLS=0 to opt out (e.g. for the leanest TTFT)."""
+    if os.environ.get("SIDEKICK_CELL_TOOLS", "1") == "0":
+        return False
+    return bool(os.environ.get("SIDEKICK_MCP_TOKEN") and os.environ.get("SIDEKICK_APP_URL"))
+
+
+def _write_mcp_config(dialog: str) -> str:
+    """Write a one-server MCP config (our stdio cell-editing server) for this turn
+    and return its path. The server reaches back to the app to edit `dialog`, so
+    the config carries the dialog + shared token in the spawned server's env."""
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))   # project root
+    cfg = {"mcpServers": {"cells": {
+        "command": sys.executable,
+        "args": ["-m", "server.mcp_cells"],
+        "env": {
+            "PYTHONPATH": root,
+            "SIDEKICK_APP_URL": os.environ["SIDEKICK_APP_URL"],
+            "SIDEKICK_MCP_TOKEN": os.environ["SIDEKICK_MCP_TOKEN"],
+            "SIDEKICK_DIALOG": dialog,
+        },
+    }}}
+    path = os.path.join(_cli_cwd(), f"mcp-cells-{uuid.uuid4().hex[:8]}.json")
+    with open(path, "w") as f:
+        json.dump(cfg, f)
+    return path
 
 
 def system(context: str) -> str:
@@ -114,9 +171,20 @@ def _build_cmd(dialog: str, content: str, context: str, stream: bool):
            # plugins). On a heavy global config these add ~1s+ of per-turn latency,
            # and a notebook assistant needs none of them. Subscription auth is
            # unaffected (it's credentials, not a setting source). Big TTFT win.
-           "--strict-mcp-config", "--setting-sources", "project"]
+           "--strict-mcp-config", "--setting-sources", "project",
+           # Notebook tools yes, off-screen tools no. The AI gets cell-editing MCP
+           # tools below (like SolveIt's dialoghelper) — edits that land in the
+           # shared notebook you can see, and never *run* code. But `claude -p` is
+           # the full agent, so left alone it also has Write/Edit/Bash: it writes
+           # the whole solution to a scratchpad file and executes it off-screen,
+           # taking the executor's seat the human is supposed to hold. Deny those
+           # three (the agent's hands, NOT *your* Claude Code tools) so its only
+           # move is the visible, in-notebook kind — the SolveIt contract. The
+           # persona alone loses to the agent's defaults.
+           "--disallowed-tools", "Write", "Edit", "Bash"]
     if stream:                              # stream-json needs these to emit deltas
         cmd += ["--include-partial-messages", "--verbose"]
+    tools = _cell_tools_enabled()
     if resume:
         sid = st["id"]
         delta = context[len(st["sent"]):].strip()
@@ -127,12 +195,18 @@ def _build_cmd(dialog: str, content: str, context: str, stream: bool):
         sid = str(uuid.uuid4())
         user_msg = content
         cmd += ["--session-id", sid]
-        sysmsg = system(context)            # preamble + full notebook context
-        if sysmsg:
-            cmd += ["--append-system-prompt", sysmsg]
+        sysmsg = system(context)            # persona + full notebook context
+        if tools:                           # teach the tools once, on the fresh turn
+            sysmsg += _TOOLS_GUIDANCE
+        cmd += ["--append-system-prompt", sysmsg]
+    if tools:                               # register our cell-editing MCP server
+        cmd += ["--mcp-config", _write_mcp_config(dialog),
+                "--allowedTools", *_ALLOWED_TOOLS]
     model = os.environ.get("SIDEKICK_CLAUDE_CLI_MODEL")
     if model:                               # else inherit the subscription default
         cmd += ["--model", model]
+    if tools:                               # `--allowedTools` is variadic; `--` stops
+        cmd.append("--")                    # it from swallowing the prompt positional
     cmd.append(user_msg)                     # prompt is the trailing positional
     return cmd, sid
 

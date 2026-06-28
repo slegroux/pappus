@@ -98,7 +98,22 @@ STATE = {
     "paper": None,            # {name, status, md, engine} for the reading panel
     "editing": None,          # cell id to render in edit mode once (just-inserted cell)
     "scroll_to": None,        # cell id to scroll into view once (e.g. after a composer send)
+    "cells_dirty": False,     # set when the AI's MCP tools edit cells mid-stream → reload
 }
+
+
+def _init_cell_tools() -> None:
+    """Publish a loopback URL + one-shot token so the `claude -p` path can spawn an
+    MCP server that edits the live notebook (see claude_cli + server/mcp_cells).
+    Loopback only, single-user: the token just stops other local procs poking in."""
+    import secrets
+    os.environ.setdefault("SIDEKICK_MCP_TOKEN", secrets.token_hex(16))
+    port = os.environ.get("SIDEKICK_PORT", "8000")
+    os.environ.setdefault("SIDEKICK_APP_URL", f"http://127.0.0.1:{port}")
+    STATE["mcp_token"] = os.environ["SIDEKICK_MCP_TOKEN"]
+
+
+_init_cell_tools()
 
 
 def _can_stream(backend, model) -> bool:
@@ -402,6 +417,11 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .cell-btn.pin.on{color:#2C6B45;border-color:#BFE0CC;background:#E6F2EA}
 .cell-btn.exp.on{color:#4A5BA6;border-color:#C3CBEB;background:#ECEFF9}
 .tok{margin-left:2px;font-variant-numeric:tabular-nums}
+/* cell number badge: a quiet gutter index the user can say "fix cell 3" by, and
+   the same number the AI sees as n="…" in its context. */
+.cell-num{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums;
+  min-width:15px;text-align:right;user-select:none;flex:0 0 auto}
+.row.muted .cell-num{opacity:.5}
 /* drag-to-reorder handle (hover-revealed, like the toolbar) */
 .drag-handle{cursor:grab;color:var(--muted);opacity:0;transition:opacity .12s;
   user-select:none;font-size:14px;line-height:1;padding:0 3px;margin-left:-6px}
@@ -732,8 +752,10 @@ def _heading_level(content: str) -> int:
     return 0
 
 
-def _head(m, primary, show_actions=False):
+def _head(m, primary, num=None, show_actions=False):
     bits = []
+    if num is not None:                           # the cell's 1-based number (matches AI context)
+        bits.append(Span(str(num), cls="cell-num", title=f"Cell {num}"))
     lvl = _heading_level(m.content) if m.msg_type == "note" else 0
     if lvl:                                       # a section header → collapse caret + count pill
         bits.append(Span("▾", cls="sec-caret", title="Collapse / expand this section",
@@ -790,16 +812,16 @@ def _rendered_content(m):
     return Div(inner, cls="prompt-view clickedit", **edit)
 
 
-def MsgRow(m):
+def MsgRow(m, num=None):
     """A cell in its default rendered (read-only, click-to-edit) state."""
     primary = [] if m.msg_type == "note" else [
         _stream_btn(_PRIMARY[m.msg_type], "/cell/exec", cls="cell-btn run",
                     vals={"id": m.id}, title="Re-run this cell")]
-    return Div(_head(m, primary), _rendered_content(m), *_output_views(m),
+    return Div(_head(m, primary, num=num), _rendered_content(m), *_output_views(m),
                cls=_rowcls(m), id=f"cell-{m.id}")
 
 
-def _cell_edit(m):
+def _cell_edit(m, num=None):
     """A cell switched into edit mode: a raw editor + Save/Run/Ask + Cancel."""
     mid = m.id
     path = "/cell/save" if m.msg_type == "note" else "/cell/run"
@@ -812,7 +834,7 @@ def _cell_edit(m):
     ]
     # Code cells get CodeMirror (highlight-while-editing); notes/prompts just focus.
     js = (_CODE_EDITOR_JS if m.msg_type == "code" else _FOCUS_JS).replace("__MID__", mid)
-    return Div(_head(m, primary, show_actions=True),
+    return Div(_head(m, primary, num=num, show_actions=True),
                _cell_textarea(m, code=(m.msg_type == "code")),
                *_output_views(m), Script(js),
                cls=_rowcls(m), id=f"cell-{mid}")
@@ -945,9 +967,13 @@ STREAM_JS = """
       renderMath(el); addCopyButtons(el);              // typeset math + copy buttons as it streams
       var s = el.closest('.stream'); if(s) s.scrollTop = s.scrollHeight;
     });
-    es.addEventListener('done', function(){
+    es.addEventListener('done', function(e){
       renderMath(el); addCopyButtons(el);
       es.close(); el.removeAttribute('data-stream-url'); el.__streaming = false;
+      // The AI's tools edited cells this turn — refresh #stream so they appear.
+      if(e && e.data && e.data.indexOf('reload') >= 0 && window.htmx){
+        window.htmx.ajax('GET', '/stream/refresh', {target:'#stream', swap:'outerHTML'});
+      }
     });
     es.onerror = function(){ es.close(); };
   });
@@ -1164,7 +1190,8 @@ def Stream():
         inner = Div("Start the conversation — write code, ask the AI, or jot a note.",
                     cls="empty")
     else:
-        rows = [_cell_edit(m) if m.id == editing else MsgRow(m) for m in msgs]
+        rows = [_cell_edit(m, num=i) if m.id == editing else MsgRow(m, num=i)
+                for i, m in enumerate(msgs, 1)]
         inner = Div(*rows, _ctx_meter(msgs), cls="wrap")
     extra = ()
     if scroll_to:
@@ -1912,6 +1939,15 @@ def _msg_by_id(backend, dialog: str, mid: str):
     return None
 
 
+def _cell_number(backend, dialog: str, mid: str):
+    """The cell's 1-based number (its position in the dialog) — so a single-row
+    htmx swap shows the same badge as a full render."""
+    for i, m in enumerate(backend.messages(dialog), 1):
+        if m.id == mid:
+            return i
+    return None
+
+
 @rt("/cell/run", methods=["post"])
 def cell_run(id: str, content: str = ""):
     """Save a cell's edited source, then (re)execute it. Returns just the stream."""
@@ -1943,20 +1979,105 @@ def stream_answer(dialog: str, id: str):
         if m is None:
             yield sse_message(Div(""), event="done")
             return
+        STATE["cells_dirty"] = False                     # the AI's tools may flip this
         acc = ""
         for delta in stream_claude(dialog, m.content, context):
             acc += delta
             # str() unwraps NotStr -> raw (already-safe) markdown HTML for the data lines
             yield sse_message(str(render_md(acc)), event="msg")
+        edited = STATE.get("cells_dirty", False)
+        if not acc and edited:                           # tool-only turn: say something
+            acc = "_Updated the notebook cells as requested._"
         m.output = acc or m.output
         if hasattr(backend, "_save"):
             backend._save()                              # flush to disk so a reload keeps the answer
         if STATE.get("pending_stream") == (dialog, id):
             STATE["pending_stream"] = None
+        STATE["cells_dirty"] = False
         yield sse_message(str(render_md(m.output)), event="msg")   # final state
-        yield sse_message(Div(""), event="done")
+        # 'reload' tells the client to refresh #stream so the AI's cell edits show.
+        yield sse_message(Div("reload" if edited else ""), event="done")
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+# ---- internal API for the AI's cell-editing MCP tools (server/mcp_cells) -----
+# Loopback + shared-token only. The MCP server (spawned by `claude -p`) calls
+# these to read and edit the live notebook; mutating routes flag #stream dirty so
+# the streamed answer's `done` event reloads it.
+def _mcp_ok(tok: str) -> bool:
+    want = STATE.get("mcp_token")
+    return bool(want) and tok == want
+
+
+def _json(obj, status: int = 200):
+    from starlette.responses import JSONResponse
+    return JSONResponse(obj, status_code=status)
+
+
+@rt("/internal/cells")
+def internal_cells(dialog: str, tok: str = ""):
+    """List a dialog's cells for the AI (id, type, source)."""
+    if not _mcp_ok(tok):
+        return _json({"ok": False, "error": "forbidden"}, 403)
+    backend = STATE["backend"]
+    cells = [{"id": m.id, "type": m.msg_type, "content": m.content or "",
+              "output": m.output or ""} for m in backend.messages(dialog)]
+    return _json({"ok": True, "cells": cells})
+
+
+@rt("/internal/cell/update", methods=["post"])
+def internal_cell_update(dialog: str, id: str, content: str = "", tok: str = ""):
+    if not _mcp_ok(tok):
+        return _json({"ok": False, "error": "forbidden"}, 403)
+    backend = STATE["backend"]
+    if not hasattr(backend, "update") or _msg_by_id(backend, dialog, id) is None:
+        return _json({"ok": False, "error": f"no cell {id}"}, 404)
+    backend.update(dialog, id, content)
+    STATE["cells_dirty"] = True
+    return _json({"ok": True, "message": f"updated cell {id}"})
+
+
+@rt("/internal/cell/str_replace", methods=["post"])
+def internal_cell_str_replace(dialog: str, id: str, old: str = "", new: str = "", tok: str = ""):
+    if not _mcp_ok(tok):
+        return _json({"ok": False, "error": "forbidden"}, 403)
+    backend = STATE["backend"]
+    m = _msg_by_id(backend, dialog, id)
+    if m is None or not hasattr(backend, "update"):
+        return _json({"ok": False, "error": f"no cell {id}"}, 404)
+    src = m.content or ""
+    n = src.count(old)
+    if n == 0:
+        return _json({"ok": False, "error": "old_str not found"}, 400)
+    if n > 1:
+        return _json({"ok": False, "error": f"old_str matches {n}× (must be unique)"}, 400)
+    backend.update(dialog, id, src.replace(old, new))
+    STATE["cells_dirty"] = True
+    return _json({"ok": True, "message": f"edited cell {id}"})
+
+
+@rt("/internal/cell/insert", methods=["post"])
+def internal_cell_insert(dialog: str, content: str = "", cell_type: str = "code",
+                         after_id: str = "", tok: str = ""):
+    if not _mcp_ok(tok):
+        return _json({"ok": False, "error": "forbidden"}, 403)
+    if cell_type not in ("code", "note", "prompt"):
+        return _json({"ok": False, "error": "bad cell_type"}, 400)
+    backend = STATE["backend"]
+    if after_id and hasattr(backend, "insert") and _msg_by_id(backend, dialog, after_id):
+        m = backend.insert(dialog, content, cell_type, after_id, above=False)
+    else:
+        m = backend.add(dialog, content, cell_type)
+    STATE["cells_dirty"] = True
+    return _json({"ok": True, "message": f"inserted cell {m.id}"})
+
+
+@rt("/stream/refresh")
+def stream_refresh():
+    """Re-render #stream — the client swaps this in after a turn whose AI tools
+    edited cells, so the edits become visible without a full page reload."""
+    return Stream()
 
 
 @rt("/cell/save", methods=["post"])
@@ -2040,15 +2161,17 @@ def export_package():
 @rt("/cell/edit")
 def cell_edit(id: str):
     """Swap a single cell into edit mode (raw textarea)."""
-    m = _msg_by_id(STATE["backend"], STATE["dialog"], id)
-    return _cell_edit(m) if m else Stream()
+    bk, d = STATE["backend"], STATE["dialog"]
+    m = _msg_by_id(bk, d, id)
+    return _cell_edit(m, num=_cell_number(bk, d, id)) if m else Stream()
 
 
 @rt("/cell/view")
 def cell_view(id: str):
     """Swap a single cell back to its rendered (read-only) view — used by Cancel."""
-    m = _msg_by_id(STATE["backend"], STATE["dialog"], id)
-    return MsgRow(m) if m else Stream()
+    bk, d = STATE["backend"], STATE["dialog"]
+    m = _msg_by_id(bk, d, id)
+    return MsgRow(m, num=_cell_number(bk, d, id)) if m else Stream()
 
 
 @rt("/cell/exec", methods=["post"])
