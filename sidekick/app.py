@@ -301,9 +301,10 @@ select.tsel{appearance:none;background:var(--chip);border:1px solid var(--line);
 .who{font-size:12px;color:var(--muted);margin-bottom:4px;display:flex;align-items:center;gap:7px}
 .tag{font-size:11px;border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:var(--muted)}
 /* collapsible heading sections */
-.sec-caret{cursor:pointer;color:var(--muted);font-size:11px;line-height:1;user-select:none;
-  transition:transform .12s;display:inline-block}
-.sec-caret:hover{color:var(--ink)}
+.sec-caret{cursor:pointer;color:var(--ink);opacity:.6;font-size:18px;line-height:1;user-select:none;
+  transition:transform .12s,opacity .12s;display:inline-flex;align-items:center;
+  width:20px;height:20px;justify-content:center;border-radius:6px}
+.sec-caret:hover{opacity:1;background:var(--chip)}
 .sec-caret.collapsed{transform:rotate(-90deg)}
 .sec-count{font-size:11px;color:var(--muted);background:var(--chip);border-radius:10px;padding:0 7px}
 #stream .row.sec-hidden{display:none}
