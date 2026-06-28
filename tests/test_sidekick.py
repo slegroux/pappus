@@ -136,6 +136,28 @@ def test_send_scrolls_to_the_new_cell():
     assert app.STATE.get("scroll_to") is None                     # one-shot (consumed by render)
 
 
+def test_heading_level_detects_section_headers():
+    import sidekick.app as app
+    assert app._heading_level("# Title\ntext") == 1
+    assert app._heading_level("\n\n### Method\nbody") == 3       # leading blanks ignored
+    assert app._heading_level("just prose, no heading") == 0
+    assert app._heading_level("text then\n## later heading") == 0  # heading must be first
+    assert app._heading_level("####### too deep") == 0           # >6 isn't a heading
+    assert app._heading_level("") == 0
+
+
+def test_section_header_note_renders_collapse_caret():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    from sidekick.client import Msg
+    h = to_xml(app.MsgRow(Msg(id="_s", msg_type="note", content="## Method\n\ndetails")))
+    assert "sec-caret" in h and 'data-sec="_s"' in h and 'data-sec-level="2"' in h
+    plain = to_xml(app.MsgRow(Msg(id="_p", msg_type="note", content="just a note")))
+    assert "sec-caret" not in plain                              # non-heading note → no caret
+    code = to_xml(app.MsgRow(Msg(id="_c", msg_type="code", content="# not markdown\nx=1")))
+    assert "sec-caret" not in code                              # a code comment isn't a section
+
+
 def test_send_route_ignores_empty():
     import sidekick.app as app
     app.STATE["dialog"] = "test/empty"

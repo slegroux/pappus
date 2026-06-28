@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import threading
 from urllib.parse import quote
 
@@ -299,6 +300,13 @@ select.tsel{appearance:none;background:var(--chip);border:1px solid var(--line);
 .row{margin-bottom:16px}
 .who{font-size:12px;color:var(--muted);margin-bottom:4px;display:flex;align-items:center;gap:7px}
 .tag{font-size:11px;border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:var(--muted)}
+/* collapsible heading sections */
+.sec-caret{cursor:pointer;color:var(--muted);font-size:11px;line-height:1;user-select:none;
+  transition:transform .12s;display:inline-block}
+.sec-caret:hover{color:var(--ink)}
+.sec-caret.collapsed{transform:rotate(-90deg)}
+.sec-count{font-size:11px;color:var(--muted);background:var(--chip);border-radius:10px;padding:0 7px}
+#stream .row.sec-hidden{display:none}
 .bubble{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 13px}
 .bubble.user{background:var(--bubble-user);border-color:#EBD9CD}
 .bubble.note{background:transparent;border:none;padding:2px 0}
@@ -702,9 +710,27 @@ def _rowcls(m):
     return "row" + (" muted" if m.muted else "") + (" pinned" if m.pinned else "")
 
 
+def _heading_level(content: str) -> int:
+    """The markdown heading level a note STARTS with (1–6), or 0 if it doesn't begin
+    with a heading. A note that starts with a heading is a collapsible section."""
+    for line in (content or "").lstrip().splitlines():
+        s = line.strip()
+        if not s:
+            continue
+        mt = re.match(r"(#{1,6})\s", s)
+        return len(mt.group(1)) if mt else 0
+    return 0
+
+
 def _head(m, primary, show_actions=False):
-    bits = [Span("⠿", cls="drag-handle", title="Drag to reorder"),
-            Span(_TAG[m.msg_type], cls="tag")]
+    bits = []
+    lvl = _heading_level(m.content) if m.msg_type == "note" else 0
+    if lvl:                                       # a section header → collapse caret + count pill
+        bits.append(Span("▾", cls="sec-caret", title="Collapse / expand this section",
+                         **{"data-sec": m.id, "data-sec-level": str(lvl)}))
+        bits.append(Span("", cls="sec-count", style="display:none"))
+    bits += [Span("⠿", cls="drag-handle", title="Drag to reorder"),
+             Span(_TAG[m.msg_type], cls="tag")]
     if m.msg_type == "code":
         bits.append(Span(m.id, cls="muted small"))
     bits.append(_tok_badge(m))
@@ -940,6 +966,45 @@ STREAM_JS = """
   // Re-apply the selection highlight after this (re)render; drop it if the cell is gone.
   window.__selectCell(window.__selCell, false);
 
+  // ---- collapsible sections (a heading note folds the cells beneath it) -------
+  // Per-dialog collapse state in localStorage; re-applied on every render since
+  // #stream is rebuilt on each action. A section runs from a heading note down to
+  // the next heading of the same-or-higher level (so a # folds its ## subsections).
+  function _secKey(){ var s = document.getElementById('stream');
+    return 'sidekick_collapsed_' + (s ? s.getAttribute('data-dialog') : ''); }
+  function _secLoad(){ try { return new Set(JSON.parse(localStorage.getItem(_secKey()) || '[]')); }
+                       catch(e){ return new Set(); } }
+  function _secSave(set){ try { localStorage.setItem(_secKey(), JSON.stringify(Array.from(set))); } catch(e){} }
+  window.__applyCollapsed = function(){
+    var set = _secLoad();
+    var rows = Array.prototype.slice.call(document.querySelectorAll('#stream .row'));
+    rows.forEach(function(r){ r.classList.remove('sec-hidden'); });
+    function levelOf(r){ var c = r.querySelector('.sec-caret');
+                         return c ? parseInt(c.getAttribute('data-sec-level'), 10) : 0; }
+    for(var i = 0; i < rows.length; i++){
+      var caret = rows[i].querySelector('.sec-caret');
+      if(!caret) continue;
+      var lvl = parseInt(caret.getAttribute('data-sec-level'), 10);
+      var collapsed = set.has(caret.getAttribute('data-sec')), count = 0;
+      caret.classList.toggle('collapsed', collapsed);
+      for(var j = i + 1; j < rows.length; j++){
+        var l = levelOf(rows[j]);
+        if(l > 0 && l <= lvl) break;             // next same-or-higher heading ends the section
+        if(collapsed) rows[j].classList.add('sec-hidden');
+        count++;
+      }
+      var pill = rows[i].querySelector('.sec-count');
+      if(pill){ pill.textContent = count + ' hidden';
+                pill.style.display = (collapsed && count) ? '' : 'none'; }
+    }
+  };
+  window.__toggleSection = function(id){
+    var set = _secLoad();
+    if(set.has(id)) set.delete(id); else set.add(id);
+    _secSave(set); window.__applyCollapsed();
+  };
+  window.__applyCollapsed();
+
   if(window.__sidekickCells) return;                            // bind document listeners once
   window.__sidekickCells = true;
   // Remember the notebook's scroll position right before htmx replaces #stream,
@@ -953,6 +1018,12 @@ STREAM_JS = """
   // gets dropped; afterSettle reliably lands after the new DOM is in place.)
   document.addEventListener('htmx:afterSettle', function(){
     if(window.__selCell && window.__selectCell) window.__selectCell(window.__selCell, false);
+    if(window.__applyCollapsed) window.__applyCollapsed();     // re-fold sections after a swap
+  });
+  // Click a section caret to fold/unfold the cells beneath its heading.
+  document.addEventListener('click', function(e){
+    var caret = e.target.closest && e.target.closest('#stream .sec-caret');
+    if(caret && window.__toggleSection) window.__toggleSection(caret.getAttribute('data-sec'));
   });
   if(!hasFieldSizing){
     document.addEventListener('input', function(e){
@@ -1093,7 +1164,8 @@ def Stream():
         extra = (Script(f"requestAnimationFrame(function(){{var c="
                         f"document.getElementById('cell-{scroll_to}'),"
                         f"s=c&&c.closest('.stream');if(s)s.scrollTop=s.scrollHeight;}});"),)
-    return Div(inner, Script(STREAM_JS), *extra, cls="stream", id="stream")
+    return Div(inner, Script(STREAM_JS), *extra, cls="stream", id="stream",
+               **{"data-dialog": STATE["dialog"]})
 
 
 COMPOSER_JS = """
