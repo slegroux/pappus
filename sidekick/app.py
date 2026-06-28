@@ -326,6 +326,15 @@ select.tsel{appearance:none;background:var(--chip);border:1px solid var(--line);
 .bubble{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px 12px}
 .bubble.user{background:var(--bubble-user);border-color:#EBD9CD}
 .bubble.note{background:transparent;border:none;padding:2px 0}
+/* AI "working" indicators: a spinning wheel while we wait for the first token,
+   then a blinking caret at the tail of the answer while it streams in. */
+.thinking{display:inline-flex;align-items:center;gap:8px;color:var(--muted);font-size:13px}
+.spinner{display:inline-block;width:13px;height:13px;border:2px solid var(--line);
+  border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.bubble.streaming::after{content:'▌';color:var(--accent);margin-left:1px;
+  animation:caret-blink 1s step-start infinite}
+@keyframes caret-blink{50%{opacity:0}}
 pre.code{background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:10px 14px;overflow:auto;
   font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;margin:0}
 .out{margin-top:4px;border-left:2px solid var(--line);padding:3px 0 3px 12px;color:var(--muted);
@@ -786,7 +795,8 @@ def _output_views(m):
             who = _model_label(m.model)
             out.append(Div(
                 Div(Span(who, cls="tag"), cls="who"),
-                Div(NotStr("▌"), cls="bubble md", id=f"ans-{m.id}",
+                Div(Span(Span(cls="spinner"), "Thinking…", cls="thinking"),
+                    cls="bubble md", id=f"ans-{m.id}",
                     **{"data-stream-url": f"/stream?dialog={quote(STATE['dialog'])}&id={m.id}"}),
                 cls="answer"))
         elif m.output:
@@ -1021,10 +1031,12 @@ STREAM_JS = """
     var es = new EventSource(el.getAttribute('data-stream-url'));
     es.addEventListener('msg', function(e){
       el.innerHTML = e.data;
+      el.classList.add('streaming');                   // blinking caret while tokens arrive
       renderMath(el); addCopyButtons(el);              // typeset math + copy buttons as it streams
       var s = el.closest('.stream'); if(s) s.scrollTop = s.scrollHeight;
     });
     es.addEventListener('done', function(e){
+      el.classList.remove('streaming');                // generation finished → drop the caret
       renderMath(el); addCopyButtons(el);
       es.close(); el.removeAttribute('data-stream-url'); el.__streaming = false;
       // The AI's tools edited cells this turn — refresh #stream so they appear.

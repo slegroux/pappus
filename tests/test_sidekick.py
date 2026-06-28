@@ -544,7 +544,13 @@ def _mk_cli_popen(capture, deltas, session_id="sid", is_error=False):
         lines.append(_json.dumps({"type": "result", "session_id": session_id,
                                   "is_error": is_error,
                                   "result": "".join(deltas)}) + "\n")
-        return SimpleNamespace(stdout=iter(lines), wait=lambda timeout=None: 0)
+        # stream() reads via iter(stdout.readline, "") — return "" at EOF.
+        it = iter(lines)
+
+        def readline():
+            return next(it, "")
+        return SimpleNamespace(stdout=SimpleNamespace(readline=readline),
+                               wait=lambda timeout=None: 0)
     return popen
 
 
@@ -1742,3 +1748,25 @@ def test_completion_autotrigger_and_tab_accept_wired():
     # the cell editor turns both on
     assert "__autocompleteOnType(cm)" in app._CODE_EDITOR_JS
     assert "__showCompletions(cm)" in app._CODE_EDITOR_JS
+
+
+def test_pending_prompt_shows_thinking_spinner():
+    # While an answer is pending (no output yet), the bubble shows a spinner +
+    # "Thinking…" and the SSE wiring, so the user sees the AI is working.
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    from sidekick.client import MockBackend
+    b = MockBackend(); app.STATE["backend"] = b; app.STATE["dialog"] = "spin/d"
+    b.messages("spin/d"); m = b.add("spin/d", "q?", "prompt", model="claude-cli")
+    app.STATE["pending_stream"] = ("spin/d", m.id)
+    html = to_xml(app._output_views(m)[0])
+    app.STATE["pending_stream"] = None                 # reset shared state
+    assert 'class="spinner"' in html and "Thinking" in html
+    assert "data-stream-url" in html
+
+
+def test_stream_js_toggles_streaming_caret():
+    # The blinking caret marks an answer as actively streaming, removed on done.
+    import sidekick.app as app
+    assert "classList.add('streaming')" in app.STREAM_JS
+    assert "classList.remove('streaming')" in app.STREAM_JS
