@@ -200,7 +200,7 @@ The notebook has a **command mode** and an **edit mode**, like Jupyter:
 | `Enter` | enter edit mode on the selected cell |
 | `Esc` | leave edit mode back to command mode (no edits lost) |
 | `↑` / `↓` or `k` / `j` | select the previous / next cell |
-| `a` / `b` | insert a cell above / below |
+| `a` / `b` | insert a **note** cell above / below (use the ＋ menu for code / Ask AI) |
 | `y` / `m` / `i` | convert the cell to **code** / **note** (markdown) / **Ask AI** |
 | `dd` | delete the selected cell |
 | `z` | undo the last delete |

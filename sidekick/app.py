@@ -1095,7 +1095,7 @@ STREAM_JS = """
              (window.__activeRow && window.__activeRow.id.replace('cell-', ''));
     if(!id || !window.htmx) return;
     htmx.ajax('POST', '/cell/insert', {target: '#stream', swap: 'outerHTML',
-      values: {id: id, msg_type: 'code', where: where}});
+      values: {id: id, msg_type: 'note', where: where}});   // a/b default to a note
   }
   document.addEventListener('keydown', function(e){
     if((e.metaKey || e.ctrlKey) && e.key !== 'Enter') return;   // allow Cmd/Ctrl+Enter through
