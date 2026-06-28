@@ -66,7 +66,24 @@ KERNELS: dict[str, dict] = {}
 
 
 def _ns(dialog: str) -> dict:
-    return KERNELS.setdefault(dialog, {"__name__": "__solveit__"})
+    ns = KERNELS.get(dialog)
+    if ns is None:
+        # Back the namespace with a REAL module registered in sys.modules, the way
+        # IPython/Jupyter do. User code then runs under __name__ = this module's
+        # name, so anything that resolves sys.modules[cls.__module__] — dataclasses,
+        # typing.get_type_hints, pickle, attrs — finds a live module with a real
+        # __dict__. Without this, @dataclass eventually raises "'NoneType' object
+        # has no attribute '__dict__'" because the import machinery leaves a None
+        # at that key, and dataclasses does sys.modules[cls.__module__].__dict__.
+        # The per-dialog module name also keeps dialogs from sharing globals.
+        import sys, types
+        slug = "".join(c if c.isalnum() else "_" for c in dialog).strip("_") or "default"
+        modname = f"__solveit_{slug}__"
+        mod = types.ModuleType(modname)
+        sys.modules[modname] = mod
+        ns = mod.__dict__
+        KERNELS[dialog] = ns
+    return ns
 
 
 def _b64(data: bytes) -> str:
