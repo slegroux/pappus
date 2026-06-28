@@ -1375,9 +1375,13 @@ TOC_JS = """
 window.buildTOC = function(){
   var list = document.getElementById('tocList');
   if(!list) return;
-  var heads = document.querySelectorAll(
-    '#stream .note-view h1,#stream .note-view h2,#stream .note-view h3,' +
-    '#stream .note-view h4,#stream .note-view h5,#stream .note-view h6');
+  // Scope to ONE #stream via getElementById: during an htmx outerHTML swap the
+  // old #stream lingers briefly, and a '#stream …' selector matches headings
+  // under BOTH, so the TOC would double. getElementById resolves a single node.
+  var stream = document.getElementById('stream');
+  var heads = stream ? stream.querySelectorAll(
+    '.note-view h1,.note-view h2,.note-view h3,' +
+    '.note-view h4,.note-view h5,.note-view h6') : [];
   list.innerHTML = '';
   if(!heads.length){
     var e = document.createElement('div'); e.className = 'toc-empty';
