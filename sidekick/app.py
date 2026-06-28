@@ -223,6 +223,16 @@ body.col-resizing{cursor:col-resize;user-select:none}
   font:inherit;font-size:13px;padding:6px 10px;border-radius:6px}
 .conv-del:hover{background:#F6E8E4}
 .folder>.conv-row,.folder>.folder{margin-left:10px}
+/* multi-select (shift/⌘-click) + bulk-delete bar */
+.conv-row.sel>.conv{background:#E6F2EA;box-shadow:inset 2px 0 0 var(--accent)}
+.sel-bar{display:none;align-items:center;gap:6px;margin:4px 2px 6px;padding:5px 8px;border-radius:8px;
+  background:#FBF3E7;border:1px solid #E3C7AE}
+.sel-count{flex:1 1 auto;font-size:12px;color:var(--muted)}
+.sel-del{border:none;background:none;color:#B3402F;font:inherit;font-size:12px;font-weight:600;cursor:pointer;
+  padding:3px 7px;border-radius:6px}
+.sel-del:hover{background:#F6E8E4}
+.sel-clear{border:none;background:none;color:var(--muted);font:inherit;font-size:12px;cursor:pointer;padding:3px 5px}
+.sel-clear:hover{color:var(--ink)}
 .folder-label{list-style:none;cursor:pointer;font-size:11px;letter-spacing:.04em;text-transform:uppercase;
   color:var(--muted);padding:8px 8px 4px;user-select:none}
 .folder-label::-webkit-details-marker{display:none}
@@ -497,16 +507,67 @@ def _render_dialog_nodes(node, active):
     return out
 
 
+# Shift/⌘-click to multi-select dialog rows, then bulk-delete. Plain click still
+# opens a dialog (and the full-page nav resets the ephemeral selection).
+SIDEBAR_JS = """
+(function(){
+  if(window.__sidebarSel) return; window.__sidebarSel = true;
+  var sel = new Set(), anchor = null;
+  function links(){ return Array.prototype.slice.call(
+    document.querySelectorAll('.side .conv-row a.conv')); }
+  function nameOf(a){ return decodeURIComponent(
+    (a.getAttribute('href') || '').replace('/open?dialog=', '')); }
+  function paint(){
+    links().forEach(function(a){ a.closest('.conv-row').classList.toggle('sel', sel.has(nameOf(a))); });
+    var bar = document.getElementById('selBar');
+    if(bar){ bar.style.display = sel.size ? 'flex' : 'none';
+             var c = document.getElementById('selCount');
+             if(c) c.textContent = sel.size + ' selected'; }
+  }
+  window.__clearDialogSel = function(){ sel.clear(); anchor = null; paint(); };
+  window.__deleteDialogSel = function(){
+    if(!sel.size) return;
+    if(!confirm('Delete ' + sel.size + ' dialog(s) and all their cells? This cannot be undone.')) return;
+    var f = document.createElement('form'); f.method = 'POST'; f.action = '/dialog/delete-bulk';
+    var i = document.createElement('input'); i.type = 'hidden'; i.name = 'names';
+    i.value = JSON.stringify(Array.from(sel));
+    f.appendChild(i); document.body.appendChild(f); f.submit();
+  };
+  document.addEventListener('click', function(e){
+    var a = e.target.closest && e.target.closest('.side .conv-row a.conv');
+    if(!a || !(e.shiftKey || e.metaKey || e.ctrlKey)) return;   // plain click navigates
+    e.preventDefault();
+    var names = links().map(nameOf), name = nameOf(a), i = names.indexOf(name);
+    if(e.shiftKey && anchor !== null){
+      var lo = Math.min(anchor, i), hi = Math.max(anchor, i);
+      for(var k = lo; k <= hi; k++) sel.add(names[k]);
+    } else {
+      if(sel.has(name)) sel.delete(name); else sel.add(name);
+      anchor = i;
+    }
+    paint();
+  });
+})();
+"""
+
+
 def Sidebar():
     backend = STATE["backend"]
     names = backend.list_dialogs() or [STATE["dialog"]]
     tree = _dialog_tree(names)
+    sel_bar = Div(
+        Span("0 selected", id="selCount", cls="sel-count"),
+        Button("🗑 Delete", type="button", cls="sel-del", onclick="window.__deleteDialogSel()"),
+        Button("Clear", type="button", cls="sel-clear", onclick="window.__clearDialogSel()"),
+        id="selBar", cls="sel-bar", style="display:none")
     return Div(
         Div(Span("S", cls="dot"), "SolveIt Sidekick", cls="brand"),
         A("✎  New dialog", href="/new", cls="newbtn"),
-        Div("Dialogs", cls="seclabel"),
+        Div("Dialogs", cls="seclabel", title="Shift/⌘-click to select several, then Delete"),
+        sel_bar,
         *_render_dialog_nodes(tree, STATE["dialog"]),
         Div(f"target: {STATE['target_name']}", cls="side-foot"),
+        Script(SIDEBAR_JS),
         cls="side",
     )
 
@@ -1693,17 +1754,35 @@ def new_dialog():
     return Page()
 
 
-@rt("/dialog/delete", methods=["post"])
-def dialog_delete(dialog: str):
-    """Delete a whole dialog. If it was the active one, fall back to another (or a
-    fresh demo/welcome if none remain)."""
+def _delete_dialogs(targets: list[str]):
+    """Delete each dialog in `targets`; if the active one is among them, fall back
+    to a survivor (or a fresh demo/welcome if none remain)."""
     backend = STATE["backend"]
     if hasattr(backend, "delete_dialog"):
-        backend.delete_dialog(dialog)
-    if STATE["dialog"] == dialog:
+        for d in targets:
+            backend.delete_dialog(d)
+    if STATE["dialog"] in targets:
         remaining = backend.list_dialogs()
         STATE["dialog"] = remaining[0] if remaining else "demo/welcome"
         backend.messages(STATE["dialog"])       # touch -> ensure it exists
+
+
+@rt("/dialog/delete", methods=["post"])
+def dialog_delete(dialog: str):
+    """Delete one dialog (the row's ⋯ menu)."""
+    _delete_dialogs([dialog])
+    return Page()
+
+
+@rt("/dialog/delete-bulk", methods=["post"])
+def dialog_delete_bulk(names: str = "[]"):
+    """Delete several dialogs at once (shift/⌘-click multi-select). `names` is a
+    JSON array of dialog names."""
+    try:
+        targets = [d for d in json.loads(names) if isinstance(d, str)]
+    except (ValueError, TypeError):
+        targets = []
+    _delete_dialogs(targets)
     return Page()
 
 

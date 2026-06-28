@@ -1252,6 +1252,20 @@ def test_dialog_delete_route_switches_active_then_falls_back():
     assert app.STATE["dialog"] == "demo/welcome"
 
 
+def test_dialog_delete_bulk_removes_several():
+    import json, sidekick.app as app
+    bk = app.STATE["backend"]
+    for d in ("bulk/a", "bulk/b", "bulk/c"):
+        bk.messages(d); bk.add(d, "x", "code")
+    app.STATE["dialog"] = "bulk/a"
+    app.dialog_delete_bulk(names=json.dumps(["bulk/a", "bulk/b"]))
+    live = bk.list_dialogs()
+    assert "bulk/a" not in live and "bulk/b" not in live and "bulk/c" in live
+    assert app.STATE["dialog"] != "bulk/a"        # active one was deleted -> switched
+    app.dialog_delete_bulk(names="not json")      # malformed input is a no-op, no crash
+    assert "bulk/c" in bk.list_dialogs()
+
+
 def test_sidebar_renders_delete_menu():
     import sidekick.app as app
     from fasthtml.common import to_xml
