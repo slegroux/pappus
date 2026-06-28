@@ -934,6 +934,8 @@ _CODE_EDITOR_JS = """
       extraKeys: { 'Cmd-Enter': function(){ cm.save(); runCell(); },
                    'Ctrl-Enter': function(){ cm.save(); runCell(); },
                    'Shift-Enter': function(){ cm.save(); runCell(); },   // Jupyter convention
+                   'Cmd-/': function(){ window.__toggleComment(cm); },   // Jupyter convention
+                   'Ctrl-/': function(){ window.__toggleComment(cm); },
                    'Ctrl-Space': function(){ if(window.__showCompletions) window.__showCompletions(cm); } }
     });
     cm.on('change', function(){ cm.save(); });   // keep textarea current for hx-include
@@ -950,6 +952,37 @@ _FOCUS_JS = """
   var t = document.getElementById('ta-__MID__');
   if(t){ t.focus(); var n = t.value.length; t.setSelectionRange(n, n); }
 })();
+"""
+
+# Cmd/Ctrl+/ toggles Python line comments on the selected lines, the way Jupyter
+# (and most editors) do. Self-contained — we don't vendor CodeMirror's comment
+# addon. Comments at the shallowest indentation of the block; if every non-blank
+# line is already commented, it uncomments instead. Defined once; the cell and
+# composer editors bind it in their extraKeys.
+COMMENT_JS = """
+window.__toggleComment = function(cm){
+  cm.operation(function(){
+    cm.listSelections().forEach(function(sel){
+      var from = Math.min(sel.anchor.line, sel.head.line);
+      var to   = Math.max(sel.anchor.line, sel.head.line);
+      var lines = [];
+      for(var i = from; i <= to; i++){ if(/\\S/.test(cm.getLine(i))) lines.push(i); }
+      if(!lines.length) lines = [from];                 // act on a lone blank line too
+      var commented = lines.every(function(i){ return /^\\s*#/.test(cm.getLine(i)); });
+      var indent = Infinity;
+      lines.forEach(function(i){ indent = Math.min(indent, cm.getLine(i).match(/^\\s*/)[0].length); });
+      if(!isFinite(indent)) indent = 0;
+      lines.forEach(function(i){
+        if(commented){
+          var m = cm.getLine(i).match(/^(\\s*)#( ?)/);  // strip the leading '# ' (or '#')
+          if(m) cm.replaceRange('', {line:i, ch:m[1].length}, {line:i, ch:m[1].length + 1 + m[2].length});
+        } else {
+          cm.replaceRange('# ', {line:i, ch:indent});
+        }
+      });
+    });
+  });
+};
 """
 
 # Ctrl+Space completion: an async CodeMirror hint that asks /complete (which
@@ -1391,6 +1424,8 @@ function _initComposerCM(){
     placeholder: '# code…  Shift+Enter to run · Enter for newline · Tab switches mode',
     extraKeys: {
       'Shift-Enter': _submitComposer, 'Cmd-Enter': _submitComposer, 'Ctrl-Enter': _submitComposer,
+      'Cmd-/': function(){ window.__toggleComment(composerCM); },
+      'Ctrl-/': function(){ window.__toggleComment(composerCM); },
       'Tab': function(){ cycleMode(1); }, 'Shift-Tab': function(){ cycleMode(-1); }
     }
   });
@@ -2017,6 +2052,7 @@ _LOCAL_HDRS = (
     Script(src="/vendor/python.min.js"),
     Script(src="/vendor/placeholder.min.js"),
     Script(src="/vendor/show-hint.min.js"),     # Ctrl+Space completion dropdown
+    Script(COMMENT_JS),                           # defines window.__toggleComment (Cmd/Ctrl+/)
     Script(COMPLETE_JS),                          # defines window.__kernelHint
     Script(STREAM_SEL_JS),                        # Ask-AI bubble over dialog-stream selections
     Link(rel="stylesheet", href="/vendor/katex.min.css"),
