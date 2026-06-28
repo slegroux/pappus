@@ -123,13 +123,10 @@ app:
             >"$LOG/ui.log" 2>&1 & UPID=$!
         for i in $(seq 1 60); do up 8000 && break; sleep 0.5; done
     fi
+    # The servers keep running in the background (nohup); the launcher opens the
+    # browser and exits. Stop everything with `just stop`. (We don't tie shutdown
+    # to "Quit" — a script-based .app doesn't receive Quit reliably.)
     open "http://localhost:8000"
-    # If WE started the UI, stay alive and supervise it so Quit (SIGTERM) stops the
-    # servers we launched. If they were already running, just front the browser & exit.
-    if [ -n "$UPID" ]; then
-        trap 'kill ${UPID:-} ${KPID:-} 2>/dev/null; exit 0' INT TERM EXIT
-        wait "$UPID"
-    fi
     LAUNCH
     sed -i '' "s|__PROJ__|{{justfile_directory()}}|" "$APP/Contents/MacOS/launcher"
     chmod +x "$APP/Contents/MacOS/launcher"
