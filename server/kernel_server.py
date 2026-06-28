@@ -239,7 +239,7 @@ def run_prompt(dialog: str, content: str, model: str, context: str = "") -> str:
     import importlib
 
     if model in CLI_MODELS:               # subscription-backed Claude (no API key)
-        return claude_cli.call(dialog, content, context)
+        return claude_cli.call(dialog, content, context, model=model)
 
     try:
         from sidekick.secrets_store import key_for_model, PROVIDERS
