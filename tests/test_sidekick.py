@@ -1839,3 +1839,15 @@ def test_claude_cli_fast_model_uses_haiku(monkeypatch):
     cmd2, _ = cc._build_cmd("norm/d", "hi", "", stream=True, model="claude-cli")
     assert "--model" not in cmd2
     assert "claude-cli-fast" in cc.CLI_MODELS          # routes through the streaming path
+
+
+def test_composer_shows_instant_pending_spinner():
+    # On an Ask-AI send the composer injects a "Thinking…" wheel immediately
+    # (client-side), so a working indicator is visible for every model — including
+    # the blocking API ones that stream nothing — until the answer swaps in.
+    import sidekick.app as app
+    js = app.COMPOSER_JS
+    assert "_showPendingSpinner" in js and "pending-spinner" in js
+    assert 'class="spinner"' in js and "Thinking" in js
+    assert "msgType" in js and "_showPendingSpinner()" in js   # gated to prompt sends
+    assert "__pendingSpinnerCleanup" in js                     # stray-spinner cleanup
