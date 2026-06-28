@@ -1729,3 +1729,16 @@ def test_complete_route_empty_when_backend_cannot_complete():
     app.STATE["backend"] = MockBackend()           # no .complete method
     r = TestClient(app.app).post("/complete", data={"code": "x", "line": 1, "col": 1})
     assert r.json() == {"completions": []}
+
+
+def test_completion_autotrigger_and_tab_accept_wired():
+    # SolveIt-style polish: completion fires as you type (inputRead, identifier/dot
+    # only) and Tab accepts the highlighted item. Guards the JS wiring.
+    import sidekick.app as app
+    js = app.COMPLETE_JS
+    assert "__showCompletions" in js and "__autocompleteOnType" in js
+    assert "inputRead" in js                       # auto-trigger as you type
+    assert "'Tab'" in js                           # Tab accepts
+    # the cell editor turns both on
+    assert "__autocompleteOnType(cm)" in app._CODE_EDITOR_JS
+    assert "__showCompletions(cm)" in app._CODE_EDITOR_JS
