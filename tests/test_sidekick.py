@@ -123,6 +123,19 @@ def test_send_route_adds_message_and_remembers_model():
     assert app.STATE["model"] == "codex"               # sticky selection
 
 
+def test_send_scrolls_to_the_new_cell():
+    # /send full-reloads the page (returns Page()), which would jump to the top;
+    # it flags the new cell so Stream() scrolls it into view instead.
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    app.STATE["dialog"] = "test/scroll"
+    bk = app.STATE["backend"]; bk.messages("test/scroll")
+    page = to_xml(app.send(content="a note", msg_type="note"))   # returns Page() (full reload)
+    new_id = bk.messages("test/scroll")[-1].id
+    assert f"cell-{new_id}" in page and "scrollHeight" in page    # scrolls the stream to the new cell
+    assert app.STATE.get("scroll_to") is None                     # one-shot (consumed by render)
+
+
 def test_send_route_ignores_empty():
     import sidekick.app as app
     app.STATE["dialog"] = "test/empty"

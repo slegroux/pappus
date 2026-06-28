@@ -96,6 +96,7 @@ STATE = {
     "pending_stream": None,   # (dialog, msg_id) whose answer is being streamed live
     "paper": None,            # {name, status, md, engine} for the reading panel
     "editing": None,          # cell id to render in edit mode once (just-inserted cell)
+    "scroll_to": None,        # cell id to scroll into view once (e.g. after a composer send)
 }
 
 
@@ -1077,13 +1078,22 @@ def _ctx_meter(msgs):
 def Stream():
     msgs = STATE["backend"].messages(STATE["dialog"])
     editing = STATE.pop("editing", None)            # a just-inserted cell opens in edit mode (one-shot)
+    scroll_to = STATE.pop("scroll_to", None)        # scroll a just-added cell into view (one-shot)
     if not msgs:
         inner = Div("Start the conversation — write code, ask the AI, or jot a note.",
                     cls="empty")
     else:
         rows = [_cell_edit(m) if m.id == editing else MsgRow(m) for m in msgs]
         inner = Div(*rows, _ctx_meter(msgs), cls="wrap")
-    return Div(inner, Script(STREAM_JS), cls="stream", id="stream")
+    extra = ()
+    if scroll_to:
+        # full-page renders (composer /send) reset scroll to the top; scroll the
+        # stream container (NOT the window) down to the just-added cell at the
+        # bottom. rAF so it runs after layout settles.
+        extra = (Script(f"requestAnimationFrame(function(){{var c="
+                        f"document.getElementById('cell-{scroll_to}'),"
+                        f"s=c&&c.closest('.stream');if(s)s.scrollTop=s.scrollHeight;}});"),)
+    return Div(inner, Script(STREAM_JS), *extra, cls="stream", id="stream")
 
 
 COMPOSER_JS = """
@@ -1803,6 +1813,7 @@ def send(content: str, msg_type: str = "prompt", model: str = None):
         backend = STATE["backend"]
         use_model = STATE["model"] if msg_type == "prompt" else None
         m = backend.add(STATE["dialog"], content, msg_type, model=use_model)
+        STATE["scroll_to"] = m.id            # /send full-reloads → scroll to the new cell
         if msg_type == "prompt" and _can_stream(backend, use_model):
             # Defer the AI call: the page renders an SSE-wired answer that streams
             # tokens in (the browser opens /stream), instead of blocking here.
