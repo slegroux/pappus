@@ -1681,3 +1681,12 @@ def test_build_cmd_prompt_survives_variadic_flags(monkeypatch):
             cmd, _ = cc._build_cmd("guard/d", "THE_PROMPT", "ctx", stream=stream)
             assert "--disallowed-tools" in cmd            # the always-on variadic flag
             assert cmd[-1] == "THE_PROMPT", (tools_on, stream, cmd[-4:])
+
+
+def test_toc_query_is_scoped_to_one_stream():
+    # buildTOC must resolve a single #stream via getElementById and query headings
+    # within it. A global '#stream .note-view …' selector matches BOTH the old and
+    # new #stream during an htmx outerHTML swap, doubling the table of contents.
+    import sidekick.app as app
+    assert "getElementById('stream')" in app.TOC_JS
+    assert "#stream .note-view" not in app.TOC_JS      # the doubling selector is gone
