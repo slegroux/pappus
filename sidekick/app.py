@@ -81,9 +81,15 @@ try:
     class _MdRenderer(mistune.HTMLRenderer):
         """Markdown HTML renderer that syntax-highlights fenced code blocks
         (```python …```) via Pygments — on the light palette, so illustrative code
-        in an answer/note reads differently from a runnable code cell."""
+        in an answer/note reads differently from a runnable code cell.
+        A ```mermaid fence is emitted as a raw <pre class="mermaid"> that mermaid.js
+        turns into a diagram client-side (see renderMermaid in the page JS)."""
         def block_code(self, code, info=None):
             lang = (info or "").strip().split(None, 1)[0] if (info or "").strip() else ""
+            if lang == "mermaid":
+                # mermaid reads the element's textContent, so escape the source
+                # rather than highlighting it; the browser decodes it back.
+                return f'<pre class="mermaid">{mistune.util.escape(code or "")}</pre>'
             html = _highlight_md(code, lang)
             return html if html else super().block_code(code, info)
 
@@ -1070,6 +1076,21 @@ STREAM_JS = """
     ]}); } catch(e){}
   }
 
+  // Mermaid: turn <pre class="mermaid"> (from ```mermaid fences) into diagrams.
+  // No-op offline / before mermaid loads. Initialised once with manual start so
+  // we control *when* it runs (after a render, never mid-stream on partial source).
+  function renderMermaid(el){
+    if(!el || !window.mermaid) return;
+    if(!window.__mermaidInit){
+      try { window.mermaid.initialize({ startOnLoad:false, securityLevel:'strict' }); } catch(e){}
+      window.__mermaidInit = true;
+    }
+    var nodes = el.querySelectorAll('pre.mermaid:not([data-processed])');
+    if(!nodes.length) return;
+    try { var p = window.mermaid.run({ nodes: nodes }); if(p && p.catch) p.catch(function(){}); }
+    catch(e){}
+  }
+
   // Add a hover Copy button to each highlighted code block in answers/notes.
   function copyText(text, btn){
     function done(){ btn.textContent = 'Copied!'; setTimeout(function(){ btn.textContent = 'Copy'; }, 1200); }
@@ -1098,7 +1119,7 @@ STREAM_JS = """
     });
   }
   document.querySelectorAll('#stream .md').forEach(function(el){   // already-rendered answers/notes
-    renderMath(el); addCopyButtons(el);
+    renderMath(el); renderMermaid(el); addCopyButtons(el);
   });
   if(window.buildTOC) window.buildTOC();   // refresh the table of contents on every render
 
@@ -1135,7 +1156,7 @@ STREAM_JS = """
     });
     es.addEventListener('done', function(e){
       el.classList.remove('streaming');                // generation finished → drop the caret
-      renderMath(el); addCopyButtons(el);
+      renderMath(el); renderMermaid(el); addCopyButtons(el);  // diagrams only once source is complete
       es.close(); el.removeAttribute('data-stream-url'); el.__streaming = false;
       // The AI's tools edited cells this turn — refresh #stream so they appear.
       if(e && e.data && e.data.indexOf('reload') >= 0 && window.htmx){
@@ -2058,6 +2079,7 @@ _LOCAL_HDRS = (
     Link(rel="stylesheet", href="/vendor/katex.min.css"),
     Script(src="/vendor/katex.min.js"),
     Script(src="/vendor/auto-render.min.js"),
+    Script(src="/vendor/mermaid.min.js"),         # ```mermaid → diagrams (renderMermaid)
     Script(src="/vendor/sortable.min.js"),
 )
 app, rt = fast_app(pico=False, default_hdrs=False, hdrs=_LOCAL_HDRS)
