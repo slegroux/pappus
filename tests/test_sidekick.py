@@ -1494,3 +1494,115 @@ def test_cell_insert_route_rejects_bad_type():
     a = bk.add("ins/bad", "x", "code")
     app.cell_insert(id=a.id, msg_type="evil", where="below")
     assert bk.messages("ins/bad")[1].msg_type == "code"   # bad type falls back to code
+
+
+# ---- AI cell-editing MCP tools (claude -p / Max path) -----------------------
+def test_cell_tools_disabled_without_env(monkeypatch):
+    from sidekick import claude_cli as cc
+    monkeypatch.delenv("SIDEKICK_MCP_TOKEN", raising=False)
+    monkeypatch.delenv("SIDEKICK_APP_URL", raising=False)
+    assert cc._cell_tools_enabled() is False
+
+
+def test_cell_tools_env_flag_opt_out(monkeypatch):
+    from sidekick import claude_cli as cc
+    monkeypatch.setenv("SIDEKICK_MCP_TOKEN", "t")
+    monkeypatch.setenv("SIDEKICK_APP_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("SIDEKICK_CELL_TOOLS", "0")
+    assert cc._cell_tools_enabled() is False
+
+
+def test_build_cmd_registers_mcp_and_keeps_prompt_last(monkeypatch):
+    from sidekick import claude_cli as cc
+    monkeypatch.setenv("SIDEKICK_MCP_TOKEN", "t")
+    monkeypatch.setenv("SIDEKICK_APP_URL", "http://127.0.0.1:8000")
+    monkeypatch.delenv("SIDEKICK_CELL_TOOLS", raising=False)
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/usr/bin/claude")
+    cc.CLI_SESSIONS.pop("mcp/x", None)                     # force a fresh session
+    cmd, _ = cc._build_cmd("mcp/x", "fix cell 2", "ctx", stream=True)
+    assert "--mcp-config" in cmd and "--allowedTools" in cmd
+    # the variadic --allowedTools must not swallow the prompt: `--` separates them,
+    # and the prompt is the final positional.
+    assert cmd[-1] == "fix cell 2" and cmd[-2] == "--"
+    assert "mcp__cells__update_cell" in cmd
+    sysmsg = cmd[cmd.index("--append-system-prompt") + 1]
+    assert "list_cells" in sysmsg                          # tool guidance taught once
+
+
+def test_build_cmd_no_mcp_when_disabled(monkeypatch):
+    from sidekick import claude_cli as cc
+    monkeypatch.delenv("SIDEKICK_MCP_TOKEN", raising=False)
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/usr/bin/claude")
+    cc.CLI_SESSIONS.pop("mcp/off", None)
+    cmd, _ = cc._build_cmd("mcp/off", "q", "ctx", stream=True)
+    assert "--mcp-config" not in cmd and "--" not in cmd
+    assert cmd[-1] == "q"
+
+
+def _mcp_client():
+    from starlette.testclient import TestClient
+    import sidekick.app as app
+    return app, TestClient(app.app), app.STATE["mcp_token"]
+
+
+def test_internal_cells_forbidden_without_token():
+    app, client, _ = _mcp_client()
+    app.STATE["dialog"] = "mcp/list"
+    app.STATE["backend"].messages("mcp/list")
+    assert client.get("/internal/cells", params={"dialog": "mcp/list", "tok": "bad"}).status_code == 403
+
+
+def test_internal_cell_update_edits_live_backend():
+    app, client, tok = _mcp_client()
+    bk = app.STATE["backend"]; d = "mcp/upd"; bk.messages(d)
+    m = bk.add(d, "return a - b", "code")
+    r = client.post("/internal/cell/update",
+                    data={"dialog": d, "id": m.id, "content": "return a + b", "tok": tok})
+    assert r.json()["ok"] is True
+    assert bk.messages(d)[-1].content == "return a + b"
+    assert app.STATE["cells_dirty"] is True
+
+
+def test_internal_str_replace_requires_unique_match():
+    app, client, tok = _mcp_client()
+    bk = app.STATE["backend"]; d = "mcp/sr"; bk.messages(d)
+    m = bk.add(d, "x = 1\nx = 1", "code")
+    dup = client.post("/internal/cell/str_replace",
+                      data={"dialog": d, "id": m.id, "old": "x = 1", "new": "x = 2", "tok": tok})
+    assert dup.status_code == 400 and "unique" in dup.json()["error"]
+    miss = client.post("/internal/cell/str_replace",
+                       data={"dialog": d, "id": m.id, "old": "zzz", "new": "q", "tok": tok})
+    assert miss.status_code == 400
+
+
+def test_internal_cell_insert_after():
+    app, client, tok = _mcp_client()
+    bk = app.STATE["backend"]; d = "mcp/ins"; bk.messages(d)
+    a = bk.add(d, "first", "code")
+    bk.add(d, "third", "code")
+    r = client.post("/internal/cell/insert",
+                    data={"dialog": d, "content": "second", "cell_type": "code",
+                          "after_id": a.id, "tok": tok})
+    assert r.json()["ok"] is True
+    assert [c.content for c in bk.messages(d)] == ["first", "second", "third"]
+
+
+def test_mcp_server_dispatches_tools(monkeypatch):
+    import server.mcp_cells as mc
+    calls = []
+    def fake_request(method, path, params):
+        calls.append((method, path, params))
+        if path == "/internal/cells":
+            return {"ok": True, "cells": [{"id": "_a", "type": "code", "content": "y=2"}]}
+        return {"ok": True, "message": "done"}
+    monkeypatch.setattr(mc, "_request", fake_request)
+    assert "id=_a" in mc._call_tool("list_cells", {})
+    assert mc._call_tool("update_cell", {"cell_id": "_a", "content": "y=3"}) == "done"
+    assert calls[-1][1] == "/internal/cell/update"
+
+
+def test_mcp_server_tool_error_raises(monkeypatch):
+    import server.mcp_cells as mc
+    monkeypatch.setattr(mc, "_request", lambda *a: {"ok": False, "error": "no cell"})
+    with pytest.raises(RuntimeError):
+        mc._call_tool("update_cell", {"cell_id": "x", "content": "z"})

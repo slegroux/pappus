@@ -98,7 +98,22 @@ STATE = {
     "paper": None,            # {name, status, md, engine} for the reading panel
     "editing": None,          # cell id to render in edit mode once (just-inserted cell)
     "scroll_to": None,        # cell id to scroll into view once (e.g. after a composer send)
+    "cells_dirty": False,     # set when the AI's MCP tools edit cells mid-stream → reload
 }
+
+
+def _init_cell_tools() -> None:
+    """Publish a loopback URL + one-shot token so the `claude -p` path can spawn an
+    MCP server that edits the live notebook (see claude_cli + server/mcp_cells).
+    Loopback only, single-user: the token just stops other local procs poking in."""
+    import secrets
+    os.environ.setdefault("SIDEKICK_MCP_TOKEN", secrets.token_hex(16))
+    port = os.environ.get("SIDEKICK_PORT", "8000")
+    os.environ.setdefault("SIDEKICK_APP_URL", f"http://127.0.0.1:{port}")
+    STATE["mcp_token"] = os.environ["SIDEKICK_MCP_TOKEN"]
+
+
+_init_cell_tools()
 
 
 def _can_stream(backend, model) -> bool:
@@ -945,9 +960,13 @@ STREAM_JS = """
       renderMath(el); addCopyButtons(el);              // typeset math + copy buttons as it streams
       var s = el.closest('.stream'); if(s) s.scrollTop = s.scrollHeight;
     });
-    es.addEventListener('done', function(){
+    es.addEventListener('done', function(e){
       renderMath(el); addCopyButtons(el);
       es.close(); el.removeAttribute('data-stream-url'); el.__streaming = false;
+      // The AI's tools edited cells this turn — refresh #stream so they appear.
+      if(e && e.data && e.data.indexOf('reload') >= 0 && window.htmx){
+        window.htmx.ajax('GET', '/stream/refresh', {target:'#stream', swap:'outerHTML'});
+      }
     });
     es.onerror = function(){ es.close(); };
   });
@@ -1943,20 +1962,105 @@ def stream_answer(dialog: str, id: str):
         if m is None:
             yield sse_message(Div(""), event="done")
             return
+        STATE["cells_dirty"] = False                     # the AI's tools may flip this
         acc = ""
         for delta in stream_claude(dialog, m.content, context):
             acc += delta
             # str() unwraps NotStr -> raw (already-safe) markdown HTML for the data lines
             yield sse_message(str(render_md(acc)), event="msg")
+        edited = STATE.get("cells_dirty", False)
+        if not acc and edited:                           # tool-only turn: say something
+            acc = "_Updated the notebook cells as requested._"
         m.output = acc or m.output
         if hasattr(backend, "_save"):
             backend._save()                              # flush to disk so a reload keeps the answer
         if STATE.get("pending_stream") == (dialog, id):
             STATE["pending_stream"] = None
+        STATE["cells_dirty"] = False
         yield sse_message(str(render_md(m.output)), event="msg")   # final state
-        yield sse_message(Div(""), event="done")
+        # 'reload' tells the client to refresh #stream so the AI's cell edits show.
+        yield sse_message(Div("reload" if edited else ""), event="done")
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+# ---- internal API for the AI's cell-editing MCP tools (server/mcp_cells) -----
+# Loopback + shared-token only. The MCP server (spawned by `claude -p`) calls
+# these to read and edit the live notebook; mutating routes flag #stream dirty so
+# the streamed answer's `done` event reloads it.
+def _mcp_ok(tok: str) -> bool:
+    want = STATE.get("mcp_token")
+    return bool(want) and tok == want
+
+
+def _json(obj, status: int = 200):
+    from starlette.responses import JSONResponse
+    return JSONResponse(obj, status_code=status)
+
+
+@rt("/internal/cells")
+def internal_cells(dialog: str, tok: str = ""):
+    """List a dialog's cells for the AI (id, type, source)."""
+    if not _mcp_ok(tok):
+        return _json({"ok": False, "error": "forbidden"}, 403)
+    backend = STATE["backend"]
+    cells = [{"id": m.id, "type": m.msg_type, "content": m.content or "",
+              "output": m.output or ""} for m in backend.messages(dialog)]
+    return _json({"ok": True, "cells": cells})
+
+
+@rt("/internal/cell/update", methods=["post"])
+def internal_cell_update(dialog: str, id: str, content: str = "", tok: str = ""):
+    if not _mcp_ok(tok):
+        return _json({"ok": False, "error": "forbidden"}, 403)
+    backend = STATE["backend"]
+    if not hasattr(backend, "update") or _msg_by_id(backend, dialog, id) is None:
+        return _json({"ok": False, "error": f"no cell {id}"}, 404)
+    backend.update(dialog, id, content)
+    STATE["cells_dirty"] = True
+    return _json({"ok": True, "message": f"updated cell {id}"})
+
+
+@rt("/internal/cell/str_replace", methods=["post"])
+def internal_cell_str_replace(dialog: str, id: str, old: str = "", new: str = "", tok: str = ""):
+    if not _mcp_ok(tok):
+        return _json({"ok": False, "error": "forbidden"}, 403)
+    backend = STATE["backend"]
+    m = _msg_by_id(backend, dialog, id)
+    if m is None or not hasattr(backend, "update"):
+        return _json({"ok": False, "error": f"no cell {id}"}, 404)
+    src = m.content or ""
+    n = src.count(old)
+    if n == 0:
+        return _json({"ok": False, "error": "old_str not found"}, 400)
+    if n > 1:
+        return _json({"ok": False, "error": f"old_str matches {n}× (must be unique)"}, 400)
+    backend.update(dialog, id, src.replace(old, new))
+    STATE["cells_dirty"] = True
+    return _json({"ok": True, "message": f"edited cell {id}"})
+
+
+@rt("/internal/cell/insert", methods=["post"])
+def internal_cell_insert(dialog: str, content: str = "", cell_type: str = "code",
+                         after_id: str = "", tok: str = ""):
+    if not _mcp_ok(tok):
+        return _json({"ok": False, "error": "forbidden"}, 403)
+    if cell_type not in ("code", "note", "prompt"):
+        return _json({"ok": False, "error": "bad cell_type"}, 400)
+    backend = STATE["backend"]
+    if after_id and hasattr(backend, "insert") and _msg_by_id(backend, dialog, after_id):
+        m = backend.insert(dialog, content, cell_type, after_id, above=False)
+    else:
+        m = backend.add(dialog, content, cell_type)
+    STATE["cells_dirty"] = True
+    return _json({"ok": True, "message": f"inserted cell {m.id}"})
+
+
+@rt("/stream/refresh")
+def stream_refresh():
+    """Re-render #stream — the client swaps this in after a turn whose AI tools
+    edited cells, so the edits become visible without a full page reload."""
+    return Stream()
 
 
 @rt("/cell/save", methods=["post"])
