@@ -858,7 +858,9 @@ _CODE_EDITOR_JS = """
       viewportMargin: Infinity, indentUnit: 4, lineWrapping: true,
       extraKeys: { 'Cmd-Enter': function(){ cm.save(); runCell(); },
                    'Ctrl-Enter': function(){ cm.save(); runCell(); },
-                   'Shift-Enter': function(){ cm.save(); runCell(); } }   // Jupyter convention
+                   'Shift-Enter': function(){ cm.save(); runCell(); },   // Jupyter convention
+                   'Ctrl-Space': function(){ if(window.__kernelHint)
+                       cm.showHint({hint: window.__kernelHint, completeSingle: false}); } }
     });
     cm.on('change', function(){ cm.save(); });   // keep textarea current for hx-include
     setTimeout(function(){ cm.refresh(); cm.focus(); cm.setCursor(cm.lineCount(), 0); }, 0);
@@ -873,6 +875,33 @@ _FOCUS_JS = """
   var t = document.getElementById('ta-__MID__');
   if(t){ t.focus(); var n = t.value.length; t.setSelectionRange(n, n); }
 })();
+"""
+
+# Ctrl+Space completion: an async CodeMirror hint that asks /complete (which
+# introspects the kernel's live namespace via jedi). Defined once on the page;
+# the cell editor's extraKeys calls it. Best-effort — any failure shows nothing.
+COMPLETE_JS = """
+window.__kernelHint = function(cm, callback){
+  var cur = cm.getCursor(), line = cm.getLine(cur.line);
+  var startCh = cur.ch;                                   // start of the typed identifier
+  while(startCh && /[A-Za-z0-9_]/.test(line.charAt(startCh - 1))) startCh--;
+  var body = 'code=' + encodeURIComponent(cm.getValue()) +
+             '&line=' + (cur.line + 1) + '&col=' + cur.ch;
+  fetch('/complete', {method: 'POST',
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: body})
+    .then(function(r){ return r.json(); })
+    .then(function(data){
+      var comps = (data && data.completions) || [];
+      if(!comps.length){ callback(null); return; }
+      callback({
+        list: comps.map(function(c){ return {text: c.name, displayText: c.name}; }),
+        from: CodeMirror.Pos(cur.line, startCh),
+        to: CodeMirror.Pos(cur.line, cur.ch)
+      });
+    })
+    .catch(function(){ callback(null); });   // never break typing
+};
+window.__kernelHint.async = true;            // tells CodeMirror it uses a callback
 """
 
 
@@ -1794,9 +1823,12 @@ _LOCAL_HDRS = (
     Script(src="/vendor/css-scope.js"),
     Link(rel="stylesheet", href="/vendor/codemirror.min.css"),
     Link(rel="stylesheet", href="/vendor/monokai.min.css"),
+    Link(rel="stylesheet", href="/vendor/show-hint.min.css"),
     Script(src="/vendor/codemirror.min.js"),
     Script(src="/vendor/python.min.js"),
     Script(src="/vendor/placeholder.min.js"),
+    Script(src="/vendor/show-hint.min.js"),     # Ctrl+Space completion dropdown
+    Script(COMPLETE_JS),                          # defines window.__kernelHint
     Link(rel="stylesheet", href="/vendor/katex.min.css"),
     Script(src="/vendor/katex.min.js"),
     Script(src="/vendor/auto-render.min.js"),
@@ -2075,6 +2107,21 @@ def internal_cell_insert(dialog: str, content: str = "", cell_type: str = "code"
         m = backend.add(dialog, content, cell_type)
     STATE["cells_dirty"] = True
     return _json({"ok": True, "message": f"inserted cell {m.id}"})
+
+
+@rt("/complete", methods=["post"])
+def complete(code: str = "", line: int = 1, col: int = 0):
+    """Code-completion proxy: forward to the kernel's live namespace (Ctrl+Space in
+    a code cell). Only the kernel backend introspects a namespace; other backends
+    return nothing. Best-effort — never raises into the editor."""
+    backend = STATE["backend"]
+    comps = []
+    if hasattr(backend, "complete"):
+        try:
+            comps = backend.complete(STATE["dialog"], code, int(line), int(col))
+        except Exception:  # noqa: BLE001
+            comps = []
+    return _json({"completions": comps})
 
 
 @rt("/stream/refresh")

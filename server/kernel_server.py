@@ -13,9 +13,10 @@ it refuses to start without --token, and then every request must carry a matchin
 Endpoints (simple JSON):
     GET  /test_route            -> "here"          (what doctor/solveit_client probe)
     GET  /health                -> {ok, dialogs}
-    POST /exec    {dialog,code}                    -> {output, rich}
-    POST /prompt  {dialog,content,model,context}   -> {output, model}
-    POST /reset   {dialog}                 -> {ok}
+    POST /exec     {dialog,code}                    -> {output, rich}
+    POST /complete {dialog,code,line,col}           -> {completions}
+    POST /prompt   {dialog,content,model,context}   -> {output, model}
+    POST /reset    {dialog}                 -> {ok}
 
 Run:  python -m server.kernel_server --port 5001        # laptop ('local' target)
       python -m server.kernel_server --port 5001        # on the H100, then tunnel
@@ -113,6 +114,28 @@ def _rich_repr(val) -> dict | None:
         if html:
             return {"type": "text/html", "data": html}
     return None
+
+
+def complete_code(dialog: str, code: str, line: int, col: int) -> list:
+    """Jupyter-style completions for `code` at (line, col), against the dialog's
+    live namespace. jedi introspects the actual objects in the kernel — so after
+    you run `import numpy as np`, `np.ar` offers `arange`; `df.` offers columns —
+    without executing the code being typed. `line` is 1-based, `col` 0-based
+    (jedi's convention). Returns [] if jedi isn't installed or anything goes wrong
+    (completion is best-effort; never break typing)."""
+    try:
+        import jedi
+    except ImportError:
+        return []
+    try:
+        script = jedi.Interpreter(code, namespaces=[_ns(dialog)])
+        comps = script.complete(line, col)
+    except Exception:  # noqa: BLE001 — jedi can raise on odd partial source
+        return []
+    out = []
+    for c in comps[:50]:                     # cap: a dropdown needs only so many
+        out.append({"name": c.name, "type": c.type})
+    return out
 
 
 def run_code(dialog: str, code: str) -> tuple[str, list]:
@@ -284,6 +307,10 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/exec":
             out, rich = run_code(payload.get("dialog", "default"), payload.get("code", ""))
             return self._send(200, {"output": out, "rich": rich})
+        if path == "/complete":
+            comps = complete_code(payload.get("dialog", "default"), payload.get("code", ""),
+                                  int(payload.get("line", 1)), int(payload.get("col", 0)))
+            return self._send(200, {"completions": comps})
         if path == "/prompt":
             out = run_prompt(payload.get("dialog", "default"),
                              payload.get("content", ""), payload.get("model", "claude"),

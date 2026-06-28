@@ -213,6 +213,18 @@ insert **Code / Note / Ask AI** above or below — so the shortcuts are
 discoverable. Converting a cell keeps its source text (a prompt's question
 becomes the new source) and clears any stale output.
 
+#### Code completion (`Ctrl+Space`)
+
+In a code cell, press **`Ctrl+Space`** for Jupyter-style completion. It's
+**namespace-aware**: completions come from the kernel's live state via
+[jedi](https://github.com/davidhalter/jedi), so after you run `import numpy as
+np`, typing `np.ar` offers `arange`; after `df = pd.read_csv(...)`, `df.` offers
+its columns and methods. Like Jupyter, it completes against what you've actually
+**run** — variables you've typed but not executed are inferred from the source
+where possible. Completion needs the **kernel** backend (it introspects a real
+namespace); the mock/Claude-only targets don't offer it, and it's part of the
+`kernel` extra.
+
 #### The AI sees the notebook
 
 Like a real SolveIt dialog, an *Ask AI* cell isn't answered in isolation — the

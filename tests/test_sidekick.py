@@ -1690,3 +1690,42 @@ def test_toc_query_is_scoped_to_one_stream():
     import sidekick.app as app
     assert "getElementById('stream')" in app.TOC_JS
     assert "#stream .note-view" not in app.TOC_JS      # the doubling selector is gone
+
+
+# ---- code completion (Ctrl+Space, kernel-backed) ----------------------------
+def test_complete_code_uses_live_namespace():
+    # jedi introspects the dialog's executed namespace: after `import numpy as np`
+    # and a list var, np.ar -> arange and xs.app -> append.
+    pytest.importorskip("jedi")
+    from server.kernel_server import complete_code, run_code
+    run_code("cmpl/d", "import numpy as np\nxs = [1, 2, 3]")
+    np_names = [c["name"] for c in complete_code("cmpl/d", "np.ar", 1, 5)]
+    assert "arange" in np_names
+    xs_names = [c["name"] for c in complete_code("cmpl/d", "xs.app", 1, 6)]
+    assert "append" in xs_names
+
+
+def test_complete_code_never_raises_on_bad_input():
+    pytest.importorskip("jedi")
+    from server.kernel_server import complete_code
+    assert isinstance(complete_code("cmpl/empty", "", 1, 0), list)   # no crash
+
+
+def test_complete_route_forwards_to_backend():
+    import sidekick.app as app
+    from starlette.testclient import TestClient
+    class FakeKernel:
+        def complete(self, dialog, code, line, col):
+            return [{"name": "arange", "type": "function"}]
+    app.STATE["backend"] = FakeKernel(); app.STATE["dialog"] = "d"
+    r = TestClient(app.app).post("/complete", data={"code": "np.ar", "line": 1, "col": 5})
+    assert r.json()["completions"][0]["name"] == "arange"
+
+
+def test_complete_route_empty_when_backend_cannot_complete():
+    import sidekick.app as app
+    from sidekick.client import MockBackend
+    from starlette.testclient import TestClient
+    app.STATE["backend"] = MockBackend()           # no .complete method
+    r = TestClient(app.app).post("/complete", data={"code": "x", "line": 1, "col": 1})
+    assert r.json() == {"completions": []}

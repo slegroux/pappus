@@ -446,6 +446,16 @@ class HttpKernelBackend(_InMemoryBackend):
         self._save()                         # persist the new output/plots
         return m
 
+    def complete(self, dialog: str, code: str, line: int, col: int) -> list:
+        """Code completions at (line, col) from the kernel's live namespace.
+        Best-effort: any failure yields no completions rather than an error."""
+        try:
+            r = self._post("/complete", {"dialog": dialog, "code": code,
+                                         "line": line, "col": col})
+            return r.get("completions", [])
+        except Exception:  # noqa: BLE001 — completion must never break typing
+            return []
+
     def rename(self, old: str, new: str) -> None:
         # Move the message list; also re-key the server-side kernel namespace
         # so executed variables survive the rename.
