@@ -859,10 +859,10 @@ _CODE_EDITOR_JS = """
       extraKeys: { 'Cmd-Enter': function(){ cm.save(); runCell(); },
                    'Ctrl-Enter': function(){ cm.save(); runCell(); },
                    'Shift-Enter': function(){ cm.save(); runCell(); },   // Jupyter convention
-                   'Ctrl-Space': function(){ if(window.__kernelHint)
-                       cm.showHint({hint: window.__kernelHint, completeSingle: false}); } }
+                   'Ctrl-Space': function(){ if(window.__showCompletions) window.__showCompletions(cm); } }
     });
     cm.on('change', function(){ cm.save(); });   // keep textarea current for hx-include
+    if(window.__autocompleteOnType) window.__autocompleteOnType(cm);   // dynamic completion
     setTimeout(function(){ cm.refresh(); cm.focus(); cm.setCursor(cm.lineCount(), 0); }, 0);
   } else {
     ta.focus(); var n = ta.value.length; ta.setSelectionRange(n, n);
@@ -902,6 +902,34 @@ window.__kernelHint = function(cm, callback){
     .catch(function(){ callback(null); });   // never break typing
 };
 window.__kernelHint.async = true;            // tells CodeMirror it uses a callback
+
+// Open the completion dropdown. Tab (and Enter) accept the highlighted item —
+// the SolveIt convention. completeSingle:false so a lone match never auto-inserts
+// while you're mid-word.
+window.__showCompletions = function(cm){
+  if(!window.__kernelHint) return;
+  cm.showHint({
+    hint: window.__kernelHint,
+    completeSingle: false,
+    extraKeys: { 'Tab': function(cm, handle){ handle.pick(); } }
+  });
+};
+
+// Auto-trigger as you type (SolveIt's "dynamic autocomplete"). On a typed word
+// char or a '.', open the dropdown after a short debounce — unless one is already
+// open (it updates itself). Programmatic edits (e.g. accepting a hint) don't fire
+// inputRead, so this never loops. Debounced to stay light over the H100 tunnel.
+window.__autocompleteOnType = function(cm){
+  cm.on('inputRead', function(cm, change){
+    if(cm.state.completionActive) return;             // already open → it self-updates
+    var ch = change.text && change.text[0];
+    if(!ch || !/[\\w.]/.test(ch)) return;             // only identifier chars and '.'
+    clearTimeout(cm.__hintTimer);
+    cm.__hintTimer = setTimeout(function(){
+      if(!cm.state.completionActive) window.__showCompletions(cm);
+    }, 160);
+  });
+};
 """
 
 
