@@ -76,7 +76,17 @@ SIDEKICK_TARGET=kernel uv run python -m sidekick.cli serve
 ```
 
 > `just dev` needs [`just`](https://github.com/casey/just) (`brew install just`).
-> Run `just` to see all recipes (`dev`, `kernel`, `ui`, `test`, `doctor`).
+> Run `just` to see all recipes (`dev`, `kernel`, `ui`, `test`, `doctor`, `stop`).
+
+### Run it like a Mac app
+
+`just app` builds a double-click **`SolveIt Sidekick.app`** launcher: it starts the
+kernel server and the UI (if not already running), then opens the browser to the
+app — quitting it stops the servers it launched. Drag it to `/Applications` and
+your Dock. It's a thin launcher around the same servers (not a native wrapper),
+so it stays light; logs go to `~/Library/Logs/SolveItSidekick/`. Re-run `just app`
+if you move the project (the path is baked into the bundle). To stop everything
+from the terminal: `just stop`.
 
 The LLM SDKs (anthropic/openai/zhipuai) are in the base install, so Ask AI works
 as soon as you add a key in Settings — no extra flag needed.

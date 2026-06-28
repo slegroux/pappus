@@ -12,3 +12,6 @@ uv.lock
 # scratch design mockups (not part of the app)
 artifact.html
 preview.html
+
+# generated, machine-specific (built by `just app`)
+SolveIt Sidekick.app/

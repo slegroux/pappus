@@ -47,3 +47,70 @@ test:
 # Diagnose the kernel target (DNS, port, token, /test_route).
 doctor:
     uv run python -m sidekick.cli doctor kernel
+
+# Stop the kernel server and the UI (whatever is listening on their ports).
+stop:
+    #!/usr/bin/env bash
+    for p in {{kernel_port}} {{ui_port}}; do
+        pids=$(lsof -ti:$p 2>/dev/null || true)
+        [ -n "$pids" ] && { echo "$pids" | xargs kill 2>/dev/null || true; echo "stopped :$p"; } \
+                       || echo ":$p already free"
+    done
+
+# Build a double-click "SolveIt Sidekick.app" that starts both servers and opens
+# the browser (Quit stops them). Re-run after moving the project to refresh paths.
+app:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    APP="{{justfile_directory()}}/SolveIt Sidekick.app"
+    rm -rf "$APP"
+    mkdir -p "$APP/Contents/MacOS"
+    cat > "$APP/Contents/Info.plist" <<'PLIST'
+    <?xml version="1.0" encoding="UTF-8"?>
+    <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+    <plist version="1.0"><dict>
+      <key>CFBundleName</key><string>SolveIt Sidekick</string>
+      <key>CFBundleDisplayName</key><string>SolveIt Sidekick</string>
+      <key>CFBundleIdentifier</key><string>com.slegroux.solveit-sidekick</string>
+      <key>CFBundleVersion</key><string>1.0</string>
+      <key>CFBundleShortVersionString</key><string>1.0</string>
+      <key>CFBundlePackageType</key><string>APPL</string>
+      <key>CFBundleExecutable</key><string>launcher</string>
+    </dict></plist>
+    PLIST
+    cat > "$APP/Contents/MacOS/launcher" <<'LAUNCH'
+    #!/bin/bash
+    # GUI apps inherit a minimal PATH — restore the tools we need.
+    export PATH="/opt/homebrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    PROJ="__PROJ__"
+    UV="$(command -v uv || echo "$HOME/.local/bin/uv")"
+    LOG="$HOME/Library/Logs/SolveItSidekick"; mkdir -p "$LOG"
+    cd "$PROJ" || exit 1
+    up(){ curl -s -o /dev/null "http://localhost:$1/" 2>/dev/null; }
+    KPID=""; UPID=""
+    # 1) kernel server on :5055 (start only if not already up)
+    if ! up 5055; then
+        nohup "$UV" run --extra kernel python -m server.kernel_server --port 5055 \
+            >"$LOG/kernel.log" 2>&1 & KPID=$!
+        for i in $(seq 1 120); do up 5055 && break; sleep 0.5; done
+    fi
+    # 2) UI on :8000 — after the kernel, so it connects live (not the mock)
+    if ! up 8000; then
+        nohup env SIDEKICK_TARGET=kernel SIDEKICK_PORT=8000 "$UV" run python -m sidekick.cli serve \
+            >"$LOG/ui.log" 2>&1 & UPID=$!
+        for i in $(seq 1 60); do up 8000 && break; sleep 0.5; done
+    fi
+    open "http://localhost:8000"
+    # If WE started the UI, stay alive and supervise it so Quit (SIGTERM) stops the
+    # servers we launched. If they were already running, just front the browser & exit.
+    if [ -n "$UPID" ]; then
+        trap 'kill ${UPID:-} ${KPID:-} 2>/dev/null; exit 0' INT TERM EXIT
+        wait "$UPID"
+    fi
+    LAUNCH
+    sed -i '' "s|__PROJ__|{{justfile_directory()}}|" "$APP/Contents/MacOS/launcher"
+    chmod +x "$APP/Contents/MacOS/launcher"
+    touch "$APP"                                  # nudge LaunchServices to register it
+    echo "✓ Built: $APP"
+    echo "  Double-click it, or drag it to /Applications and your Dock."
+    echo "  Logs: ~/Library/Logs/SolveItSidekick/"
