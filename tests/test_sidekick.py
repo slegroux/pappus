@@ -1658,3 +1658,26 @@ def test_cell_insert_route_creates_note_when_asked():
     a = bk.add("ins/note", "x", "code")
     app.cell_insert(id=a.id, msg_type="note", where="below")
     assert bk.messages("ins/note")[1].msg_type == "note"
+
+
+def test_build_cmd_prompt_survives_variadic_flags(monkeypatch):
+    # `claude -p` carries multiple variadic options (--allowedTools when cell
+    # tools are on, --disallowed-tools always). A variadic option greedily eats
+    # following bare args, so the prompt positional must stay last in every mode —
+    # else the prompt is silently swallowed and Claude gets no input. Guards a
+    # bug we already hit once when --allowedTools was added.
+    from sidekick import claude_cli as cc
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/usr/bin/claude")
+    monkeypatch.delenv("SIDEKICK_CLAUDE_CLI_MODEL", raising=False)
+    for tools_on in (True, False):
+        if tools_on:
+            monkeypatch.setenv("SIDEKICK_MCP_TOKEN", "t")
+            monkeypatch.setenv("SIDEKICK_APP_URL", "http://127.0.0.1:8000")
+            monkeypatch.delenv("SIDEKICK_CELL_TOOLS", raising=False)
+        else:
+            monkeypatch.setenv("SIDEKICK_CELL_TOOLS", "0")
+        for stream in (True, False):
+            cc.CLI_SESSIONS.pop("guard/d", None)
+            cmd, _ = cc._build_cmd("guard/d", "THE_PROMPT", "ctx", stream=stream)
+            assert "--disallowed-tools" in cmd            # the always-on variadic flag
+            assert cmd[-1] == "THE_PROMPT", (tools_on, stream, cmd[-4:])
