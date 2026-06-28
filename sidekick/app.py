@@ -1243,8 +1243,16 @@ STREAM_JS = """
       var row = e.target.closest('#stream .row');
       if(!row) return;
       e.preventDefault();
+      var cid = row.id.replace('cell-', '');
+      // A note (markdown) cell renders on Esc — same as Save — instead of just
+      // dropping focus while it keeps showing the raw source. Code/prompt cells
+      // only fall back to command mode (Jupyter never runs code on Esc).
+      if(row.classList.contains('note')){
+        var save = row.querySelector('.cell-btn.run');
+        if(save){ window.__selCell = cid; save.click(); return; }  // keep it selected across the swap
+      }
       if(e.target.blur) e.target.blur();
-      window.__selectCell(row.id.replace('cell-', ''), false);
+      window.__selectCell(cid, false);
       return;
     }
     if(inEditor || e.altKey) return;               // everything below is command-mode only
