@@ -106,18 +106,23 @@ def _trunc_middle(s: str, n: int) -> str:
     return f"{s[:half]}\n…\n{s[-half:]}"
 
 
-def _cell_xml(m: "Msg", out_trunc: int) -> str:
-    """Render one cell as an XML-ish block for the AI to read."""
+def _cell_xml(m: "Msg", out_trunc: int, num: int) -> str:
+    """Render one cell as an XML-ish block for the AI to read.
+
+    Each block carries `n` (the cell's 1-based number, matching the UI badge) and
+    `id` (the stable handle the cell-editing tools target), so the AI can act on
+    "fix cell 3" / "the add function" without a separate lookup."""
+    attrs = f' n="{num}" id="{m.id}"'
     if m.msg_type == "note":
-        return f"<note>\n{m.content}\n</note>"
+        return f"<note{attrs}>\n{m.content}\n</note>"
     if m.msg_type == "code":
         out = _trunc_middle(m.output or "", out_trunc)
         body = f"{m.content}\n<output>\n{out}\n</output>" if out else m.content
-        return f"<code>\n{body}\n</code>"
+        return f"<code{attrs}>\n{body}\n</code>"
     # prompt: the question plus the answer it produced
     ans = _trunc_middle(m.output or "", out_trunc)
     body = f"{m.content}\n<answer>\n{ans}\n</answer>" if ans else m.content
-    return f"<prompt>\n{body}\n</prompt>"
+    return f"<prompt{attrs}>\n{body}\n</prompt>"
 
 
 def est_tokens(text: str) -> int:
@@ -136,14 +141,14 @@ def build_context(msgs: list, upto_id: str | None = None,
     """
     out_trunc, max_chars = _ctx_limits(out_trunc, max_chars)
     cells = []                          # [(pinned, xml), ...] in notebook order
-    for m in msgs:
+    for i, m in enumerate(msgs):        # i+1 = the cell's 1-based number (matches the UI)
         if upto_id is not None and m.id == upto_id:
             break
         if getattr(m, "muted", False):
             continue
         if not (m.content or "").strip() and not (m.output or "").strip():
             continue
-        cells.append((getattr(m, "pinned", False), _cell_xml(m, out_trunc)))
+        cells.append((getattr(m, "pinned", False), _cell_xml(m, out_trunc, i + 1)))
 
     keep = [False] * len(cells)
     budget = max_chars

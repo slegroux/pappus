@@ -1606,3 +1606,38 @@ def test_mcp_server_tool_error_raises(monkeypatch):
     monkeypatch.setattr(mc, "_request", lambda *a: {"ok": False, "error": "no cell"})
     with pytest.raises(RuntimeError):
         mc._call_tool("update_cell", {"cell_id": "x", "content": "z"})
+
+
+# ---- cell numbering: visible badge + AI-context handles ----------------------
+def test_build_context_tags_cells_with_number_and_id():
+    msgs = [_m("_a", "code", "x=1"), _m("_b", "note", "hi"), _m("_c", "prompt", "q?")]
+    ctx = build_context(msgs, upto_id="_c")
+    assert '<code n="1" id="_a">' in ctx
+    assert '<note n="2" id="_b">' in ctx
+
+
+def test_build_context_numbering_is_absolute_across_muted():
+    # a muted cell still consumes its position, so visible cells keep the number
+    # the UI shows (UI numbers every row; context just omits the muted body).
+    msgs = [_m("_a", "code", "x=1"), _m("_b", "note", "SECRET", muted=True),
+            _m("_c", "code", "y=2")]
+    ctx = build_context(msgs)
+    assert "SECRET" not in ctx
+    assert 'id="_c"' in ctx and 'n="3"' in ctx        # third cell stays cell 3
+
+
+def test_cell_number_is_one_based_position():
+    import sidekick.app as app
+    bk = app.STATE["backend"]; d = "num/pos"; bk.messages(d)
+    a = bk.add(d, "a", "code"); bk.add(d, "b", "note"); c = bk.add(d, "c", "code")
+    assert app._cell_number(bk, d, a.id) == 1
+    assert app._cell_number(bk, d, c.id) == 3
+    assert app._cell_number(bk, d, "missing") is None
+
+
+def test_msgrow_shows_cell_number_badge():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    from sidekick.client import Msg
+    html = to_xml(app.MsgRow(Msg("_z", "code", "x=1"), num=4))
+    assert 'class="cell-num"' in html and ">4<" in html
