@@ -1448,12 +1448,13 @@ def Stream():
         inner = Div(*rows, _ctx_meter(msgs), cls="wrap")
     extra = ()
     if scroll_to:
-        # full-page renders (composer /send) reset scroll to the top; scroll the
-        # stream container (NOT the window) down to the just-added cell at the
-        # bottom. rAF so it runs after layout settles.
+        # The #stream swap resets the scroll container to the top; bring the target
+        # cell back into view. scrollIntoView (not scrollTop=scrollHeight) handles
+        # both a just-added cell at the bottom (composer /send) and a re-run cell in
+        # the middle (re-asking a prompt). rAF so it runs after layout settles.
         extra = (Script(f"requestAnimationFrame(function(){{var c="
-                        f"document.getElementById('cell-{scroll_to}'),"
-                        f"s=c&&c.closest('.stream');if(s)s.scrollTop=s.scrollHeight;}});"),)
+                        f"document.getElementById('cell-{scroll_to}');"
+                        f"if(c)c.scrollIntoView({{block:'center'}});}});"),)
     return Div(inner, Script(STREAM_JS), *extra, cls="stream", id="stream",
                **{"data-dialog": STATE["dialog"]})
 
@@ -2305,6 +2306,10 @@ def cell_run(id: str, content: str = ""):
     m = _msg_by_id(backend, STATE["dialog"], id)
     if m is not None and m.msg_type == "prompt" and _can_stream(backend, m.model):
         STATE["pending_stream"] = (STATE["dialog"], id)   # re-ask, streamed live
+        # The #stream swap resets the scroll container to the top, so bring the
+        # re-run cell (and its "Thinking…" spinner) back into view — otherwise a
+        # mid-notebook re-ask looks frozen because the spinner is below the fold.
+        STATE["scroll_to"] = id
     elif m is not None and m.msg_type in ("code", "prompt"):
         backend.exec(STATE["dialog"], id)
     return Stream()
