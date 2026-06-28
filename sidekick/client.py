@@ -232,6 +232,16 @@ class _InMemoryBackend:
             self._save()
         return m
 
+    def update_output(self, dialog: str, msg_id: str, output: str) -> Msg | None:
+        """Edit a cell's AI answer in place, leaving its source (the question)
+        untouched — SolveIt's editable AI response (the `n` shortcut). Used for
+        prompt cells; unlike `update`, it does NOT clear or re-run anything."""
+        m = self._find(dialog, msg_id)
+        if m is not None:
+            m.output = output
+            self._save()
+        return m
+
     def set_type(self, dialog: str, msg_id: str, msg_type: str) -> Msg | None:
         """Convert a cell to another type (code/note/prompt). The source text is
         kept — a prompt's question becomes the new source — and stale output is

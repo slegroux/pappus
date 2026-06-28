@@ -356,6 +356,45 @@ def test_cell_save_route_edits_without_executing():
     assert saved.content == "# done" and saved.output == ""
 
 
+def test_answer_save_route_edits_answer_without_touching_question():
+    """The AI answer is editable in place (SolveIt's 'n'): saving the answer keeps
+    the prompt's question and only rewrites its output — no re-ask, no wipe."""
+    import sidekick.app as app
+    app.STATE["dialog"] = "ans/save"
+    b = app.STATE["backend"]
+    b.messages("ans/save")
+    m = b.add("ans/save", "what is 2+2?", "prompt", model="claude-cli")
+    b.exec("ans/save", m.id)                      # gives it an answer to edit
+    app.cell_answer_save(id=m.id, output="It is 4. (edited)")
+    saved = b.messages("ans/save")[-1]
+    assert saved.content == "what is 2+2?"        # question untouched
+    assert saved.output == "It is 4. (edited)"    # answer rewritten in place
+
+
+def test_answer_edit_route_returns_editor_with_output():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    app.STATE["dialog"] = "ans/edit"
+    b = app.STATE["backend"]
+    b.messages("ans/edit")
+    m = b.add("ans/edit", "q?", "prompt", model="claude-cli")
+    b.update_output("ans/edit", m.id, "the answer text")
+    html = to_xml(app.cell_answer_edit(id=m.id))
+    assert "<textarea" in html and "the answer text" in html and "Save" in html
+
+
+def test_update_does_not_offer_answer_edit_for_non_prompt():
+    """A code/note cell has no AI answer to edit; the answer routes no-op for them."""
+    import sidekick.app as app
+    app.STATE["dialog"] = "ans/guard"
+    b = app.STATE["backend"]
+    b.messages("ans/guard")
+    m = b.add("ans/guard", "x = 1", "code")
+    m.output = "stale"
+    app.cell_answer_save(id=m.id, output="hacked")
+    assert b.messages("ans/guard")[-1].output == "stale"   # unchanged for non-prompt
+
+
 def test_cell_delete_route_removes_cell():
     import sidekick.app as app
     app.STATE["dialog"] = "cell/del"

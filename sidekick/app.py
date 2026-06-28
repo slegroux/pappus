@@ -800,10 +800,49 @@ def _output_views(m):
                     **{"data-stream-url": f"/stream?dialog={quote(STATE['dialog'])}&id={m.id}"}),
                 cls="answer"))
         elif m.output:
-            who = _model_label(m.model, default="SolveIt AI")
-            out.append(Div(Div(Span(who, cls="tag"), cls="who"),
-                           Div(render_md(m.output), cls="bubble md"), cls="answer"))
+            out.append(_answer_view(m))
     return out
+
+
+def _can_edit_answer() -> bool:
+    """In-process backends (mock/kernel) can edit a prompt's answer in place; the
+    remote SolveIt LiveBackend has no such hook, so its answers stay read-only."""
+    return hasattr(STATE["backend"], "update_output")
+
+
+def _answer_view(m):
+    """A prompt's AI answer, rendered read-only with click-to-edit (editing the
+    output in place — SolveIt's editable AI response). The stable `answer-<id>`
+    wrapper is the swap target for the edit/cancel/save round-trip."""
+    who = _model_label(m.model, default="SolveIt AI")
+    has = (m.output or "").strip()
+    inner = render_md(m.output) if has else Span("Empty answer — click to edit", cls="muted")
+    if _can_edit_answer():
+        edit = dict(hx_get=f"/cell/answer/edit?id={m.id}", hx_target=f"#answer-{m.id}",
+                    hx_swap="outerHTML", title="click to edit the AI's answer")
+        bubble = Div(inner, cls="bubble md clickedit", **edit)
+    else:
+        bubble = Div(inner, cls="bubble md")
+    return Div(Div(Span(who, cls="tag"), cls="who"), bubble,
+               cls="answer", id=f"answer-{m.id}")
+
+
+def _answer_edit(m):
+    """The prompt answer switched into edit mode: a textarea over `m.output` with
+    Save/Cancel. Save writes the output back without touching the question or
+    re-asking the AI; Cancel restores the rendered answer."""
+    mid = m.id
+    ta = Textarea(m.output, name="output", id=f"ta-ans-{mid}", rows="1", cls="cell-edit")
+    save = Button("Save", type="button", cls="cell-btn run",
+                  hx_post="/cell/answer/save", hx_include=f"#ta-ans-{mid}",
+                  hx_vals=json.dumps({"id": mid}),
+                  hx_target=f"#answer-{mid}", hx_swap="outerHTML")
+    cancel = Button("Cancel", type="button", cls="cell-btn",
+                    hx_get=f"/cell/answer/view?id={mid}",
+                    hx_target=f"#answer-{mid}", hx_swap="outerHTML")
+    js = _FOCUS_JS.replace("__MID__", f"ans-{mid}")
+    return Div(Div(Span("Edit answer", cls="tag"), save, cancel, cls="who"),
+               ta, Script(js), cls="answer", id=f"answer-{mid}")
 
 
 def _rendered_content(m):
@@ -1140,8 +1179,11 @@ STREAM_JS = """
     if(e.target.classList && e.target.classList.contains('cell-edit')
        && (e.metaKey || e.ctrlKey || e.shiftKey) && e.key === 'Enter'){
       e.preventDefault();
-      var row = e.target.closest('.row');
-      var btn = row && row.querySelector('.cell-btn.run');
+      // Prefer a Save/Run button inside the same answer editor; fall back to the
+      // cell's own run button. So Cmd+Enter while editing an AI answer saves the
+      // answer rather than re-asking the question.
+      var scope = e.target.closest('.answer') || e.target.closest('.row');
+      var btn = scope && scope.querySelector('.cell-btn.run');
       if(btn) btn.click();                  // Shift/Cmd/Ctrl+Enter runs; plain Enter = newline
     }
   });
@@ -2178,6 +2220,37 @@ def cell_save(id: str, content: str = ""):
     if hasattr(backend, "update"):
         backend.update(STATE["dialog"], id, content)
     return Stream()
+
+
+@rt("/cell/answer/edit")
+def cell_answer_edit(id: str):
+    """Swap a prompt's AI answer into edit mode (textarea over its output)."""
+    bk, d = STATE["backend"], STATE["dialog"]
+    m = _msg_by_id(bk, d, id)
+    if m is None or m.msg_type != "prompt" or not _can_edit_answer():
+        return Stream()
+    return _answer_edit(m)
+
+
+@rt("/cell/answer/view")
+def cell_answer_view(id: str):
+    """Swap a prompt's AI answer back to its rendered view — used by Cancel."""
+    bk, d = STATE["backend"], STATE["dialog"]
+    m = _msg_by_id(bk, d, id)
+    return _answer_view(m) if m is not None and m.msg_type == "prompt" else Stream()
+
+
+@rt("/cell/answer/save", methods=["post"])
+def cell_answer_save(id: str, output: str = ""):
+    """Persist an edited AI answer in place (no re-ask), then render it read-only.
+    Only prompt cells have an editable answer, so other types are left untouched."""
+    bk, d = STATE["backend"], STATE["dialog"]
+    m = _msg_by_id(bk, d, id)
+    if m is None or m.msg_type != "prompt":
+        return Stream()
+    if hasattr(bk, "update_output"):
+        bk.update_output(d, id, output)
+    return _answer_view(m)
 
 
 @rt("/cell/delete", methods=["post"])
