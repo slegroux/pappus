@@ -37,6 +37,7 @@ kernel = [
     "scikit-learn",
     "scipy",
     "torch",
+    "jedi",          # code completion: introspects the live kernel namespace
 ]
 ml = ["solveit-sidekick[kernel]"]   # back-compat alias for the former name
 
