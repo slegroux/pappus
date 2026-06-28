@@ -554,22 +554,33 @@ def test_cell_mute_route_toggles():
 # routes the `claude-cli` model to it. Tests drive the module directly, plus one
 # that asserts run_prompt delegates.
 def _mk_cli_run(capture, result="ok", session_id="sid", returncode=0,
-                is_error=False, stdout=None):
-    """Build a fake _run_cli that records the argv/env and returns a JSON result."""
+                is_error=False, stdout=None, usage=None, cost=None):
+    """Build a fake _run_cli that records the argv/env and returns a JSON result.
+
+    `usage`/`cost` mirror the `usage` block and `total_cost_usd` the real CLI emits
+    on its terminal result, so tests can exercise the running-cost accrual."""
     import json as _json
     from types import SimpleNamespace
 
     def run(cmd, cwd, env, timeout):
         capture.append({"cmd": cmd, "cwd": cwd, "env": env, "timeout": timeout})
-        body = _json.dumps({"result": result, "session_id": session_id,
-                            "is_error": is_error})
+        obj = {"result": result, "session_id": session_id, "is_error": is_error}
+        if usage is not None:
+            obj["usage"] = usage
+        if cost is not None:
+            obj["total_cost_usd"] = cost
+        body = _json.dumps(obj)
         return SimpleNamespace(returncode=returncode,
                                stdout=body if stdout is None else stdout, stderr="")
     return run
 
 
-def _mk_cli_popen(capture, deltas, session_id="sid", is_error=False):
-    """Build a fake _popen whose stdout emits stream-json lines for `deltas`."""
+def _mk_cli_popen(capture, deltas, session_id="sid", is_error=False,
+                  usage=None, cost=None):
+    """Build a fake _popen whose stdout emits stream-json lines for `deltas`.
+
+    `usage`/`cost` ride on the terminal `result` event, as the real CLI emits
+    them, so tests can exercise the running-cost accrual on the streaming path."""
     import json as _json
     from types import SimpleNamespace
 
@@ -580,9 +591,13 @@ def _mk_cli_popen(capture, deltas, session_id="sid", is_error=False):
             lines.append(_json.dumps({"type": "stream_event",
                 "event": {"type": "content_block_delta",
                           "delta": {"type": "text_delta", "text": d}}}) + "\n")
-        lines.append(_json.dumps({"type": "result", "session_id": session_id,
-                                  "is_error": is_error,
-                                  "result": "".join(deltas)}) + "\n")
+        result_ev = {"type": "result", "session_id": session_id,
+                     "is_error": is_error, "result": "".join(deltas)}
+        if usage is not None:
+            result_ev["usage"] = usage
+        if cost is not None:
+            result_ev["total_cost_usd"] = cost
+        lines.append(_json.dumps(result_ev) + "\n")
         # stream() reads via iter(stdout.readline, "") — return "" at EOF.
         it = iter(lines)
 
@@ -704,6 +719,62 @@ def test_claude_cli_stream_resumes_on_append(monkeypatch):
     cmd = cap[-1]["cmd"]
     assert "--resume" in cmd and "sid-7" in cmd             # streaming resume
     assert "y=2" in cmd[-1] and "x=1" not in cmd[-1]        # only the delta
+
+
+def test_claude_cli_call_accrues_running_cost(monkeypatch):
+    import sidekick.claude_cli as cc
+    cc.CLI_SESSIONS.pop("cli/c1", None)
+    cc.CLI_COST.pop("cli/c1", None)
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/bin/claude")
+    usage = {"input_tokens": 300, "output_tokens": 600,
+             "cache_read_input_tokens": 20000, "cache_creation_input_tokens": 2000}
+    monkeypatch.setattr(cc, "_run_cli",
+                        _mk_cli_run([], usage=usage, cost=0.012, session_id="s"))
+
+    cc.call("cli/c1", "q1", context="<code>x=1</code>")
+    cc.call("cli/c1", "q2", context="<code>x=1</code>\n<code>y=2</code>")
+    agg = cc.cost_for("cli/c1")
+    assert agg["turns"] == 2
+    assert agg["usd"] == pytest.approx(0.024)              # summed across turns
+    assert agg["input"] == 600 and agg["output"] == 1200
+    assert agg["cache_read"] == 40000 and agg["cache_write"] == 4000
+
+
+def test_claude_cli_stream_accrues_cost_and_skips_errors(monkeypatch):
+    import sidekick.claude_cli as cc
+    cc.CLI_SESSIONS.pop("cli/c2", None)
+    cc.CLI_COST.pop("cli/c2", None)
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/bin/claude")
+    usage = {"input_tokens": 100, "output_tokens": 200, "cache_read_input_tokens": 5000}
+    monkeypatch.setattr(cc, "_popen",
+                        _mk_cli_popen([], ["hi"], usage=usage, cost=0.003))
+    list(cc.stream("cli/c2", "q", context="<code>x=1</code>"))
+    agg = cc.cost_for("cli/c2")
+    assert agg["turns"] == 1 and agg["usd"] == pytest.approx(0.003)
+    assert agg["input"] == 100 and agg["cache_read"] == 5000
+
+    # an errored turn must not accrue (we'd be billing for a failure)
+    monkeypatch.setattr(cc, "_popen",
+                        _mk_cli_popen([], [], is_error=True, usage=usage, cost=0.003))
+    list(cc.stream("cli/c2", "q2", context="<code>x=1</code>\n<code>z=3</code>"))
+    assert cc.cost_for("cli/c2")["turns"] == 1               # unchanged
+
+
+def test_ctx_meter_shows_running_cost(monkeypatch):
+    import sidekick.app as app
+    import sidekick.claude_cli as cc
+    from sidekick.client import Msg
+    cc.CLI_COST["cli/m1"] = {"usd": 0.0123, "turns": 3, "input": 900,
+                             "output": 1700, "cache_read": 60000, "cache_write": 5000}
+    msgs = [Msg(id="_a", msg_type="prompt", content="hi", output="there")]
+    text = app._ctx_meter_text(msgs, "cli/m1")
+    assert "$0.01 this session · 3 turns" in text            # reported dollar figure
+    assert "AI context" in text                              # still shows context size
+
+    # subscription that reports no dollars -> token-based estimate, marked with ~
+    cc.CLI_COST["cli/m2"] = {"usd": 0.0, "turns": 1, "input": 1000, "output": 2000,
+                             "cache_read": 0, "cache_write": 0}
+    assert "~$" in app._ctx_meter_text(msgs, "cli/m2")
 
 
 def test_run_prompt_surfaces_context_when_no_key(monkeypatch, tmp_path):

@@ -20,7 +20,7 @@ from starlette.datastructures import UploadFile
 
 from .targets import get_target, list_targets, list_models, default_model
 from .client import connect, build_context, est_tokens, _InMemoryBackend
-from .claude_cli import stream as stream_claude, CLI_MODELS
+from .claude_cli import stream as stream_claude, cost_for, CLI_MODELS
 from . import secrets_store, export
 from . import paper as paperlib
 
@@ -1100,6 +1100,11 @@ STREAM_JS = """
       renderMath(el); addCopyButtons(el);              // typeset math + copy buttons as it streams
       var s = el.closest('.stream'); if(s) s.scrollTop = s.scrollHeight;
     });
+    es.addEventListener('cost', function(e){
+      // Turn finished: refresh the foot-of-stream meter's running cost in place.
+      var meter = document.getElementById('ctxMeter');
+      if(meter) meter.textContent = e.data;
+    });
     es.addEventListener('done', function(e){
       el.classList.remove('streaming');                // generation finished → drop the caret
       renderMath(el); addCopyButtons(el);
@@ -1322,8 +1327,38 @@ STREAM_JS = """
 """
 
 
-def _ctx_meter(msgs):
-    """A live read-out of how much of the notebook the AI would see right now."""
+# Published API rates ($/1M tokens) for the models the subscription CLI routes
+# to, so we can show an estimated session cost when the CLI reports
+# total_cost_usd == 0 (some Max setups do). Cache reads bill ~0.1x input, writes
+# ~1.25x. Keep in sync with kernel_server.MODEL_NAMES / shared/models.md.
+_PRICES = {"opus": (5.0, 25.0), "sonnet": (3.0, 15.0), "haiku": (1.0, 5.0)}
+
+
+def _est_usd(cost: dict, tier: str = "sonnet") -> float:
+    """Estimate session cost from accumulated token usage at published API rates —
+    the fallback when the CLI itself doesn't report a dollar figure. Defaults to the
+    Sonnet tier (the notebook CLI's default model)."""
+    in_rate, out_rate = _PRICES.get(tier, _PRICES["sonnet"])
+    return (cost["input"] * in_rate + cost["output"] * out_rate
+            + cost["cache_read"] * in_rate * 0.1
+            + cost["cache_write"] * in_rate * 1.25) / 1_000_000
+
+
+def _cost_label(cost: dict) -> str:
+    """Compact running-cost segment for the context meter: the dollar figure the
+    Max-plan CLI reported this session, or a token-based estimate if it reported
+    none, plus the turn count."""
+    usd, estimated = cost["usd"], False
+    if usd <= 0:                                   # subscription reported no $ — estimate
+        usd, estimated = _est_usd(cost), True
+    money = f"${usd:.2f}" if usd >= 0.01 else f"${usd:.3f}"
+    turns = cost["turns"]
+    return f"{'~' if estimated else ''}{money} this session · {turns} turn{'' if turns == 1 else 's'}"
+
+
+def _ctx_meter_text(msgs, dialog=None):
+    """The foot-of-stream read-out: how much of the notebook the AI would see right
+    now, plus — once the session has run a turn — its running cost."""
     toks = est_tokens(build_context(msgs))
     n_muted = sum(1 for m in msgs if m.muted)
     n_pin = sum(1 for m in msgs if m.pinned)
@@ -1332,7 +1367,18 @@ def _ctx_meter(msgs):
         bits.append(f"{n_pin} pinned")
     if n_muted:
         bits.append(f"{n_muted} muted")
-    return Div(" · ".join(bits), cls="ctx-meter", title="estimated; ~4 chars/token")
+    cost = cost_for(dialog if dialog is not None else STATE["dialog"])
+    if cost and cost["turns"]:
+        bits.append(_cost_label(cost))
+    return " · ".join(bits)
+
+
+def _ctx_meter(msgs):
+    """A live read-out of context size and running cost. `id` so the SSE answer
+    stream can refresh just this line (a `cost` event) after each turn."""
+    return Div(_ctx_meter_text(msgs), id="ctxMeter", cls="ctx-meter",
+               title="context is estimated (~4 chars/token); running cost is what the "
+                     "Max-plan CLI reports this session would bill at API rates")
 
 
 def Stream():
@@ -2201,6 +2247,9 @@ def stream_answer(dialog: str, id: str):
             STATE["pending_stream"] = None
         STATE["cells_dirty"] = False
         yield sse_message(str(render_md(m.output)), event="msg")   # final state
+        # Refresh the foot-of-stream meter with this turn's accrued cost/usage
+        # without a full reload (the client swaps just #ctxMeter's text).
+        yield sse_message(_ctx_meter_text(backend.messages(dialog), dialog), event="cost")
         # 'reload' tells the client to refresh #stream so the AI's cell edits show.
         yield sse_message(Div("reload" if edited else ""), event="done")
 
