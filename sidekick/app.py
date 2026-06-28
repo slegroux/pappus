@@ -81,9 +81,15 @@ try:
     class _MdRenderer(mistune.HTMLRenderer):
         """Markdown HTML renderer that syntax-highlights fenced code blocks
         (```python …```) via Pygments — on the light palette, so illustrative code
-        in an answer/note reads differently from a runnable code cell."""
+        in an answer/note reads differently from a runnable code cell.
+        A ```mermaid fence is emitted as a raw <pre class="mermaid"> that mermaid.js
+        turns into a diagram client-side (see renderMermaid in the page JS)."""
         def block_code(self, code, info=None):
             lang = (info or "").strip().split(None, 1)[0] if (info or "").strip() else ""
+            if lang == "mermaid":
+                # mermaid reads the element's textContent, so escape the source
+                # rather than highlighting it; the browser decodes it back.
+                return f'<pre class="mermaid">{mistune.util.escape(code or "")}</pre>'
             html = _highlight_md(code, lang)
             return html if html else super().block_code(code, info)
 
@@ -934,6 +940,8 @@ _CODE_EDITOR_JS = """
       extraKeys: { 'Cmd-Enter': function(){ cm.save(); runCell(); },
                    'Ctrl-Enter': function(){ cm.save(); runCell(); },
                    'Shift-Enter': function(){ cm.save(); runCell(); },   // Jupyter convention
+                   'Cmd-/': function(){ window.__toggleComment(cm); },   // Jupyter convention
+                   'Ctrl-/': function(){ window.__toggleComment(cm); },
                    'Ctrl-Space': function(){ if(window.__showCompletions) window.__showCompletions(cm); } }
     });
     cm.on('change', function(){ cm.save(); });   // keep textarea current for hx-include
@@ -950,6 +958,37 @@ _FOCUS_JS = """
   var t = document.getElementById('ta-__MID__');
   if(t){ t.focus(); var n = t.value.length; t.setSelectionRange(n, n); }
 })();
+"""
+
+# Cmd/Ctrl+/ toggles Python line comments on the selected lines, the way Jupyter
+# (and most editors) do. Self-contained — we don't vendor CodeMirror's comment
+# addon. Comments at the shallowest indentation of the block; if every non-blank
+# line is already commented, it uncomments instead. Defined once; the cell and
+# composer editors bind it in their extraKeys.
+COMMENT_JS = """
+window.__toggleComment = function(cm){
+  cm.operation(function(){
+    cm.listSelections().forEach(function(sel){
+      var from = Math.min(sel.anchor.line, sel.head.line);
+      var to   = Math.max(sel.anchor.line, sel.head.line);
+      var lines = [];
+      for(var i = from; i <= to; i++){ if(/\\S/.test(cm.getLine(i))) lines.push(i); }
+      if(!lines.length) lines = [from];                 // act on a lone blank line too
+      var commented = lines.every(function(i){ return /^\\s*#/.test(cm.getLine(i)); });
+      var indent = Infinity;
+      lines.forEach(function(i){ indent = Math.min(indent, cm.getLine(i).match(/^\\s*/)[0].length); });
+      if(!isFinite(indent)) indent = 0;
+      lines.forEach(function(i){
+        if(commented){
+          var m = cm.getLine(i).match(/^(\\s*)#( ?)/);  // strip the leading '# ' (or '#')
+          if(m) cm.replaceRange('', {line:i, ch:m[1].length}, {line:i, ch:m[1].length + 1 + m[2].length});
+        } else {
+          cm.replaceRange('# ', {line:i, ch:indent});
+        }
+      });
+    });
+  });
+};
 """
 
 # Ctrl+Space completion: an async CodeMirror hint that asks /complete (which
@@ -1037,6 +1076,21 @@ STREAM_JS = """
     ]}); } catch(e){}
   }
 
+  // Mermaid: turn <pre class="mermaid"> (from ```mermaid fences) into diagrams.
+  // No-op offline / before mermaid loads. Initialised once with manual start so
+  // we control *when* it runs (after a render, never mid-stream on partial source).
+  function renderMermaid(el){
+    if(!el || !window.mermaid) return;
+    if(!window.__mermaidInit){
+      try { window.mermaid.initialize({ startOnLoad:false, securityLevel:'strict' }); } catch(e){}
+      window.__mermaidInit = true;
+    }
+    var nodes = el.querySelectorAll('pre.mermaid:not([data-processed])');
+    if(!nodes.length) return;
+    try { var p = window.mermaid.run({ nodes: nodes }); if(p && p.catch) p.catch(function(){}); }
+    catch(e){}
+  }
+
   // Add a hover Copy button to each highlighted code block in answers/notes.
   function copyText(text, btn){
     function done(){ btn.textContent = 'Copied!'; setTimeout(function(){ btn.textContent = 'Copy'; }, 1200); }
@@ -1065,7 +1119,7 @@ STREAM_JS = """
     });
   }
   document.querySelectorAll('#stream .md').forEach(function(el){   // already-rendered answers/notes
-    renderMath(el); addCopyButtons(el);
+    renderMath(el); renderMermaid(el); addCopyButtons(el);
   });
   if(window.buildTOC) window.buildTOC();   // refresh the table of contents on every render
 
@@ -1107,7 +1161,7 @@ STREAM_JS = """
     });
     es.addEventListener('done', function(e){
       el.classList.remove('streaming');                // generation finished → drop the caret
-      renderMath(el); addCopyButtons(el);
+      renderMath(el); renderMermaid(el); addCopyButtons(el);  // diagrams only once source is complete
       es.close(); el.removeAttribute('data-stream-url'); el.__streaming = false;
       // The AI's tools edited cells this turn — refresh #stream so they appear.
       if(e && e.data && e.data.indexOf('reload') >= 0 && window.htmx){
@@ -1407,10 +1461,42 @@ def Stream():
 COMPOSER_JS = """
 var composerCM = null;   // CodeMirror instance while the composer is in Code mode
 
+// Drop an immediate "Thinking…" wheel into the stream the instant you send an
+// Ask-AI prompt — before any server round-trip. The htmx response then swaps all
+// of #stream and replaces it: with the streaming answer (Claude Max) or the final
+// answer (blocking API models, which otherwise showed no indicator at all). So a
+// wheel is always visible while you wait, regardless of model or speed.
+function _showPendingSpinner(){
+  var stream = document.getElementById('stream');
+  if(!stream || document.getElementById('pending-spinner')) return;
+  var box = stream.querySelector('.wrap') || stream;
+  var d = document.createElement('div');
+  d.id = 'pending-spinner'; d.className = 'row';
+  d.innerHTML = '<div class="answer"><div class="bubble md"><span class="thinking">' +
+                '<span class="spinner"></span>Thinking…</span></div></div>';
+  box.appendChild(d);
+  stream.scrollTop = stream.scrollHeight;
+}
 function _submitComposer(){
   if(composerCM) composerCM.save();                 // flush editor -> textarea
   var ta = document.getElementById('composerInput');
-  if(ta && ta.value.trim()) document.getElementById('composerForm').submit();
+  if(!ta || !ta.value.trim()) return;
+  var isPrompt = (document.getElementById('msgType').value === 'prompt');
+  // requestSubmit() fires the submit event so htmx posts and swaps just #stream
+  // (no full-page reload). htmx serializes the form synchronously, so it's safe
+  // to clear the composer right after.
+  document.getElementById('composerForm').requestSubmit();
+  if(isPrompt) _showPendingSpinner();               // instant feedback until the swap lands
+  ta.value = '';
+  if(composerCM) composerCM.setValue('');
+}
+// A successful /send swaps #stream and so removes the optimistic spinner; but if
+// the request errors (no swap), clear the stray wheel so it can't hang forever.
+if(!window.__pendingSpinnerCleanup){
+  window.__pendingSpinnerCleanup = true;
+  document.addEventListener('htmx:afterRequest', function(){
+    var s = document.getElementById('pending-spinner'); if(s) s.remove();
+  });
 }
 function _initComposerCM(){
   var ta = document.getElementById('composerInput');
@@ -1421,6 +1507,8 @@ function _initComposerCM(){
     placeholder: '# code…  Shift+Enter to run · Enter for newline · Tab switches mode',
     extraKeys: {
       'Shift-Enter': _submitComposer, 'Cmd-Enter': _submitComposer, 'Ctrl-Enter': _submitComposer,
+      'Cmd-/': function(){ window.__toggleComment(composerCM); },
+      'Ctrl-/': function(){ window.__toggleComment(composerCM); },
       'Tab': function(){ cycleMode(1); }, 'Shift-Tab': function(){ cycleMode(-1); }
     }
   });
@@ -1547,11 +1635,15 @@ def Composer():
             Div(
                 Div(mode("prompt", "Ask AI"), mode("code", "Code"),
                     mode("note", "Note"), cls="modes", id="modeChips"),
-                Div(ModelSelect(), Button("↑", cls="send", type="submit"),
+                Div(ModelSelect(), Button("↑", cls="send", type="button",
+                                          onclick="_submitComposer()"),
                     style="display:flex;align-items:center;gap:8px"),
                 cls="row2",
             ),
+            # htmx swaps just #stream (no full-page reload) so the answer streams
+            # sooner; native method/action stays as a no-JS fallback.
             method="post", action="/send", id="composerForm", cls="box",
+            hx_post="/send", hx_target="#stream", hx_swap="outerHTML",
         ),
         Div("Connected to ", Strong(STATE["target_name"]),
             " · switch target top-right to move between laptop and H100", cls="hint"),
@@ -2043,11 +2135,13 @@ _LOCAL_HDRS = (
     Script(src="/vendor/python.min.js"),
     Script(src="/vendor/placeholder.min.js"),
     Script(src="/vendor/show-hint.min.js"),     # Ctrl+Space completion dropdown
+    Script(COMMENT_JS),                           # defines window.__toggleComment (Cmd/Ctrl+/)
     Script(COMPLETE_JS),                          # defines window.__kernelHint
     Script(STREAM_SEL_JS),                        # Ask-AI bubble over dialog-stream selections
     Link(rel="stylesheet", href="/vendor/katex.min.css"),
     Script(src="/vendor/katex.min.js"),
     Script(src="/vendor/auto-render.min.js"),
+    Script(src="/vendor/mermaid.min.js"),         # ```mermaid → diagrams (renderMermaid)
     Script(src="/vendor/sortable.min.js"),
 )
 app, rt = fast_app(pico=False, default_hdrs=False, hdrs=_LOCAL_HDRS)
@@ -2164,7 +2258,7 @@ def dialog_delete_bulk(names: str = "[]"):
 
 
 @rt("/send", methods=["post"])
-def send(content: str, msg_type: str = "prompt", model: str = None):
+def send(content: str, msg_type: str = "prompt", model: str = None, htmx=None):
     content = (content or "").strip()
     if model:
         STATE["model"] = model           # remember last-used model
@@ -2174,14 +2268,16 @@ def send(content: str, msg_type: str = "prompt", model: str = None):
         backend = STATE["backend"]
         use_model = STATE["model"] if msg_type == "prompt" else None
         m = backend.add(STATE["dialog"], content, msg_type, model=use_model)
-        STATE["scroll_to"] = m.id            # /send full-reloads → scroll to the new cell
+        STATE["scroll_to"] = m.id            # render scrolls to the new cell
         if msg_type == "prompt" and _can_stream(backend, use_model):
             # Defer the AI call: the page renders an SSE-wired answer that streams
             # tokens in (the browser opens /stream), instead of blocking here.
             STATE["pending_stream"] = (STATE["dialog"], m.id)
         elif msg_type in ("code", "prompt"):
             backend.exec(STATE["dialog"], m.id)
-    return Page()
+    # The composer posts via htmx → swap just #stream (no full-page reload, so the
+    # answer starts streaming sooner). A no-JS submit gets the whole page.
+    return Stream() if (htmx and htmx.request) else Page()
 
 
 def _msg_by_id(backend, dialog: str, mid: str):
@@ -2233,7 +2329,7 @@ def stream_answer(dialog: str, id: str):
             return
         STATE["cells_dirty"] = False                     # the AI's tools may flip this
         acc = ""
-        for delta in stream_claude(dialog, m.content, context):
+        for delta in stream_claude(dialog, m.content, context, model=m.model):
             acc += delta
             # str() unwraps NotStr -> raw (already-safe) markdown HTML for the data lines
             yield sse_message(str(render_md(acc)), event="msg")

@@ -52,7 +52,7 @@ def test_token_from_env(monkeypatch):
 
 def test_models_and_default():
     ids = [m["id"] for m in targets.list_models()]
-    assert ids == ["claude", "claude-cli", "glm", "codex"]
+    assert ids == ["claude", "claude-cli", "claude-cli-fast", "glm", "codex"]
     assert targets.default_model() == "claude-cli"
 
 
@@ -963,7 +963,7 @@ def test_stream_route_emits_deltas_and_persists_output(monkeypatch):
     b.messages("stream/route")
     m = b.add("stream/route", "add x and y?", "prompt", model="claude-cli")
     app.STATE["pending_stream"] = ("stream/route", m.id)
-    monkeypatch.setattr(app, "stream_claude", lambda d, c, ctx: iter(["4", "2"]))
+    monkeypatch.setattr(app, "stream_claude", lambda d, c, ctx, model=None: iter(["4", "2"]))
 
     resp = app.stream_answer(dialog="stream/route", id=m.id)
 
@@ -1880,3 +1880,45 @@ def test_stream_js_toggles_streaming_caret():
     import sidekick.app as app
     assert "classList.add('streaming')" in app.STREAM_JS
     assert "classList.remove('streaming')" in app.STREAM_JS
+
+
+# ---- latency reductions: htmx swap on send + fast model ---------------------
+def test_send_htmx_returns_stream_fragment_not_full_page():
+    # The composer posts via htmx, so /send returns just #stream (fast swap) when
+    # HX-Request is set, and the whole page only for a no-JS submit.
+    import sidekick.app as app
+    from starlette.testclient import TestClient
+    from sidekick.client import MockBackend
+    app.STATE["backend"] = MockBackend(); app.STATE["dialog"] = "send/htmx"
+    c = TestClient(app.app)
+    frag = c.post("/send", data={"content": "a note", "msg_type": "note"},
+                  headers={"HX-Request": "true"}).text
+    full = c.post("/send", data={"content": "b note", "msg_type": "note"}).text
+    assert 'id="stream"' in frag and "<html" not in frag.lower()
+    assert "<html" in full.lower()
+
+
+def test_claude_cli_fast_model_uses_haiku(monkeypatch):
+    from sidekick import claude_cli as cc
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/usr/bin/claude")
+    monkeypatch.delenv("SIDEKICK_CLAUDE_CLI_MODEL", raising=False)
+    cc.CLI_SESSIONS.pop("fast/d", None)
+    cmd, _ = cc._build_cmd("fast/d", "hi", "", stream=True, model="claude-cli-fast")
+    assert cmd[cmd.index("--model") + 1] == "haiku"
+    # the default CLI model adds no --model flag (inherits the subscription default)
+    cc.CLI_SESSIONS.pop("norm/d", None)
+    cmd2, _ = cc._build_cmd("norm/d", "hi", "", stream=True, model="claude-cli")
+    assert "--model" not in cmd2
+    assert "claude-cli-fast" in cc.CLI_MODELS          # routes through the streaming path
+
+
+def test_composer_shows_instant_pending_spinner():
+    # On an Ask-AI send the composer injects a "Thinking…" wheel immediately
+    # (client-side), so a working indicator is visible for every model — including
+    # the blocking API ones that stream nothing — until the answer swaps in.
+    import sidekick.app as app
+    js = app.COMPOSER_JS
+    assert "_showPendingSpinner" in js and "pending-spinner" in js
+    assert 'class="spinner"' in js and "Thinking" in js
+    assert "msgType" in js and "_showPendingSpinner()" in js   # gated to prompt sends
+    assert "__pendingSpinnerCleanup" in js                     # stray-spinner cleanup

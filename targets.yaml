@@ -24,6 +24,8 @@ models:
     label: Claude
   - id: claude-cli    # Claude via the `claude` CLI — your subscription (Max), no API credits
     label: Claude (Max)
+  - id: claude-cli-fast   # same subscription, Haiku tier — faster, lighter answers
+    label: Claude (Max · fast)
   - id: glm           # Zhipu GLM
     label: GLM
   - id: codex         # OpenAI Codex

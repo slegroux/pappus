@@ -21,7 +21,11 @@ import os
 import sys
 import uuid
 
-CLI_MODELS = {"claude-cli"}
+CLI_MODELS = {"claude-cli", "claude-cli-fast"}
+# A CLI model id whose answer should use a faster, cheaper model. "fast" maps to
+# the Haiku tier — roughly half the time-to-first-token of the default, for quick
+# questions where you don't need the deepest model.
+_CLI_MODEL_FLAG = {"claude-cli-fast": "haiku"}
 CLI_SESSIONS: dict[str, dict] = {}
 # Running token/cost totals per dialog, folded in from each turn's terminal
 # `result` event (see _accrue). The `claude` CLI reports a usage breakdown — and,
@@ -158,7 +162,7 @@ def _env() -> dict:
     return env
 
 
-def _build_cmd(dialog: str, content: str, context: str, stream: bool):
+def _build_cmd(dialog: str, content: str, context: str, stream: bool, model: str | None = None):
     """Build the argv and the session id we'll record. Returns (cmd, sid), or
     (None, None) if the `claude` binary isn't installed.
 
@@ -208,9 +212,11 @@ def _build_cmd(dialog: str, content: str, context: str, stream: bool):
     if tools:                               # register our cell-editing MCP server
         cmd += ["--mcp-config", _write_mcp_config(dialog),
                 "--allowedTools", *_ALLOWED_TOOLS]
-    model = os.environ.get("SIDEKICK_CLAUDE_CLI_MODEL")
-    if model:                               # else inherit the subscription default
-        cmd += ["--model", model]
+    # "fast" model selection wins; else an explicit env override; else the
+    # subscription default (no --model flag).
+    model_flag = _CLI_MODEL_FLAG.get(model) or os.environ.get("SIDEKICK_CLAUDE_CLI_MODEL")
+    if model_flag:
+        cmd += ["--model", model_flag]
     if tools:                               # `--allowedTools` is variadic; `--` stops
         cmd.append("--")                    # it from swallowing the prompt positional
     cmd.append(user_msg)                     # prompt is the trailing positional
@@ -249,9 +255,9 @@ def cost_for(dialog: str) -> dict | None:
     return CLI_COST.get(dialog)
 
 
-def call(dialog: str, content: str, context: str = "") -> str:
+def call(dialog: str, content: str, context: str = "", model: str | None = None) -> str:
     """Non-streaming: one `claude -p` call, full text back. Used by the kernel server."""
-    cmd, sid = _build_cmd(dialog, content, context, stream=False)
+    cmd, sid = _build_cmd(dialog, content, context, stream=False, model=model)
     if cmd is None:
         return MISSING
     try:
@@ -281,7 +287,7 @@ def _popen(cmd, cwd, env):
                             stdin=subprocess.DEVNULL, text=True, bufsize=1, cwd=cwd, env=env)
 
 
-def stream(dialog: str, content: str, context: str = ""):
+def stream(dialog: str, content: str, context: str = "", model: str | None = None):
     """Streaming: yield text deltas as Claude generates them (for the app's SSE route).
 
     Parses `claude -p --output-format stream-json` events, yielding each
@@ -289,7 +295,7 @@ def stream(dialog: str, content: str, context: str = ""):
     `result` event so the next turn can resume + send only the delta — same
     contract as `call`.
     """
-    cmd, sid = _build_cmd(dialog, content, context, stream=True)
+    cmd, sid = _build_cmd(dialog, content, context, stream=True, model=model)
     if cmd is None:
         yield MISSING
         return
