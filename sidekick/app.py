@@ -425,6 +425,14 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .ctx-meter{margin:18px auto 4px;text-align:center;font-size:12px;color:var(--muted);
   border-top:1px dashed var(--line);padding-top:12px}
 .answer{margin-top:6px}
+/* An Ask AI cell = question + answer as ONE bordered card, so it's unmistakably a
+   single cell (not two). A thin divider separates the question from the answer. */
+#stream .row.prompt{border:1px solid var(--line);border-radius:14px;background:var(--panel);
+  padding:9px 14px 12px}
+#stream .row.prompt .prompt-view{font-weight:500;color:var(--ink)}     /* the question */
+#stream .row.prompt .answer{margin-top:9px;border-top:1px solid var(--line);padding-top:9px}
+#stream .row.prompt .answer .bubble{background:transparent;border:none;padding:0}  /* card bounds it */
+#stream .row.prompt .answer .who .tag{border:none;padding:0;font-weight:600;color:var(--accent)}
 .md>*:first-child{margin-top:0}.md>*:last-child{margin-bottom:0}
 .md p{margin:.35em 0}.md ul,.md ol{margin:.35em 0;padding-left:1.4em}
 .md h1,.md h2,.md h3{margin:.6em 0 .3em;line-height:1.3}
@@ -708,7 +716,8 @@ def _tok_badge(m):
 
 
 def _rowcls(m):
-    return "row" + (" muted" if m.muted else "") + (" pinned" if m.pinned else "")
+    return (f"row {m.msg_type}" + (" muted" if m.muted else "")
+            + (" pinned" if m.pinned else ""))
 
 
 def _heading_level(content: str) -> int:
