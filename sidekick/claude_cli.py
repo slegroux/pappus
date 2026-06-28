@@ -27,6 +27,12 @@ CLI_MODELS = {"claude-cli", "claude-cli-fast"}
 # questions where you don't need the deepest model.
 _CLI_MODEL_FLAG = {"claude-cli-fast": "haiku"}
 CLI_SESSIONS: dict[str, dict] = {}
+# Running token/cost totals per dialog, folded in from each turn's terminal
+# `result` event (see _accrue). The `claude` CLI reports a usage breakdown — and,
+# on most setups, total_cost_usd — even under subscription auth, so this is an
+# honest tally of what the session would bill at API rates. In-memory and
+# per-dialog, same lifecycle as CLI_SESSIONS (both rebuilt on restart).
+CLI_COST: dict[str, dict] = {}
 _CLI_CWD: str | None = None
 
 # The SolveIt persona. SolveIt (fast.ai / Answer.AI) is built on George Pólya's
@@ -224,6 +230,31 @@ def _run_cli(cmd, cwd, env, timeout):
                           cwd=cwd, env=env, timeout=timeout)
 
 
+def _accrue(dialog: str, result: dict) -> None:
+    """Fold one turn's terminal `result` object into the dialog's running totals.
+
+    `result` is what the CLI emits at end of turn (the whole JSON in non-stream
+    mode, or the final `result` event in stream mode). It carries `total_cost_usd`
+    and a `usage` block — both reported even under subscription auth — so we just
+    sum them. We only store what the CLI gives us; pricing/formatting is the
+    caller's job (see app._cost_label), keeping this a pure measurement.
+    """
+    u = result.get("usage") or {}
+    agg = CLI_COST.setdefault(dialog, {"usd": 0.0, "turns": 0, "input": 0,
+                                       "output": 0, "cache_read": 0, "cache_write": 0})
+    agg["usd"] += float(result.get("total_cost_usd") or 0.0)
+    agg["turns"] += 1
+    agg["input"] += int(u.get("input_tokens") or 0)
+    agg["output"] += int(u.get("output_tokens") or 0)
+    agg["cache_read"] += int(u.get("cache_read_input_tokens") or 0)
+    agg["cache_write"] += int(u.get("cache_creation_input_tokens") or 0)
+
+
+def cost_for(dialog: str) -> dict | None:
+    """The dialog's running cost/usage totals, or None if it hasn't run a turn."""
+    return CLI_COST.get(dialog)
+
+
 def call(dialog: str, content: str, context: str = "", model: str | None = None) -> str:
     """Non-streaming: one `claude -p` call, full text back. Used by the kernel server."""
     cmd, sid = _build_cmd(dialog, content, context, stream=False, model=model)
@@ -243,6 +274,7 @@ def call(dialog: str, content: str, context: str = "", model: str | None = None)
     if data.get("is_error"):
         return f"[Claude (Max plan) error: {data.get('result') or 'unknown'}]"
     CLI_SESSIONS[dialog] = {"id": data.get("session_id") or sid, "sent": context}
+    _accrue(dialog, data)
     return data.get("result", "")
 
 
@@ -273,7 +305,7 @@ def stream(dialog: str, content: str, context: str = "", model: str | None = Non
         yield f"[Claude (Max plan) failed to run: {e}]"
         return
 
-    final_sid, got_any = sid, False
+    final_sid, got_any, final_result = sid, False, None
     # readline() (not `for line in p.stdout`) avoids the iterator's read-ahead
     # buffer, so each line surfaces as soon as Claude emits it — real streaming.
     for line in iter(p.stdout.readline, ""):
@@ -291,6 +323,7 @@ def stream(dialog: str, content: str, context: str = "", model: str | None = Non
                     yield txt
         elif kind == "result":
             final_sid = ev.get("session_id") or sid
+            final_result = ev                        # carries usage + total_cost_usd
             if ev.get("is_error") and not got_any:
                 yield f"[Claude (Max plan) error: {ev.get('result') or 'unknown'}]"
     try:
@@ -299,3 +332,5 @@ def stream(dialog: str, content: str, context: str = "", model: str | None = Non
         pass
     # Advance the session: remember its id and the full context it now knows.
     CLI_SESSIONS[dialog] = {"id": final_sid, "sent": context}
+    if final_result is not None and not final_result.get("is_error"):
+        _accrue(dialog, final_result)                # running token/cost tally
