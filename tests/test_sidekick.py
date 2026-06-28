@@ -1270,8 +1270,8 @@ def test_sidebar_renders_delete_menu():
     import sidekick.app as app
     from fasthtml.common import to_xml
     h = to_xml(app._dialog_leaf("welcome", "demo/welcome", "demo/welcome"))
-    assert "/dialog/delete" in h and "Delete" in h and 'name="dialog"' in h
-    assert 'value="demo/welcome"' in h               # posts the right dialog
+    assert "conv-del" in h and "Delete" in h                  # the ⋯ delete action
+    assert 'data-dialog="demo/welcome"' in h                  # carries the dialog name for JS
 
 
 def test_paper_panel_shows_stepper_progress():
