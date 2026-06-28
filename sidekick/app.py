@@ -295,11 +295,11 @@ select.tsel{appearance:none;background:var(--chip);border:1px solid var(--line);
   padding:6px 30px 6px 12px;font-size:13px;cursor:pointer;color:var(--ink)}
 .banner{background:#FBF3E7;border-bottom:1px solid #EAD9BE;color:#7A5B1E;padding:8px 22px;font-size:13px}
 /* conversation */
-.stream{flex:1;overflow:auto;padding:26px 0}
+.stream{flex:1;overflow:auto;padding:14px 0}
 .wrap{max-width:760px;margin:0 auto;padding:0 22px}
-.row{margin-bottom:16px}
-.who{font-size:12px;color:var(--muted);margin-bottom:4px;display:flex;align-items:center;gap:7px}
-.tag{font-size:11px;border:1px solid var(--line);border-radius:6px;padding:1px 6px;color:var(--muted)}
+.row{margin-bottom:9px}
+.who{font-size:11px;color:var(--muted);margin-bottom:2px;display:flex;align-items:center;gap:6px}
+.tag{font-size:10px;border:1px solid var(--line);border-radius:6px;padding:0 5px;color:var(--muted)}
 /* collapsible heading sections */
 .sec-caret{cursor:pointer;color:var(--ink);opacity:.6;font-size:18px;line-height:1;user-select:none;
   transition:transform .12s,opacity .12s;display:inline-flex;align-items:center;
@@ -308,12 +308,12 @@ select.tsel{appearance:none;background:var(--chip);border:1px solid var(--line);
 .sec-caret.collapsed{transform:rotate(-90deg)}
 .sec-count{font-size:11px;color:var(--muted);background:var(--chip);border-radius:10px;padding:0 7px}
 #stream .row.sec-hidden{display:none}
-.bubble{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 13px}
+.bubble{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px 12px}
 .bubble.user{background:var(--bubble-user);border-color:#EBD9CD}
 .bubble.note{background:transparent;border:none;padding:2px 0}
-pre.code{background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:13px 15px;overflow:auto;
+pre.code{background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:10px 14px;overflow:auto;
   font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;margin:0}
-.out{margin-top:6px;border-left:2px solid var(--line);padding:4px 0 4px 12px;color:var(--muted);
+.out{margin-top:4px;border-left:2px solid var(--line);padding:3px 0 3px 12px;color:var(--muted);
   font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;white-space:pre-wrap}
 .empty{color:var(--muted);text-align:center;margin-top:60px}
 /* composer */
@@ -348,8 +348,8 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .note-view .muted,.prompt-view .muted,.code-view .muted{font-style:italic}
 /* pygments code block (server-side highlight, inline colors) */
 .code-view .highlight{margin:0;border-radius:11px;overflow:auto}
-.code-view .highlight pre{margin:0;padding:11px 14px;border-radius:11px;
-  font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;line-height:1.5}
+.code-view .highlight pre{margin:0;padding:8px 13px;border-radius:11px;
+  font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;line-height:1.45}
 /* CodeMirror: highlight-while-editing for code cells (matches the rendered look) */
 .CodeMirror{height:auto;border:1px solid #3a3933;border-radius:11px;
   font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;line-height:1.5}
@@ -422,15 +422,15 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .cell-html th,.cell-html td{border:1px solid var(--line);padding:4px 9px;text-align:right}
 .cell-html th{background:var(--chip)}
 /* live context meter at the foot of the stream */
-.ctx-meter{margin:18px auto 4px;text-align:center;font-size:12px;color:var(--muted);
-  border-top:1px dashed var(--line);padding-top:12px}
-.answer{margin-top:6px}
+.ctx-meter{margin:10px auto 4px;text-align:center;font-size:12px;color:var(--muted);
+  border-top:1px dashed var(--line);padding-top:8px}
+.answer{margin-top:5px}
 /* An Ask AI cell = question + answer as ONE bordered card, so it's unmistakably a
    single cell (not two). A thin divider separates the question from the answer. */
 #stream .row.prompt{border:1px solid var(--line);border-radius:14px;background:var(--panel);
-  padding:9px 14px 12px}
+  padding:7px 13px 9px}
 #stream .row.prompt .prompt-view{font-weight:500;color:var(--ink)}     /* the question */
-#stream .row.prompt .answer{margin-top:9px;border-top:1px solid var(--line);padding-top:9px}
+#stream .row.prompt .answer{margin-top:7px;border-top:1px solid var(--line);padding-top:7px}
 #stream .row.prompt .answer .bubble{background:transparent;border:none;padding:0}  /* card bounds it */
 #stream .row.prompt .answer .who .tag{border:none;padding:0;font-weight:600;color:var(--accent)}
 .md>*:first-child{margin-top:0}.md>*:last-child{margin-bottom:0}
