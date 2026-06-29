@@ -31,18 +31,30 @@ try:
     from pygments.lexers import get_lexer_by_name, PythonLexer
     from pygments.formatters import HtmlFormatter
     from pygments.styles import get_style_by_name
+    from pygments.token import Error as _ErrorToken
     from pygments.util import ClassNotFound
+
+    # Drop the red box Pygments draws around Token.Error glyphs. A lexer emits
+    # Error for any char it can't tokenise (box-drawing │└, math ·×−, arrows →▼),
+    # which is exactly what ASCII-art diagrams in an answer are made of — they'd
+    # otherwise each get an ugly red outline.
+    def _no_error_border(style):
+        return {**style.styles, _ErrorToken: ""}
+
+    class _DarkCodeStyle(get_style_by_name("monokai")):
+        styles = _no_error_border(get_style_by_name("monokai"))
 
     # Two palettes, so the *background* alone tells you whether code can run:
     #  • runnable code cells   → dark monokai (matches --code-bg)
     #  • illustrative code in an AI answer / note → a light style on the app's own
     #    light background, so it reads as prose rather than an executable cell.
     # noclasses=True inlines the token colors, so no separate stylesheet is needed.
-    _pyg_fmt = HtmlFormatter(noclasses=True, style="monokai")
+    _pyg_fmt = HtmlFormatter(noclasses=True, style=_DarkCodeStyle)
 
     class _LightCodeStyle(get_style_by_name("friendly")):
         # Keep this hex in sync with --md-code-bg in the CSS below.
         background_color = "#EAE6DA"
+        styles = _no_error_border(get_style_by_name("friendly"))
 
     _pyg_fmt_light = HtmlFormatter(noclasses=True, style=_LightCodeStyle)
 
@@ -61,8 +73,10 @@ try:
 
     def _highlight_md(src: str, lang: str = "") -> str:
         """Highlight a markdown-embedded (non-runnable) code block on the light
-        palette, so it's visually distinct from a runnable code cell."""
-        return _highlight(src, lang, _pyg_fmt_light)
+        palette, so it's visually distinct from a runnable code cell. An untagged
+        fence (``` with no language) is treated as plain text rather than Python —
+        it's usually ASCII art or console output, not code to tokenise."""
+        return _highlight(src, lang or "text", _pyg_fmt_light)
 except Exception:  # noqa: BLE001 — degrade to a plain code block if pygments is missing
     def _highlight(src: str, lang: str = "", fmt=None) -> str | None:
         return None
@@ -844,9 +858,12 @@ def _output_views(m):
         out += [_rich_view(it) for it in m.rich]
     elif m.msg_type == "prompt":
         pending = STATE.get("pending_stream") == (STATE["dialog"], m.id)
-        if pending and not (m.output or "").strip():
+        if pending:
             # Live answer: a vanilla EventSource (see STREAM_JS) connects to /stream
-            # and replaces this bubble's innerHTML as tokens arrive.
+            # and replaces this bubble's innerHTML as tokens arrive. We show this
+            # whenever the cell is pending — including a re-ask, where m.output still
+            # holds the previous answer; the spinner replaces it until fresh tokens
+            # arrive, otherwise a mid-notebook re-run looks like nothing happened.
             who = _model_label(m.model)
             out.append(Div(
                 Div(Span(who, cls="tag"), cls="who"),
@@ -2638,6 +2655,10 @@ def cell_exec(id: str):
     if m is not None and m.msg_type == "prompt" and _can_stream(backend, m.model):
         m.output = ""                                     # clear stale answer to re-stream
         STATE["pending_stream"] = (STATE["dialog"], id)   # re-ask, streamed live
+        # The #stream swap resets the scroll container to the top, so a mid-notebook
+        # re-run looks frozen — the "Thinking…" spinner is below the fold. Bring the
+        # re-run cell back into view (matches /cell/run).
+        STATE["scroll_to"] = id
     elif m is not None:
         backend.exec(STATE["dialog"], id)
     return Stream()

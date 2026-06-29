@@ -60,16 +60,24 @@ def cmd_up(args):
 
 def cmd_serve(_):
     import uvicorn
-    from .app import app
     # Default to loopback: the UI is single-user with global state and holds your
     # API keys. Opt into network exposure explicitly via SIDEKICK_HOST=0.0.0.0.
     host = os.environ.get("SIDEKICK_HOST", "127.0.0.1")
     port = int(os.environ.get("SIDEKICK_PORT", "8000"))
-    print(f"SolveIt Sidekick UI -> http://{host}:{port}")
+    # SIDEKICK_RELOAD=1 → auto-restart on source edits (dev convenience). Reload
+    # needs an import string rather than the app object so uvicorn can re-import
+    # the module in the worker; without it we pass the object directly.
+    reload = os.environ.get("SIDEKICK_RELOAD", "").lower() in ("1", "true", "yes")
+    print(f"SolveIt Sidekick UI -> http://{host}:{port}" + ("  (auto-reload)" if reload else ""))
     if host not in ("127.0.0.1", "localhost"):
         print("  ⚠ binding a non-loopback host — this single-user UI (and your stored "
               "API keys) will be reachable by anyone on the network.")
-    uvicorn.run(app, host=host, port=port)
+    if reload:
+        uvicorn.run("sidekick.app:app", host=host, port=port,
+                    reload=True, reload_dirs=[os.path.dirname(__file__)])
+    else:
+        from .app import app
+        uvicorn.run(app, host=host, port=port)
     return 0
 
 
