@@ -520,6 +520,12 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .md p{margin:.35em 0}.md ul,.md ol{margin:.35em 0;padding-left:1.4em}
 .md h1,.md h2,.md h3{margin:.6em 0 .3em;line-height:1.3}
 .md table{border-collapse:collapse;margin:.5em 0}.md th,.md td{border:1px solid var(--line);padding:4px 9px}
+/* Mermaid: cap the rendered diagram so it stays compact and never dominates the
+   column. !important overrides mermaid's inline max-width on the <svg>. */
+/* `.md pre.mermaid` (not bare `pre.mermaid`) to out-specify the `.md pre` code-block
+   rule below — otherwise the diagram inherits the tan illustrative-code background. */
+.md pre.mermaid{margin:.5em 0;padding:0;background:none;border:none;text-align:left;line-height:normal}
+.md pre.mermaid svg{max-width:min(100%,440px)!important;max-height:320px;height:auto;display:block}
 /* Non-runnable code inside an answer/note: light background (not the dark code-cell
    palette), so it's unmistakably illustrative rather than executable. Covers the
    plain-<pre> fallback when Pygments is unavailable. */
@@ -1159,7 +1165,34 @@ STREAM_JS = """
   function renderMermaid(el){
     if(!el || !window.mermaid) return;
     if(!window.__mermaidInit){
-      try { window.mermaid.initialize({ startOnLoad:false, securityLevel:'strict' }); } catch(e){}
+      // Theme mermaid to the app's warm Claude palette (default theme is purple
+      // and clashes with the cream/terracotta UI). 'base' + themeVariables lets us
+      // pin every colour; values mirror the CSS :root vars.
+      try { window.mermaid.initialize({
+        startOnLoad:false, securityLevel:'strict',
+        theme:'base', fontFamily:"'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif",
+        // Keep diagrams compact: tight node/rank spacing + small padding so a
+        // simple diagram doesn't dominate the column (CSS caps the SVG size too).
+        flowchart:{ curve:'basis', htmlLabels:true, padding:6, nodeSpacing:28, rankSpacing:34, useMaxWidth:true },
+        sequence:{ useMaxWidth:true, boxMargin:6, mirrorActors:false, actorMargin:36, width:120, height:36 },
+        themeVariables:{
+          background:'#FAF9F5',
+          primaryColor:'#F5E9E2',          // node fill (soft terracotta tint)
+          primaryBorderColor:'#D97757',     // accent
+          primaryTextColor:'#2B2A27',       // ink
+          secondaryColor:'#EDEAE1',
+          tertiaryColor:'#F0EEE6',
+          lineColor:'#9C988E',              // edges: muted, readable on cream
+          textColor:'#2B2A27',
+          mainBkg:'#F5E9E2', nodeBorder:'#D97757', clusterBkg:'#F0EEE6',
+          clusterBorder:'#E4E1D8', titleColor:'#2B2A27', edgeLabelBackground:'#FAF9F5',
+          fontSize:'13px',
+          noteBkgColor:'#FBF3E7', noteBorderColor:'#D97757', noteTextColor:'#2B2A27',
+          actorBkg:'#F5E9E2', actorBorder:'#D97757', actorTextColor:'#2B2A27',
+          signalColor:'#73706A', signalTextColor:'#2B2A27', labelBoxBkgColor:'#FBF3E7',
+          labelBoxBorderColor:'#D97757', activationBkgColor:'#EDEAE1'
+        }
+      }); } catch(e){}
       window.__mermaidInit = true;
     }
     var nodes = el.querySelectorAll('pre.mermaid:not([data-processed])');
