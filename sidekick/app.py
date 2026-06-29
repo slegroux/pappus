@@ -893,11 +893,35 @@ def _rendered_content(m):
     return Div(inner, cls="prompt-view clickedit", **edit)
 
 
+def _answer_code_blocks(md: str) -> list[tuple[str, str]]:
+    """Fenced code blocks from an AI answer as (lang, code) pairs, in order — the
+    source for "split to code" (SolveIt's `W`). The language tag decides where a
+    block lands on split: python/unlabeled become runnable code cells, while
+    `mermaid` becomes a note (which renders the fence as a diagram)."""
+    blocks, cur, fence, lang = [], None, None, ""
+    for line in (md or "").splitlines():
+        s = line.lstrip()
+        if fence is None:
+            mt = re.match(r"(`{3,}|~{3,})\s*([\w+-]*)", s)   # opening fence + lang
+            if mt:
+                fence, lang, cur = s[0], (mt.group(2) or "").lower(), []
+        elif re.match(r"(`{3,}|~{3,})\s*$", s) and s[0] == fence:
+            blocks.append((lang, "\n".join(cur)))            # closing fence (same char)
+            fence, cur, lang = None, None, ""
+        else:
+            cur.append(line)
+    return [(lg, b) for lg, b in blocks if b.strip()]
+
+
 def MsgRow(m, num=None):
     """A cell in its default rendered (read-only, click-to-edit) state."""
     primary = [] if m.msg_type == "note" else [
         _stream_btn(_PRIMARY[m.msg_type], "/cell/exec", cls="cell-btn run",
                     vals={"id": m.id}, title="Re-run this cell")]
+    if m.msg_type == "prompt" and _answer_code_blocks(m.output):
+        primary.append(_stream_btn(
+            "Split to code", "/cell/split", vals={"id": m.id},
+            title="Extract the answer's code blocks into runnable code cells below"))
     return Div(_head(m, primary, num=num), _rendered_content(m), *_output_views(m),
                cls=_rowcls(m), id=f"cell-{m.id}")
 
@@ -2599,6 +2623,29 @@ def cell_insert(id: str, msg_type: str = "code", where: str = "below"):
         m = backend.insert(STATE["dialog"], "", msg_type, anchor_id=id,
                            above=(where == "above"))
         STATE["editing"] = m.id
+    return Stream()
+
+
+@rt("/cell/split", methods=["post"])
+def cell_split(id: str):
+    """Split-to-code (SolveIt's `W`): take the fenced code blocks from a prompt's
+    answer and insert them as runnable code cells just below it, in order. The
+    cells aren't auto-run — the user still runs each one (small-steps contract)."""
+    backend = STATE["backend"]
+    m = _msg_by_id(backend, STATE["dialog"], id)
+    if m is not None and m.msg_type == "prompt" and hasattr(backend, "insert"):
+        anchor, last = id, None
+        for lang, code in _answer_code_blocks(m.output):
+            # mermaid isn't kernel code — land it in a note, which renders the fence
+            # as a diagram; everything else becomes a runnable code cell.
+            if lang == "mermaid":
+                last = backend.insert(STATE["dialog"], f"```mermaid\n{code}\n```",
+                                      "note", anchor_id=anchor)
+            else:
+                last = backend.insert(STATE["dialog"], code, "code", anchor_id=anchor)
+            anchor = last.id
+        if last is not None:
+            STATE["scroll_to"] = last.id
     return Stream()
 
 
