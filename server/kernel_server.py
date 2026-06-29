@@ -126,6 +126,13 @@ def _rich_repr(val) -> dict | None:
             data = fn()
             if data:
                 return {"type": mime, "data": data if isinstance(data, str) else _b64(data)}
+    # SVG before HTML: an object offering both (e.g. a vector figure) is sharper
+    # as inline SVG than as an <img>. svg markup is text, so it's passed through.
+    fn = getattr(val, "_repr_svg_", None)
+    if callable(fn):
+        svg = fn()
+        if svg:
+            return {"type": "image/svg+xml", "data": svg}
     fn = getattr(val, "_repr_html_", None)
     if callable(fn):
         html = fn()

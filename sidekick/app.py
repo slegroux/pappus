@@ -498,7 +498,9 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .row.pinned{border-left:2px solid var(--accent);margin-left:-12px;padding-left:10px}
 /* rich kernel output: plots, images, dataframes */
 .cell-img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:8px;margin-top:9px;display:block;background:#fff}
-.cell-html{margin-top:9px;overflow-x:auto;font-size:13px}
+.cell-svg{margin-top:9px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:6px;overflow-x:auto}
+.cell-svg svg{max-width:100%;height:auto;display:block}
+.row.muted .cell-svg{opacity:.5}
 .cell-html table{border-collapse:collapse}
 .cell-html th,.cell-html td{border:1px solid var(--line);padding:4px 9px;text-align:right}
 .cell-html th{background:var(--chip)}
@@ -693,7 +695,8 @@ _PRIMARY = {"note": "Save", "code": "Run", "prompt": "Ask"}
 _TAG = {"note": "note", "code": "code", "prompt": "Ask AI"}
 
 
-def _stream_btn(label, post, *, cls="cell-btn", vals=None, title=None, confirm=None):
+def _stream_btn(label, post, *, cls="cell-btn", vals=None, title=None, confirm=None,
+                onclick=None):
     """A cell-action button: POST `post` and swap the whole #stream (the shape every
     Type/Insert/Export/Mute/Pin/Delete/Run button shares)."""
     a = {"type": "button", "cls": cls, "hx_post": post,
@@ -704,6 +707,8 @@ def _stream_btn(label, post, *, cls="cell-btn", vals=None, title=None, confirm=N
         a["title"] = title
     if confirm:
         a["hx_confirm"] = confirm
+    if onclick:
+        a["onclick"] = onclick                # client-side feedback before the swap lands
     return Button(label, **a)
 
 
@@ -803,6 +808,10 @@ def _rich_view(item):
     t, data = item.get("type", ""), item.get("data", "")
     if t in ("image/png", "image/jpeg"):
         return Img(src=f"data:{t};base64,{data}", cls="cell-img")
+    if t == "image/svg+xml":
+        # Inline the SVG markup directly so it stays crisp/scalable (vector
+        # diagrams from conv_arch, plots saved as SVG, etc.).
+        return Div(NotStr(data), cls="cell-svg")
     if t == "text/html":
         return Div(NotStr(data), cls="cell-html")
     return Div(data, cls="out")
@@ -957,7 +966,8 @@ def MsgRow(m, num=None):
     """A cell in its default rendered (read-only, click-to-edit) state."""
     primary = [] if m.msg_type == "note" else [
         _stream_btn(_PRIMARY[m.msg_type], "/cell/exec", cls="cell-btn run",
-                    vals={"id": m.id}, title="Re-run this cell")]
+                    vals={"id": m.id}, title="Re-run this cell",
+                    onclick=(f"_showCellSpinner('{m.id}')" if m.msg_type == "prompt" else None))]
     if m.msg_type == "prompt" and _answer_code_blocks(m.output):
         primary.append(_stream_btn(
             "Split to code", "/cell/split", vals={"id": m.id},
@@ -970,10 +980,13 @@ def _cell_edit(m, num=None):
     """A cell switched into edit mode: a raw editor + Save/Run/Ask + Cancel."""
     mid = m.id
     path = "/cell/save" if m.msg_type == "note" else "/cell/run"
+    run_attrs = dict(type="button", cls="cell-btn run",
+                     hx_post=path, hx_include=f"#ta-{mid}", hx_vals=json.dumps({"id": mid}),
+                     hx_target="#stream", hx_swap="outerHTML")
+    if m.msg_type == "prompt":
+        run_attrs["onclick"] = f"_showCellSpinner('{mid}')"   # instant wheel before the swap
     primary = [
-        Button(_PRIMARY[m.msg_type], type="button", cls="cell-btn run",
-               hx_post=path, hx_include=f"#ta-{mid}", hx_vals=json.dumps({"id": mid}),
-               hx_target="#stream", hx_swap="outerHTML"),
+        Button(_PRIMARY[m.msg_type], **run_attrs),
         Button("Cancel", type="button", cls="cell-btn",
                hx_get=f"/cell/view?id={mid}", hx_target=f"#cell-{mid}", hx_swap="outerHTML"),
     ]
@@ -1548,6 +1561,23 @@ function _showPendingSpinner(){
                 '<span class="spinner"></span>Thinking…</span></div></div>';
   box.appendChild(d);
   stream.scrollTop = stream.scrollHeight;
+}
+// Re-running an existing Ask-AI cell posts to the server and then swaps #stream,
+// but until that lands the stale answer just sits there. If the first streamed
+// token arrives quickly the server-rendered spinner only flashes, so a re-ask
+// reads as "no spinner". Drop a wheel into the cell's answer bubble the instant
+// you click — the same optimistic feedback the composer gets. The #stream swap
+// then renders its own identical spinner, so the handoff is seamless.
+function _showCellSpinner(id){
+  var cell = document.getElementById('cell-' + id);
+  if(!cell) return;
+  var spin = '<span class="thinking"><span class="spinner"></span>Thinking…</span>';
+  var bubble = cell.querySelector('.answer .bubble');
+  if(bubble){ bubble.className = 'bubble md'; bubble.innerHTML = spin; return; }
+  var ans = document.createElement('div');     // never-answered prompt: add a bubble
+  ans.className = 'answer';
+  ans.innerHTML = '<div class="bubble md">' + spin + '</div>';
+  cell.appendChild(ans);
 }
 function _submitComposer(){
   if(composerCM) composerCM.save();                 // flush editor -> textarea
