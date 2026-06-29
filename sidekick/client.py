@@ -440,13 +440,21 @@ class HttpKernelBackend(_InMemoryBackend):
         self.target = target
         self.base = target.url.rstrip("/")
 
-    def _post(self, path: str, body: dict) -> dict:
+    # Per-endpoint client timeouts. A blocking /prompt is a full LLM round-trip
+    # (the kernel allows the `claude` CLI up to 180s) and /exec runs arbitrary
+    # code (training loops etc.), so a flat 30s would abandon legitimately-long
+    # work mid-flight — the request keeps running server-side but the UI throws
+    # the result away with a TimeoutError. Completions/rename stay snappy.
+    _TIMEOUTS = {"/prompt": 185, "/exec": 600}
+
+    def _post(self, path: str, body: dict, timeout: float | None = None) -> dict:
         import json
         data = json.dumps(body).encode()
         req = self._req.Request(self.base + path, data=data,
                                 headers={"Content-Type": "application/json",
                                          "Cookie": f"_solveit={self.target.token}"})
-        with self._req.urlopen(req, timeout=30) as r:
+        t = timeout if timeout is not None else self._TIMEOUTS.get(path, 30)
+        with self._req.urlopen(req, timeout=t) as r:
             return json.loads(r.read().decode())
 
     def exec(self, dialog: str, msg_id: str) -> Msg:
