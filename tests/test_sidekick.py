@@ -1086,6 +1086,53 @@ def test_cell_move_route_reorders():
     assert [m.id for m in b.messages("cell/move")] == [c.id, a.id]
 
 
+# ---- copy a cell across dialogs ---------------------------------------------
+def test_copy_cell_clones_into_target_and_leaves_source():
+    b = MockBackend()
+    src = b.add("d/src", "print(1)", "code")
+    src.rich = [{"type": "image/png", "data": "AAAA"}]
+    b.messages("d/dst")                                   # target exists, empty
+    new = b.copy_cell("d/src", src.id, "d/dst")
+    # source is untouched...
+    assert [m.id for m in b.messages("d/src")] == [src.id]
+    # ...and the clone is appended to the target with a fresh, independent identity
+    assert [m.id for m in b.messages("d/dst")] == [new.id]
+    assert new.id != src.id and new.content == src.content
+    assert new.rich == src.rich and new.rich is not src.rich   # not the same list object
+
+
+def test_copy_cell_missing_source_returns_none():
+    b = MockBackend()
+    assert b.copy_cell("d/src", "_nope", "d/dst") is None
+    assert b.list_dialogs() == ["demo/welcome"]           # no target dialog conjured
+
+
+def test_cell_copy_route_copies_and_flashes():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    app.STATE["dialog"] = "cell/copy-src"
+    b = app.STATE["backend"]
+    m = b.add("cell/copy-src", "x = 1", "code")
+    b.messages("cell/copy-dst")
+    html = to_xml(app.cell_copy(id=m.id, target="cell/copy-dst"))
+    dst = b.messages("cell/copy-dst")
+    assert len(dst) == 1 and dst[0].content == "x = 1" and dst[0].id != m.id
+    # the route re-renders the (unchanged) current dialog with a one-shot flash banner
+    assert 'class="flash"' in html and "cell/copy-dst" in html
+
+
+def test_cell_copy_route_ignores_self_target():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    app.STATE["dialog"] = "cell/copy-self"
+    b = app.STATE["backend"]
+    m = b.add("cell/copy-self", "y = 2", "code")
+    app.STATE.pop("flash", None)
+    html = to_xml(app.cell_copy(id=m.id, target="cell/copy-self"))  # onto itself: no-op
+    assert [c.id for c in b.messages("cell/copy-self")] == [m.id]
+    assert 'class="flash"' not in html
+
+
 # ---- export (.ipynb / .md) --------------------------------------------------
 def test_export_ipynb_structure():
     import json, sidekick.app as app

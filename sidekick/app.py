@@ -446,6 +446,15 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
   min-width:96px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px;
   box-shadow:0 6px 18px rgba(0,0,0,.12)}
 .ins-item.cur{border-color:var(--accent);background:#FBF3E7;font-weight:600}   /* the current type */
+/* Copy-to-dialog menu: same drop as the type menu, but names can be long, so cap
+   the width and keep the list scrollable rather than letting it run off-screen. */
+.copy-menu{min-width:140px;max-width:240px;max-height:280px;overflow:auto}
+.copy-menu .ins-item{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* one-shot confirmation banner after a cross-dialog copy */
+.flash{position:sticky;bottom:10px;align-self:center;margin:8px auto 0;width:fit-content;
+  background:#2C6B45;color:#fff;font-size:13px;border-radius:8px;padding:7px 14px;
+  box-shadow:0 6px 18px rgba(0,0,0,.18);animation:flashin .15s ease-out}
+@keyframes flashin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
 /* the cell a/b will target (last hovered) */
 #stream .row:hover{box-shadow:inset 2px 0 0 var(--line)}
 /* the selected cell in Jupyter-style command mode (Esc / j / k) */
@@ -721,9 +730,22 @@ def _type_menu(m):
                      menu_cls="type-menu")
 
 
+def _copy_menu(mid):
+    """⧉ dropdown: copy this cell into another dialog (appended at its end). Lists
+    every other dialog; hidden entirely when there's nowhere to copy to."""
+    backend = STATE["backend"]
+    others = [d for d in (backend.list_dialogs() or []) if d != STATE["dialog"]]
+    if not others or not hasattr(backend, "copy_cell"):
+        return None
+    items = [_stream_btn(d, "/cell/copy", cls="ins-item", vals={"id": mid, "target": d})
+             for d in others]
+    return _dropdown("⧉", Span("Copy to dialog", cls="ins-col-head"), *items,
+                     title="Copy this cell into another dialog", menu_cls="type-menu copy-menu")
+
+
 def _ctx_buttons(m):
-    """Type / Insert / Export / Mute / Pin / Delete — in both rendered and edit modes.
-    Code cells also get an Export toggle (the `#| export` package directive)."""
+    """Type / Insert / Copy / Export / Mute / Pin / Delete — in both rendered and edit
+    modes. Code cells also get an Export toggle (the `#| export` package directive)."""
     mid = m.id
     exported = m.msg_type == "code" and export.has_export(m.content)
     btns = []
@@ -732,10 +754,11 @@ def _ctx_buttons(m):
             "Exported" if exported else "Export", "/cell/export",
             cls="cell-btn exp" + (" on" if exported else ""), vals={"id": mid},
             title="Toggle whether this cell is tangled into the exported package (#| export)"))
+    copy_menu = _copy_menu(mid)
     return [
         _type_menu(m),
         _insert_menu(mid),
-    ] + btns + [
+    ] + ([copy_menu] if copy_menu else []) + btns + [
         _stream_btn("Muted" if m.muted else "In context", "/cell/mute",
                     cls="cell-btn ctx" + (" off" if m.muted else ""), vals={"id": mid},
                     title="Toggle whether this cell is sent to the AI as notebook context"),
@@ -1463,6 +1486,7 @@ def Stream():
     msgs = STATE["backend"].messages(STATE["dialog"])
     editing = STATE.pop("editing", None)            # a just-inserted cell opens in edit mode (one-shot)
     scroll_to = STATE.pop("scroll_to", None)        # scroll a just-added cell into view (one-shot)
+    flash = STATE.pop("flash", None)                # transient confirmation banner (one-shot)
     if not msgs:
         inner = Div("Start the conversation — write code, ask the AI, or jot a note.",
                     cls="empty")
@@ -1479,6 +1503,12 @@ def Stream():
         extra = (Script(f"requestAnimationFrame(function(){{var c="
                         f"document.getElementById('cell-{scroll_to}');"
                         f"if(c)c.scrollIntoView({{block:'center'}});}});"),)
+    if flash:
+        # A self-removing banner: fades after a couple seconds so a copy lands with
+        # visible feedback even though the current dialog's cells don't change.
+        extra = extra + (Div(flash, cls="flash", id="flash"),
+                         Script("setTimeout(function(){var f=document.getElementById('flash');"
+                                "if(f)f.remove();},2400);"))
     return Div(inner, Script(STREAM_JS), *extra, cls="stream", id="stream",
                **{"data-dialog": STATE["dialog"]})
 
@@ -2623,6 +2653,18 @@ def cell_insert(id: str, msg_type: str = "code", where: str = "below"):
         m = backend.insert(STATE["dialog"], "", msg_type, anchor_id=id,
                            above=(where == "above"))
         STATE["editing"] = m.id
+    return Stream()
+
+
+@rt("/cell/copy", methods=["post"])
+def cell_copy(id: str, target: str = ""):
+    """Copy a cell into another dialog (appended at its end). We stay in the current
+    dialog — the stream re-renders unchanged but for a one-shot flash confirming where
+    the copy landed."""
+    backend = STATE["backend"]
+    if target and target != STATE["dialog"] and hasattr(backend, "copy_cell"):
+        m = backend.copy_cell(STATE["dialog"], id, target)
+        STATE["flash"] = f"Copied cell to “{target}”" if m else "Couldn't copy that cell."
     return Stream()
 
 
