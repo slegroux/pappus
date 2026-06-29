@@ -1,6 +1,8 @@
 # SolveIt Sidekick — task runner (https://github.com/casey/just)
 #
 #   just            list recipes
+#   just start         run the app in the background (pairs with `just stop`)
+#   just start reload  same, but auto-restart the UI on source edits
 #   just dev        start the kernel server + the web UI together (Ctrl+C stops both)
 #   just kernel     start only the kernel server (the code-execution backend)
 #   just ui         start only the web UI
@@ -14,8 +16,10 @@ ui_port     := "8000"
 default:
     @just --list
 
+# Pass `reload` to auto-restart the UI on source edits (`just start reload`);
+# a reload resets the UI's in-memory notebook state — good for UI/CSS work.
 # Start the app (kernel + UI) in the BACKGROUND; pairs with `just stop`.
-start:
+start reload="":
     #!/usr/bin/env bash
     set -uo pipefail
     LOG="$HOME/Library/Logs/SolveItSidekick"; mkdir -p "$LOG"
@@ -23,13 +27,15 @@ start:
     if up {{ui_port}}; then
         echo "✓ already running → http://localhost:{{ui_port}}"; open "http://localhost:{{ui_port}}" || true; exit 0
     fi
+    RELOAD_ENV=""
+    if [ "{{reload}}" = "reload" ]; then RELOAD_ENV="SIDEKICK_RELOAD=1"; echo "  (auto-reload on)"; fi
     if ! up {{kernel_port}}; then
         echo "▶ kernel server → :{{kernel_port}}  (logs: $LOG/kernel.log)"
         nohup uv run --extra kernel python -m server.kernel_server --port {{kernel_port}} >"$LOG/kernel.log" 2>&1 &
         for i in $(seq 1 120); do up {{kernel_port}} && break; sleep 0.5; done
     fi
     echo "▶ web UI → http://localhost:{{ui_port}}  (logs: $LOG/ui.log)"
-    nohup env SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} uv run python -m sidekick.cli serve >"$LOG/ui.log" 2>&1 &
+    nohup env $RELOAD_ENV SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} uv run python -m sidekick.cli serve >"$LOG/ui.log" 2>&1 &
     for i in $(seq 1 60); do up {{ui_port}} && break; sleep 0.5; done
     if up {{ui_port}}; then
         echo "✓ running in the background → http://localhost:{{ui_port}}   (stop with: just stop)"
