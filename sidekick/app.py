@@ -520,12 +520,15 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .md p{margin:.35em 0}.md ul,.md ol{margin:.35em 0;padding-left:1.4em}
 .md h1,.md h2,.md h3{margin:.6em 0 .3em;line-height:1.3}
 .md table{border-collapse:collapse;margin:.5em 0}.md th,.md td{border:1px solid var(--line);padding:4px 9px}
-/* Mermaid: cap the rendered diagram so it stays compact and never dominates the
-   column. !important overrides mermaid's inline max-width on the <svg>. */
+/* Mermaid: leave sizing to mermaid's own `useMaxWidth` (it sets the SVG's natural
+   width as max-width, width:100%) — so a diagram renders at natural, readable size
+   and only shrinks if it's wider than the column. Don't override max-width: a hard
+   px cap forces the whole SVG (text included) to scale down and labels go unreadable;
+   forcing 100% scales a small diagram *up* and text balloons. Just guard height. */
 /* `.md pre.mermaid` (not bare `pre.mermaid`) to out-specify the `.md pre` code-block
    rule below — otherwise the diagram inherits the tan illustrative-code background. */
 .md pre.mermaid{margin:.5em 0;padding:0;background:none;border:none;text-align:left;line-height:normal}
-.md pre.mermaid svg{max-width:min(100%,440px)!important;max-height:320px;height:auto;display:block}
+.md pre.mermaid svg{max-height:80vh;height:auto;display:block}
 /* Non-runnable code inside an answer/note: light background (not the dark code-cell
    palette), so it's unmistakably illustrative rather than executable. Covers the
    plain-<pre> fallback when Pygments is unavailable. */
@@ -1171,10 +1174,11 @@ STREAM_JS = """
       try { window.mermaid.initialize({
         startOnLoad:false, securityLevel:'strict',
         theme:'base', fontFamily:"'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif",
-        // Keep diagrams compact: tight node/rank spacing + small padding so a
-        // simple diagram doesn't dominate the column (CSS caps the SVG size too).
-        flowchart:{ curve:'basis', htmlLabels:true, padding:6, nodeSpacing:28, rankSpacing:34, useMaxWidth:true },
-        sequence:{ useMaxWidth:true, boxMargin:6, mirrorActors:false, actorMargin:36, width:120, height:36 },
+        // Render at a readable size (CSS keeps it within the column). Moderate
+        // spacing — tighter than mermaid's defaults so it's not sprawling, but not
+        // so tight that labels crowd.
+        flowchart:{ curve:'basis', htmlLabels:true, padding:12, nodeSpacing:40, rankSpacing:46, useMaxWidth:true },
+        sequence:{ useMaxWidth:true, boxMargin:10, mirrorActors:false, actorMargin:50, width:150, height:42 },
         themeVariables:{
           background:'#FAF9F5',
           primaryColor:'#F5E9E2',          // node fill (soft terracotta tint)
@@ -1186,7 +1190,7 @@ STREAM_JS = """
           textColor:'#2B2A27',
           mainBkg:'#F5E9E2', nodeBorder:'#D97757', clusterBkg:'#F0EEE6',
           clusterBorder:'#E4E1D8', titleColor:'#2B2A27', edgeLabelBackground:'#FAF9F5',
-          fontSize:'13px',
+          fontSize:'15px',
           noteBkgColor:'#FBF3E7', noteBorderColor:'#D97757', noteTextColor:'#2B2A27',
           actorBkg:'#F5E9E2', actorBorder:'#D97757', actorTextColor:'#2B2A27',
           signalColor:'#73706A', signalTextColor:'#2B2A27', labelBoxBkgColor:'#FBF3E7',
