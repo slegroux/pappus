@@ -1912,6 +1912,56 @@ def test_claude_cli_fast_model_uses_haiku(monkeypatch):
     assert "claude-cli-fast" in cc.CLI_MODELS          # routes through the streaming path
 
 
+def test_answer_code_blocks_extracts_fenced_code_in_order():
+    import sidekick.app as app
+    md = ("Here you go:\n\n```python\nx = 1\nprint(x)\n```\n\n"
+          "and a diagram\n\n```mermaid\nflowchart TD\n  A-->B\n```\n")
+    assert app._answer_code_blocks(md) == [
+        ("python", "x = 1\nprint(x)"), ("mermaid", "flowchart TD\n  A-->B")]
+    assert app._answer_code_blocks("no code here, just prose") == []
+    assert app._answer_code_blocks("```\nbare = 1\n```") == [("", "bare = 1")]  # unlabeled
+    assert app._answer_code_blocks("```python\n\n```") == []   # empty block dropped
+
+
+def test_split_to_code_inserts_code_cells_below_prompt():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    app.STATE["dialog"] = "test/split"
+    bk = app.STATE["backend"]; bk.messages("test/split")
+    m = bk.add("test/split", "write a loop", "prompt")
+    bk.update_output("test/split", m.id, "Sure:\n\n```python\nfor i in range(3):\n    print(i)\n```\n")
+    out = to_xml(app.cell_split(id=m.id))                 # Stream() consumes the one-shot scroll_to
+    msgs = bk.messages("test/split")
+    i = next(k for k, x in enumerate(msgs) if x.id == m.id)
+    assert msgs[i + 1].msg_type == "code"
+    assert msgs[i + 1].content == "for i in range(3):\n    print(i)"
+    assert f"cell-{msgs[i + 1].id}" in out and "scrollHeight" in out   # scrolled into view
+
+
+def test_split_to_code_routes_mermaid_into_a_note():
+    import sidekick.app as app
+    app.STATE["dialog"] = "test/split-mermaid"
+    bk = app.STATE["backend"]; bk.messages("test/split-mermaid")
+    m = bk.add("test/split-mermaid", "diagram it", "prompt")
+    bk.update_output("test/split-mermaid", m.id,
+                     "Here:\n\n```mermaid\nflowchart TD\n  A-->B\n```\n")
+    app.cell_split(id=m.id)
+    msgs = bk.messages("test/split-mermaid")
+    i = next(k for k, x in enumerate(msgs) if x.id == m.id)
+    assert msgs[i + 1].msg_type == "note"                      # mermaid → note, not code
+    assert msgs[i + 1].content == "```mermaid\nflowchart TD\n  A-->B\n```"   # fence kept so it renders
+
+
+def test_split_button_only_shows_when_answer_has_code():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    from sidekick.client import Msg
+    has = Msg(id="_p1", msg_type="prompt", content="q", output="```python\nx=1\n```")
+    no = Msg(id="_p2", msg_type="prompt", content="q", output="just prose")
+    assert "/cell/split" in to_xml(app.MsgRow(has))
+    assert "/cell/split" not in to_xml(app.MsgRow(no))
+
+
 def test_composer_shows_instant_pending_spinner():
     # On an Ask-AI send the composer injects a "Thinking…" wheel immediately
     # (client-side), so a working indicator is visible for every model — including
