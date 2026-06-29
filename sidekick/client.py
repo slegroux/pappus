@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
 from .targets import Target, default_model
@@ -328,6 +328,18 @@ class _InMemoryBackend:
         self._dialogs[dialog] = ([by_id[i] for i in ordered_ids if i in by_id]
                                  + [m for m in lst if m.id not in listed])
         self._save()
+
+    def copy_cell(self, src_dialog: str, msg_id: str, dst_dialog: str) -> Msg | None:
+        """Copy a single cell into another dialog, appended at the end. The clone
+        gets a fresh id (and its own `rich` list) so the two dialogs stay fully
+        independent. Returns the new cell, or None if the source doesn't exist."""
+        src = self._find(src_dialog, msg_id)
+        if src is None:
+            return None
+        m = replace(src, id="_" + uuid.uuid4().hex[:8], rich=list(src.rich))
+        self._dialogs.setdefault(dst_dialog, []).append(m)
+        self._save()
+        return m
 
 
 class MockBackend(_InMemoryBackend):
