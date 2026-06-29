@@ -1325,6 +1325,15 @@ STREAM_JS = """
   document.addEventListener('htmx:afterSettle', function(){
     if(window.__selCell && window.__selectCell) window.__selectCell(window.__selCell, false);
     if(window.__applyCollapsed) window.__applyCollapsed();     // re-fold sections after a swap
+    // Partial swaps (answer save/cancel, single-cell view) replace a fragment
+    // without re-running STREAM_JS, so the line-1198 render loop never touches
+    // them. Re-scan #stream so freshly-swapped diagrams/math/copy buttons render.
+    // (e.detail.target is the *detached* old node on outerHTML swaps, so we can't
+    // rely on it.) Idempotent: renderMermaid skips [data-processed], addCopyButtons
+    // skips __copy, and KaTeX re-typeset is a no-op once delimiters are gone.
+    document.querySelectorAll('#stream .md').forEach(function(el){
+      renderMath(el); renderMermaid(el); addCopyButtons(el);
+    });
   });
   // Click a section caret to fold/unfold the cells beneath its heading.
   document.addEventListener('click', function(e){
