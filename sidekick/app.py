@@ -498,7 +498,9 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .row.pinned{border-left:2px solid var(--accent);margin-left:-12px;padding-left:10px}
 /* rich kernel output: plots, images, dataframes */
 .cell-img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:8px;margin-top:9px;display:block;background:#fff}
-.cell-html{margin-top:9px;overflow-x:auto;font-size:13px}
+.cell-svg{margin-top:9px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:6px;overflow-x:auto}
+.cell-svg svg{max-width:100%;height:auto;display:block}
+.row.muted .cell-svg{opacity:.5}
 .cell-html table{border-collapse:collapse}
 .cell-html th,.cell-html td{border:1px solid var(--line);padding:4px 9px;text-align:right}
 .cell-html th{background:var(--chip)}
@@ -806,6 +808,10 @@ def _rich_view(item):
     t, data = item.get("type", ""), item.get("data", "")
     if t in ("image/png", "image/jpeg"):
         return Img(src=f"data:{t};base64,{data}", cls="cell-img")
+    if t == "image/svg+xml":
+        # Inline the SVG markup directly so it stays crisp/scalable (vector
+        # diagrams from conv_arch, plots saved as SVG, etc.).
+        return Div(NotStr(data), cls="cell-svg")
     if t == "text/html":
         return Div(NotStr(data), cls="cell-html")
     return Div(data, cls="out")

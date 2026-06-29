@@ -832,6 +832,31 @@ def test_rich_view_renders_image_and_html():
     assert "<b>hi</b>" in html
 
 
+def test_run_code_captures_repr_svg_as_rich():
+    import server.kernel_server as ks
+    code = ("class V:\n"
+            "    def _repr_svg_(self): return '<svg><rect/></svg>'\n"
+            "V()")
+    text, rich = ks.run_code("rich/svg", code)
+    assert text == ""                                   # rich repr replaces the text repr
+    assert any(r["type"] == "image/svg+xml" and "<svg" in r["data"] for r in rich)
+
+
+def test_rich_view_renders_svg_inline():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    svg = to_xml(app._rich_view({"type": "image/svg+xml", "data": "<svg><rect/></svg>"}))
+    assert "cell-svg" in svg and "<svg>" in svg     # inlined, not wrapped in an <img>
+
+
+def test_conv_arch_emits_inline_svg():
+    pytest.importorskip("matplotlib")
+    from sidekick.conv_arch import conv_arch, PRESETS
+    out = conv_arch(PRESETS["oobleck"], title="Oobleck VAE")  # fmt="svg" default
+    svg = out._repr_svg_()
+    assert svg.startswith("<svg") and "<?xml" not in svg[:20]
+
+
 # ---- token counting + pinned cells -----------------------------------------
 def test_est_tokens_rough():
     from sidekick.client import est_tokens
