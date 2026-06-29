@@ -31,6 +31,7 @@ import io
 import json
 import os
 import contextlib
+import warnings
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
@@ -177,7 +178,12 @@ def run_code(dialog: str, code: str) -> tuple[str, list]:
         last_expr = ast.Expression(tree.body.pop().value)
 
     try:
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf):
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf), \
+                warnings.catch_warnings():
+            # plt.show() is a no-op under the headless Agg backend, but matplotlib
+            # still warns "FigureCanvasAgg is non-interactive…" to stderr — pure
+            # noise here, since _capture_figs() renders the figure inline anyway.
+            warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
             exec(compile(tree, "<dialog>", "exec"), ns)
             if last_expr is not None:
                 val = eval(compile(last_expr, "<dialog>", "eval"), ns)
