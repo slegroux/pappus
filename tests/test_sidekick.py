@@ -857,6 +857,20 @@ def test_conv_arch_emits_inline_svg():
     assert svg.startswith("<svg") and "<?xml" not in svg[:20]
 
 
+def test_spatial_label_formats_hxw_and_area():
+    from sidekick.conv_arch import _spatial
+    assert _spatial((112, 112)) == (12544, "112×112")   # explicit dims -> readable
+    assert _spatial(12544) == (12544, "12,544")          # scalar area -> comma form
+    assert _spatial((65536,)) == (65536, "65,536")       # 1-D spatial
+
+
+def test_conv_arch_renders_hxw_dims_in_svg():
+    pytest.importorskip("matplotlib")
+    from sidekick.conv_arch import conv_arch, PRESETS
+    svg = conv_arch(PRESETS["resnet"], title="ResNet-50")._repr_svg_()
+    assert "112" in svg and "×" in svg                   # H×W dims reach the label layer
+
+
 # ---- token counting + pinned cells -----------------------------------------
 def test_est_tokens_rough():
     from sidekick.client import est_tokens
