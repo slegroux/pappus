@@ -520,15 +520,19 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .md p{margin:.35em 0}.md ul,.md ol{margin:.35em 0;padding-left:1.4em}
 .md h1,.md h2,.md h3{margin:.6em 0 .3em;line-height:1.3}
 .md table{border-collapse:collapse;margin:.5em 0}.md th,.md td{border:1px solid var(--line);padding:4px 9px}
-/* Mermaid: leave sizing to mermaid's own `useMaxWidth` (it sets the SVG's natural
-   width as max-width, width:100%) — so a diagram renders at natural, readable size
-   and only shrinks if it's wider than the column. Don't override max-width: a hard
-   px cap forces the whole SVG (text included) to scale down and labels go unreadable;
-   forcing 100% scales a small diagram *up* and text balloons. Just guard height. */
+/* Mermaid: diagrams render at NATURAL size (see useMaxWidth:false in the mermaid config)
+   so text is always crisp, never shrunk to fit. The block hugs the diagram via
+   width:fit-content and is centred on the prose column — a narrow top-down graph sits
+   tightly centred, not marooned in a wide empty box. It may grow WIDER than the 760px
+   column (full-bleed via left:50% + translateX) up to a cap; a diagram bigger than the
+   cap scrolls inside the box (overflow:auto) rather than being squashed. Architectures
+   are steered top-to-bottom (system prompt) so the reader scrolls down, not sideways. */
 /* `.md pre.mermaid` (not bare `pre.mermaid`) to out-specify the `.md pre` code-block
    rule below — otherwise the diagram inherits the tan illustrative-code background. */
-.md pre.mermaid{margin:.5em 0;padding:0;background:none;border:none;text-align:left;line-height:normal}
-.md pre.mermaid svg{max-height:80vh;height:auto;display:block}
+.md pre.mermaid{margin:.6em 0;padding:0;background:none;border:none;text-align:left;line-height:normal;
+  width:fit-content;max-width:min(94vw,1180px);position:relative;left:50%;transform:translateX(-50%);
+  max-height:85vh;overflow:auto}
+.md pre.mermaid svg{display:block;margin:0 auto}
 /* Non-runnable code inside an answer/note: light background (not the dark code-cell
    palette), so it's unmistakably illustrative rather than executable. Covers the
    plain-<pre> fallback when Pygments is unavailable. */
@@ -1174,11 +1178,15 @@ STREAM_JS = """
       try { window.mermaid.initialize({
         startOnLoad:false, securityLevel:'strict',
         theme:'base', fontFamily:"'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif",
-        // Render at a readable size (CSS keeps it within the column). Moderate
-        // spacing — tighter than mermaid's defaults so it's not sprawling, but not
-        // so tight that labels crowd.
-        flowchart:{ curve:'basis', htmlLabels:true, padding:12, nodeSpacing:40, rankSpacing:46, useMaxWidth:true },
-        sequence:{ useMaxWidth:true, boxMargin:10, mirrorActors:false, actorMargin:50, width:150, height:42 },
+        // useMaxWidth:false — render every diagram at its NATURAL pixel size (mermaid
+        // emits explicit width/height instead of width:100%+max-width). This is the
+        // key: with useMaxWidth:true mermaid shrinks a diagram to fit its container,
+        // dragging the TEXT down with it (a wide graph in a narrow box → unreadable
+        // labels). At natural size the text is always crisp; a diagram bigger than the
+        // box just scrolls (CSS gives pre.mermaid overflow:auto). Moderate spacing —
+        // tighter than mermaid's defaults but not crowded.
+        flowchart:{ curve:'basis', htmlLabels:true, padding:12, nodeSpacing:40, rankSpacing:46, useMaxWidth:false },
+        sequence:{ useMaxWidth:false, boxMargin:10, mirrorActors:false, actorMargin:50, width:150, height:42 },
         themeVariables:{
           background:'#FAF9F5',
           primaryColor:'#F5E9E2',          // node fill (soft terracotta tint)
