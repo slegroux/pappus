@@ -520,17 +520,18 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .md p{margin:.35em 0}.md ul,.md ol{margin:.35em 0;padding-left:1.4em}
 .md h1,.md h2,.md h3{margin:.6em 0 .3em;line-height:1.3}
 .md table{border-collapse:collapse;margin:.5em 0}.md th,.md td{border:1px solid var(--line);padding:4px 9px}
-/* Mermaid: diagrams render at NATURAL size (see useMaxWidth:false in the mermaid config)
-   so text is always crisp, never shrunk to fit. The block hugs the diagram via
-   width:fit-content and is centred on the prose column — a narrow top-down graph sits
-   tightly centred, not marooned in a wide empty box. It may grow WIDER than the 760px
-   column (full-bleed via left:50% + translateX) up to a cap; a diagram bigger than the
-   cap scrolls inside the box (overflow:auto) rather than being squashed. Architectures
-   are steered top-to-bottom (system prompt) so the reader scrolls down, not sideways. */
-/* `.md pre.mermaid` (not bare `pre.mermaid`) to out-specify the `.md pre` code-block
-   rule below — otherwise the diagram inherits the tan illustrative-code background. */
-.md pre.mermaid{margin:.6em 0;padding:0;background:none;border:none;text-align:left;line-height:normal;
-  width:fit-content;max-width:min(94vw,1180px);position:relative;left:50%;transform:translateX(-50%);
+/* Mermaid: each diagram is bounded by its cell. useMaxWidth:true (mermaid config) makes
+   the svg width:100% + max-width:<natural>px, so a diagram that fits renders at natural
+   size (crisp) and one that would overflow scales down to fit — it never spills past the
+   cell or scrolls sideways. Generation is steered hard top-down (`flowchart TD` — see
+   _DIAGRAM_GUIDANCE) to keep diagrams narrow, so the down-scale rarely bites. Framed as a
+   subtle card so a diagram reads as a deliberate figure. Architectures grow downward, so
+   the reader scrolls down, not sideways.
+   `.md pre.mermaid` (not bare `pre.mermaid`) out-specifies the `.md pre` code-block rule
+   below — otherwise the diagram inherits the tan illustrative-code background. */
+.md pre.mermaid{margin:.7em 0;padding:8px;background:#fff;border:1px solid var(--line);border-radius:10px;
+  text-align:left;line-height:normal;
+  max-width:100%;
   max-height:85vh;overflow:auto}
 .md pre.mermaid svg{display:block;margin:0 auto}
 /* Non-runnable code inside an answer/note: light background (not the dark code-cell
@@ -1178,15 +1179,15 @@ STREAM_JS = """
       try { window.mermaid.initialize({
         startOnLoad:false, securityLevel:'strict',
         theme:'base', fontFamily:"'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif",
-        // useMaxWidth:false — render every diagram at its NATURAL pixel size (mermaid
-        // emits explicit width/height instead of width:100%+max-width). This is the
-        // key: with useMaxWidth:true mermaid shrinks a diagram to fit its container,
-        // dragging the TEXT down with it (a wide graph in a narrow box → unreadable
-        // labels). At natural size the text is always crisp; a diagram bigger than the
-        // box just scrolls (CSS gives pre.mermaid overflow:auto). Moderate spacing —
-        // tighter than mermaid's defaults but not crowded.
-        flowchart:{ curve:'basis', htmlLabels:true, padding:12, nodeSpacing:40, rankSpacing:46, useMaxWidth:false },
-        sequence:{ useMaxWidth:false, boxMargin:10, mirrorActors:false, actorMargin:50, width:150, height:42 },
+        // useMaxWidth:true — a diagram never grows wider than its cell. mermaid emits
+        // svg width:100% + max-width:<natural>px, so a diagram that already fits renders
+        // at natural size (crisp, unchanged), and only one that WOULD overflow scales
+        // down to fit (text shrinks mildly) instead of spilling out or forcing a
+        // sideways scroll. We lean on hard top-down (`flowchart TD`) generation — see
+        // _DIAGRAM_GUIDANCE — to keep diagrams narrow, so the shrink rarely bites.
+        // Moderate spacing — tighter than mermaid's defaults but not crowded.
+        flowchart:{ curve:'basis', htmlLabels:true, padding:12, nodeSpacing:40, rankSpacing:46, useMaxWidth:true },
+        sequence:{ useMaxWidth:true, boxMargin:10, mirrorActors:false, actorMargin:50, width:150, height:42 },
         themeVariables:{
           background:'#FAF9F5',
           primaryColor:'#F5E9E2',          // node fill (soft terracotta tint)

@@ -86,15 +86,18 @@ MISSING = ("[Claude (Max plan): the `claude` CLI isn't on PATH. Install Claude C
 # isn't re-sent, so injecting it here puts the conventions right where they're needed —
 # fresh and salient on the turn that actually wants the picture, not buried at turn 1.
 _DIAGRAM_GUIDANCE = (
-    "\n\n[Guidance for any Mermaid diagram in this reply — apply when it fits, adapt to "
-    "what was asked. For a neural-net / model architecture: use a top-to-bottom "
-    "`flowchart TD` so it reads top-down in data-flow order (the reader scrolls down, not "
-    "sideways); wrap each stage or module in its own `subgraph`; put the module's key "
-    "hyperparameters inside its node (dims, heads, kernel, layer count) with `<br/>` for "
-    "extra lines; show how shapes evolve by labelling the edge between blocks with the "
-    "running tensor shape, e.g. `A -->|\"(B, N, 384)\"| B`; distinguish inputs/outputs "
-    "from internal blocks; collapse repeated blocks as `N× …` rather than drawing each "
-    "one. Keep node labels short.]"
+    "\n\n[Guidance for any Mermaid diagram in this reply — adapt to what was asked. The "
+    "diagram is shown in a narrow reading column, so WIDTH is the scarce dimension: a "
+    "diagram wider than the column is scaled down and its labels get small. Always grow "
+    "DOWNWARD, never sideways. For a neural-net / model architecture ALWAYS use "
+    "`flowchart TD` (top-down, data-flow order) — never `LR`/`RL`. Keep each rank to a "
+    "single node where you can: stack stages vertically rather than placing sibling nodes "
+    "side by side, and avoid wide rows. Wrap each stage or module in its own `subgraph`; "
+    "put the module's key hyperparameters inside its node (dims, heads, kernel, layer "
+    "count) with `<br/>` for extra lines; show how shapes evolve by labelling the edge "
+    "between blocks with the running tensor shape, e.g. `A -->|\"(B, N, 384)\"| B`; "
+    "distinguish inputs/outputs from internal blocks; collapse repeated blocks as "
+    "`N× …` rather than drawing each one. Keep node labels short so columns stay narrow.]"
 )
 
 # Matches a turn that's asking for a drawn diagram (mermaid / flowchart / architecture
