@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import uuid
 
@@ -64,7 +65,7 @@ _PERSONA = (
     "- Diagrams as Mermaid. When a picture would make a step clearer — a flowchart, "
     "sequence, graph, tree, or state diagram — express it as a ```mermaid fenced code "
     "block, which this notebook renders as a real SVG diagram. Never draw diagrams as "
-    "ASCII art.\n"
+    "ASCII art. Keep node labels short.\n"
     "- Reflect. When a step works, note briefly what was learned and suggest the next "
     "small step, so the user stays in control of the direction.\n\n"
     "Be concise, concrete, and encouraging. Default to the smallest helpful next step."
@@ -78,6 +79,38 @@ _CONTEXT_INTRO = (
 
 MISSING = ("[Claude (Max plan): the `claude` CLI isn't on PATH. Install Claude Code "
            "and run `claude` once to sign in to your subscription.]")
+
+# Just-in-time guidance, appended to the *user turn* (not the persona) only when that
+# turn asks for a diagram — see `_wants_diagram`. Kept out of the always-on system
+# prompt on purpose: it's irrelevant to most turns, and on a resumed session the persona
+# isn't re-sent, so injecting it here puts the conventions right where they're needed —
+# fresh and salient on the turn that actually wants the picture, not buried at turn 1.
+_DIAGRAM_GUIDANCE = (
+    "\n\n[Guidance for any Mermaid diagram in this reply — apply when it fits, adapt to "
+    "what was asked. For a neural-net / model architecture: use a top-to-bottom "
+    "`flowchart TD` so it reads top-down in data-flow order (the reader scrolls down, not "
+    "sideways); wrap each stage or module in its own `subgraph`; put the module's key "
+    "hyperparameters inside its node (dims, heads, kernel, layer count) with `<br/>` for "
+    "extra lines; show how shapes evolve by labelling the edge between blocks with the "
+    "running tensor shape, e.g. `A -->|\"(B, N, 384)\"| B`; distinguish inputs/outputs "
+    "from internal blocks; collapse repeated blocks as `N× …` rather than drawing each "
+    "one. Keep node labels short.]"
+)
+
+# Matches a turn that's asking for a drawn diagram (mermaid / flowchart / architecture
+# picture). Deliberately broad-but-cheap: a miss just falls back to the base persona
+# line (still a valid mermaid diagram), so false negatives are low-cost; false positives
+# only add a short note to a turn that wasn't going to draw anything.
+_DIAGRAM_RE = re.compile(
+    r"\b(mermaid|flowchart|diagram|architecture|sequence diagram|state diagram|"
+    r"graph it|draw|sketch|visuali[sz]e|schematic)\b",
+    re.IGNORECASE,
+)
+
+
+def _wants_diagram(content: str) -> bool:
+    return bool(content) and bool(_DIAGRAM_RE.search(content))
+
 
 # Appended after the persona whenever the cell-editing MCP tools are live. Keeps
 # the default Ask-AI experience unchanged: the model only touches cells on
@@ -221,6 +254,8 @@ def _build_cmd(dialog: str, content: str, context: str, stream: bool, model: str
     model_flag = _CLI_MODEL_FLAG.get(model) or os.environ.get("SIDEKICK_CLAUDE_CLI_MODEL")
     if model_flag:
         cmd += ["--model", model_flag]
+    if _wants_diagram(content):             # just-in-time: attach diagram conventions to
+        user_msg += _DIAGRAM_GUIDANCE       # the turn that asks, not the global persona
     if tools:                               # `--allowedTools` is variadic; `--` stops
         cmd.append("--")                    # it from swallowing the prompt positional
     cmd.append(user_msg)                     # prompt is the trailing positional
