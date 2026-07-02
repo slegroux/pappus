@@ -56,15 +56,22 @@ web = ["trafilatura"]
 
 # Talk to the real Answer.AI SolveIt server instead of the bundled kernel.
 solveit = ["solveit_client"]
+
+# Build a Python library from tagged cells (the 📦 Libraries page / `sidekick
+# library build`). Without it, Build still emits the nbdev notebooks; nbdev
+# tangles them into the .py package + docs.
+#   uv pip install "solveit-sidekick[nbdev]"
+nbdev = ["nbdev"]
 dev = ["pytest"]
 
 # Everything for a full local workstation in one shot (server + coding stack +
-# paper reader + solveit).
+# paper reader + solveit + library builds).
 all = [
     "solveit-sidekick[kernel]",
     "solveit-sidekick[paper]",
     "solveit-sidekick[web]",
     "solveit-sidekick[solveit]",
+    "solveit-sidekick[nbdev]",
 ]
 
 [project.scripts]

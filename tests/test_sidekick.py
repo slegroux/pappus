@@ -2168,6 +2168,7 @@ def test_complete_code_uses_live_namespace():
     # jedi introspects the dialog's executed namespace: after `import numpy as np`
     # and a list var, np.ar -> arange and xs.app -> append.
     pytest.importorskip("jedi")
+    pytest.importorskip("numpy")          # np.arange completion needs numpy (kernel extra)
     from server.kernel_server import complete_code, run_code
     run_code("cmpl/d", "import numpy as np\nxs = [1, 2, 3]")
     np_names = [c["name"] for c in complete_code("cmpl/d", "np.ar", 1, 5)]
