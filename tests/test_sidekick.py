@@ -2327,3 +2327,73 @@ def test_composer_shows_instant_pending_spinner():
     assert 'class="spinner"' in js and "Thinking" in js
     assert "msgType" in js and "_showPendingSpinner()" in js   # gated to prompt sends
     assert "__pendingSpinnerCleanup" in js                     # stray-spinner cleanup
+
+
+# ---- cell-centric nbdev libraries (sidekick.nbdev_export) -------------------
+def _lib_backend():
+    """Two unrelated dialogs whose cells tag into one library `audiolib`."""
+    b = MockBackend()
+    b.add("conv/conv1d", "#| export audiolib:layers\nclass Conv1d:\n    pass", "code")
+    b.add("conv/conv1d", "scratch = 1  # not exported", "code")
+    b.add("conv/conv1d", "#| export localmod", "code")        # plain -> dialog-local, NOT a library
+    b.add("models/unet", "#| export audiolib:blocks\ndef resblock():\n    return 42", "code")
+    b.add("models/unet", "#| export audiolib:layers\nclass Conv2d:\n    pass", "code")
+    return b
+
+
+def test_parse_lib_target():
+    from sidekick import nbdev_export as nx
+    assert nx.parse_lib_target("audiolib:layers") == ("audiolib", "layers")
+    assert nx.parse_lib_target("audiolib:") == ("audiolib", "core")     # empty module -> core
+    assert nx.parse_lib_target("layers") == (None, "layers")            # no colon -> dialog-local
+
+
+def test_gather_collects_across_dialogs_excludes_plain_export():
+    from sidekick import nbdev_export as nx
+    mods = nx.gather(_lib_backend(), "audiolib")
+    assert set(mods) == {"layers", "blocks"}
+    # layers drew a cell from EACH dialog — cross-dialog assembly
+    assert [e["dialog"] for e in mods["layers"]] == ["conv/conv1d", "models/unet"]
+    assert [e["dialog"] for e in mods["blocks"]] == ["models/unet"]
+    # the plain `#| export localmod` cell is dialog-local, not in the library
+    bodies = "\n".join(e["body"] for v in mods.values() for e in v)
+    assert "localmod" not in bodies
+
+
+def test_module_notebook_has_default_exp_and_provenance():
+    from sidekick import nbdev_export as nx
+    nb = nx.module_notebook("layers", [{"body": "class C: pass",
+                                        "dialog": "conv/conv1d", "id": "_abc12345"}])
+    srcs = ["".join(c["source"]) for c in nb["cells"]]
+    assert srcs[0] == "#| default_exp layers"                 # nbdev module header
+    assert srcs[1].startswith("#| export\n")                  # native nbdev directive
+    assert "# source: conv/conv1d #_abc12345" in srcs[1]      # provenance back-link
+    assert nb["nbformat"] == 4 and "cells" in nb
+
+
+def test_library_files_emits_pyproject_and_valid_notebooks():
+    import json
+    from sidekick import nbdev_export as nx
+    files = nx.library_files(_lib_backend(), "audiolib")
+    assert "pyproject.toml" in files and "[tool.nbdev]" in files["pyproject.toml"]
+    assert "nbs/layers.ipynb" in files and "nbs/blocks.ipynb" in files
+    nb = json.loads(files["nbs/layers.ipynb"])                # valid JSON / nbformat
+    assert nb["nbformat"] == 4
+
+
+def test_build_library_writes_files_and_degrades_without_nbdev(tmp_path, monkeypatch):
+    from sidekick import nbdev_export as nx
+    monkeypatch.setattr(nx, "run_nbdev", lambda dest: (False, "nbdev not installed"))
+    res = nx.build_library(_lib_backend(), "audiolib", str(tmp_path), pkg_name="audiolib")
+    assert res["pkg"] == "audiolib" and set(res["modules"]) == {"layers", "blocks"}
+    assert (tmp_path / "pyproject.toml").exists()
+    assert (tmp_path / "nbs" / "layers.ipynb").exists()
+    assert res["nbdev_ok"] is False                           # soft failure, notebooks still emitted
+
+
+def test_run_nbdev_missing_binary_is_soft(monkeypatch):
+    import shutil
+    from sidekick import nbdev_export as nx
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    ok, detail = nx.run_nbdev("/tmp/whatever")
+    assert ok is False and "nbdev" in detail.lower()

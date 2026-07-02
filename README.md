@@ -373,6 +373,48 @@ Cells, outputs, plots, and pin/mute flags are all restored. (The mock fallback
 used when no server is reachable stays ephemeral; a real **solveit** target keeps
 its dialogs on the SolveIt server.)
 
+## Building a Python library from your dialogs
+
+Your dialogs are where you *learn*; a **library** is how you *ship* what you
+worked out — and the two stay separate (see
+[docs/design/graph-vs-tree.md](docs/design/graph-vs-tree.md)). Rather than one
+notebook = one package, libraries are **cell-centric**: tag any cell, in any
+dialog, into a library.
+
+Mark a code cell with a library-scoped export directive:
+
+```python
+#| export audiolib:layers      # this cell → library `audiolib`, module `layers`
+class Conv1d: ...
+```
+
+(A plain `#| export <module>` with no `lib:` prefix stays dialog-local, as before.)
+Then build the library across **all** your dialogs:
+
+```bash
+uv run python -m sidekick.cli library build audiolib ./audiolib
+```
+
+Sidekick gathers every cell tagged `audiolib:*` — from however many dialogs —
+groups them by module, and **projects them into an nbdev project** (one notebook
+per module). If [nbdev](https://nbdev.fast.ai) is installed it then runs
+`nbdev-export` to tangle the notebooks into a real `.py` package; if not, the
+notebooks are emitted and you can build them later. Sidekick owns the
+*cells → notebooks* step; **nbdev** owns *notebooks → package + docs + tests*.
+
+Two nice properties fall out:
+
+- **Cross-dialog assembly** — a module can draw cells from several unrelated
+  learning dialogs. `audiolib/layers.py` might hold a `Conv1d` from your `conv1d`
+  dialog and a `Conv2d` from your `u-net` dialog.
+- **Provenance** — each generated function carries a `# source: <dialog> #<id>`
+  comment that is also a [message-ID link](#link-to-any-cell) back to the cell you
+  wrote it in. The built library points home to the dialogs it came from.
+
+The dialog cells are the source of truth; the notebooks and `.py` are generated
+(never hand-edited), so you keep improving the library by editing the cells and
+rebuilding.
+
 ## Reading papers (and web pages)
 
 Open a source with the **📄** button — **choose a PDF** or **paste any URL** — and

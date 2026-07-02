@@ -5,6 +5,10 @@ Usage:
     sidekick doctor [name]           diagnose a target's connection
     sidekick up <name>               open the SSH tunnel for a remote target (blocks)
     sidekick serve                   launch the web UI (http://localhost:8000)
+    sidekick library build <lib> <dest> [--pkg <name>]
+                                     project cells tagged `#| export <lib>:<mod>`
+                                     across all dialogs into an nbdev project at
+                                     <dest>, then build it with nbdev if installed
 """
 from __future__ import annotations
 
@@ -81,7 +85,35 @@ def cmd_serve(_):
     return 0
 
 
-COMMANDS = {"targets": cmd_targets, "doctor": cmd_doctor, "up": cmd_up, "serve": cmd_serve}
+def cmd_library(args):
+    """`sidekick library build <lib> <dest> [--pkg <name>]` — emit + build a library."""
+    from .client import connect
+    from . import nbdev_export
+    if len(args) < 3 or args[0] != "build":
+        print("usage: sidekick library build <lib> <dest> [--pkg <name>]", file=sys.stderr)
+        return 2
+    lib, dest = args[1], args[2]
+    pkg = None
+    if "--pkg" in args:
+        i = args.index("--pkg")
+        pkg = args[i + 1] if i + 1 < len(args) else None
+    backend, warning = connect(get_target())
+    if warning:
+        print(f"  ⚠ {warning}")
+    result = nbdev_export.build_library(backend, lib, dest, pkg)
+    if not result["modules"]:
+        print(f"No cells tagged `#| export {lib}:<module>` found across dialogs — "
+              f"emitted an empty scaffold at {dest}.")
+    else:
+        print(f"Built library '{result['pkg']}' at {dest}")
+        print(f"  modules: {', '.join(result['modules'])}")
+        print(f"  files:   {len(result['files'])}")
+    print(f"  nbdev:   {'✓ ' if result['nbdev_ok'] else '· '}{result['nbdev_detail']}")
+    return 0
+
+
+COMMANDS = {"targets": cmd_targets, "doctor": cmd_doctor, "up": cmd_up,
+            "serve": cmd_serve, "library": cmd_library}
 
 
 def main(argv=None):
