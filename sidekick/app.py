@@ -117,10 +117,74 @@ except Exception:  # noqa: BLE001 — degrade to plain text if mistune is missin
     _md = None
 
 
+# Message-ID links (SolveIt's #_msgid). A cell id is "_" + 8 hex chars, so
+# `#_deadbeef` links to a cell in THIS dialog and `#folder/dialog/_deadbeef`
+# links across dialogs. We autolink these in rendered notes and AI answers.
+_MSGID_RE = re.compile(r"#(?:(?P<dlg>[\w][\w./-]*)/)?(?P<mid>_[0-9a-f]{6,})\b")
+# Split out <pre>/<code> so we never linkify inside a code block, and split tags
+# so we never rewrite inside an attribute (e.g. an existing href="#_…").
+_CODE_SPLIT_RE = re.compile(r"(<pre\b.*?</pre>|<code\b.*?</code>)", re.DOTALL | re.IGNORECASE)
+_TAG_SPLIT_RE = re.compile(r"(<[^>]+>)")
+
+
+def _msgid_anchor(m) -> str:
+    dlg, mid, label = m.group("dlg"), m.group("mid"), m.group(0)
+    if dlg:                                   # cross-dialog: open that dialog, then scroll
+        return (f'<a class="msglink xdlg" href="/open?dialog={quote(dlg)}#{mid}" '
+                f'title="Open {dlg} at this cell">{label}</a>')
+    # same-dialog: intercepted by JS to scroll (no navigation), href is a fallback
+    return (f'<a class="msglink" href="#cell-{mid}" data-mid="{mid}" '
+            f'title="Jump to this cell">{label}</a>')
+
+
+# A standard markdown link whose target is a msgid anchor — `[label](#_id)` or
+# `[label](#folder/dlg/_id)` — renders as a plain <a href="#…">. Upgrade those to
+# our msglink so they get the same scroll/flash/no-edit behavior, keeping the
+# author's own label. This lets people use ordinary markdown links, not just the
+# bare `#_id` autolink.
+_MSGID_HREF_RE = re.compile(
+    r'<a href="#(?:(?P<dlg>[\w][\w./-]*)/)?(?P<mid>_[0-9a-f]{6,})"(?P<rest>[^>]*)>')
+
+
+def _upgrade_anchor(m) -> str:
+    dlg, mid, rest = m.group("dlg"), m.group("mid"), m.group("rest")
+    if dlg:
+        return f'<a class="msglink xdlg" href="/open?dialog={quote(dlg)}#{mid}"{rest}>'
+    return f'<a class="msglink" href="#cell-{mid}" data-mid="{mid}"{rest}>'
+
+
+def _upgrade_msgid_anchors(html: str) -> str:
+    """Rewrite markdown-rendered `<a href="#_id">` links into msglinks (add the
+    class + data-mid, and the /open href for cross-dialog ones)."""
+    if '"#' not in html:
+        return html
+    return _MSGID_HREF_RE.sub(_upgrade_anchor, html)
+
+
+def _linkify_msgids(html: str) -> str:
+    """Turn bare `#_msgid` / `#dialog/_msgid` references in rendered HTML into
+    links, skipping code blocks and tag attributes so only visible text is
+    rewritten. (Markdown `[label](#_id)` links are handled by _upgrade_msgid_anchors.)"""
+    if "#" not in html:                       # no anchor syntax at all → cheap exit
+        return html
+    out = []
+    for i, block in enumerate(_CODE_SPLIT_RE.split(html)):
+        if i % 2:                             # odd => a <pre>/<code> block: leave as-is
+            out.append(block)
+            continue
+        out.append("".join(
+            piece if j % 2 else _MSGID_RE.sub(_msgid_anchor, piece)   # odd => an HTML tag
+            for j, piece in enumerate(_TAG_SPLIT_RE.split(block))))
+    return "".join(out)
+
+
 def render_md(text: str):
     """Render markdown to safe HTML, or fall back to escaped plain text."""
     text = text or ""
-    return NotStr(_md(text)) if _md else text
+    if not _md:
+        return text
+    # markdown links [label](#_id) first, then bare #_id text references.
+    return NotStr(_linkify_msgids(_upgrade_msgid_anchors(_md(text))))
 
 
 def _initial_target() -> str:
@@ -444,6 +508,15 @@ select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-
 .cell-btn.run{background:var(--accent);color:#fff;border-color:var(--accent)}
 .cell-btn.run:hover{filter:brightness(1.05);color:#fff}
 .cell-btn.del:hover{border-color:#C0584B;color:#C0584B}
+.cell-btn.link{padding:3px 8px}
+.cell-btn.link.copied{border-color:var(--accent);color:var(--accent)}
+/* #_msgid references in notes / AI answers */
+a.msglink{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent);
+  font-variant-numeric:tabular-nums;cursor:pointer}
+a.msglink:hover{border-bottom-style:solid}
+/* brief pulse when you jump to a cell via a link */
+@keyframes msgflash{0%{background:rgba(217,119,87,.22)}100%{background:transparent}}
+.row.msg-flash{animation:msgflash 1.6s ease-out;border-radius:10px}
 .cell-btn.ins{color:#2C6B45;font-weight:600}
 .cell-btn.ins:hover{border-color:#BFE0CC;background:#E6F2EA}
 .ins{position:relative;display:inline-block}
@@ -868,9 +941,17 @@ def _head(m, primary, num=None, show_actions=False):
     if m.msg_type == "code":
         bits.append(Span(m.id, cls="muted small"))
     bits.append(_tok_badge(m))
-    bits.append(Div(*primary, *_ctx_buttons(m),
+    bits.append(Div(*primary, _link_btn(m), *_ctx_buttons(m),
                     cls="cell-actions" + (" show" if show_actions else "")))
     return Div(*bits, cls="who")
+
+
+def _link_btn(m):
+    """🔗 Copy a #reference to this cell — SolveIt's `#_msgid` anchor. It's the exact
+    string you paste into a note or prompt (same dialog) to render a clickable link
+    here; prefix a dialog path (`#folder/dlg/_id`) to reference it from elsewhere."""
+    return Button("🔗", type="button", cls="cell-btn link", title="Copy a #link to this cell",
+                  onclick="_copyMsgLink(this)", **{"data-anchor": f"#{m.id}"})
 
 
 def _output_views(m):
@@ -1882,6 +1963,57 @@ def SettingsPage(saved=False):
 # Table of contents built from note headings (h1–h6 inside .note-view). Lives in
 # Page() (not #stream), so it persists across htmx swaps; STREAM_JS calls
 # window.buildTOC() on each render to keep it in sync. Toggle state is saved.
+MSGLINK_JS = """
+(function(){
+  function scrollToCell(mid){
+    var el = document.getElementById('cell-'+mid);
+    if(!el) return false;
+    el.scrollIntoView({behavior:'smooth', block:'center'});
+    el.classList.remove('msg-flash'); void el.offsetWidth;   // restart the flash animation
+    el.classList.add('msg-flash');
+    setTimeout(function(){ el.classList.remove('msg-flash'); }, 1600);
+    return true;
+  }
+  window.__scrollToCell = scrollToCell;
+  // A #_msgid link lives inside a note, which is itself click-to-edit (htmx
+  // hx-get on click). Capture the click BEFORE it bubbles to that edit trigger
+  // and stop it there, so following a link never drops the cell into edit mode.
+  // Same-dialog links scroll in place; cross-dialog (.xdlg) links keep their
+  // href so they open the other dialog.
+  document.addEventListener('click', function(e){
+    var a = e.target.closest && e.target.closest('a.msglink');
+    if(!a) return;
+    e.stopPropagation();                       // don't trip the cell's click-to-edit
+    if(a.classList.contains('xdlg')) return;   // let it navigate to the other dialog
+    var mid = a.getAttribute('data-mid');
+    if(mid && document.getElementById('cell-'+mid)){ e.preventDefault(); scrollToCell(mid); }
+  }, true);
+  // Copy a cell's #_msgid anchor — the same string you paste inline to link here.
+  // Brief tooltip feedback so the click lands visibly.
+  window._copyMsgLink = function(btn){
+    var ref = btn.getAttribute('data-anchor');
+    function ok(){ var t = btn.getAttribute('title'); btn.setAttribute('title','Copied '+ref);
+      btn.classList.add('copied');
+      setTimeout(function(){ btn.setAttribute('title', t); btn.classList.remove('copied'); }, 1400); }
+    if(navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(ref).then(ok, ok);
+    } else {
+      var ta = document.createElement('textarea'); ta.value = ref; document.body.appendChild(ta);
+      ta.select(); try{ document.execCommand('copy'); }catch(e){} ta.remove(); ok();
+    }
+  };
+  // Honor a #_msgid in the URL on load (e.g. after /open?dialog=…#_id) and on
+  // manual hash edits — but NOT on htmx swaps, which shouldn't yank the view.
+  function honorHash(){
+    var m = (location.hash || '').match(/^#(_[0-9a-f]{6,})$/);
+    if(m) requestAnimationFrame(function(){ scrollToCell(m[1]); });
+  }
+  window.addEventListener('DOMContentLoaded', honorHash);
+  window.addEventListener('hashchange', honorHash);
+  honorHash();
+})();
+"""
+
 TOC_JS = """
 window.buildTOC = function(){
   var list = document.getElementById('tocList');
@@ -2213,7 +2345,7 @@ def Page():
                     cls="toc", id="toc"),
                 cls="cols"),
             cls="app" + (" paper-open" if STATE.get("paper") else ""),
-        ), Script(TOC_JS)),
+        ), Script(TOC_JS), Script(MSGLINK_JS)),
     )
 
 

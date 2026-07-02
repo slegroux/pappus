@@ -744,6 +744,100 @@ def test_mode_select_renders_current_selection():
     app.STATE["ai_mode"] = app.DEFAULT_MODE                  # restore default for other tests
 
 
+# ---- message-ID links (#_msgid anchors) ------------------------------------
+def test_linkify_same_dialog_msgid():
+    import sidekick.app as app
+    out = app._linkify_msgids("see #_deadbeef now")
+    assert 'class="msglink"' in out and 'data-mid="_deadbeef"' in out
+    assert 'href="#cell-_deadbeef"' in out and "xdlg" not in out   # scrolls, no navigation
+
+
+def test_linkify_cross_dialog_msgid():
+    import sidekick.app as app
+    out = app._linkify_msgids("compare #activation/snake/_abc12345 here")
+    assert 'class="msglink xdlg"' in out                            # navigates to the dialog
+    assert 'href="/open?dialog=activation/snake#_abc12345"' in out
+
+
+def test_linkify_skips_code_blocks():
+    import sidekick.app as app
+    out = app._linkify_msgids('<p>#_aaaa1111</p><pre>x = "#_bbbb2222"</pre>')
+    assert 'href="#cell-_aaaa1111"' in out                          # prose linked
+    assert '<pre>x = "#_bbbb2222"</pre>' in out                     # code left verbatim
+
+
+def test_linkify_skips_existing_href_attributes():
+    import sidekick.app as app
+    out = app._linkify_msgids('<a href="#_cccc3333">x</a> bare #_dddd4444')
+    assert '<a href="#_cccc3333">x</a>' in out                      # attribute untouched
+    assert 'data-mid="_dddd4444"' in out                            # bare text linked
+
+
+def test_linkify_noop_without_hash():
+    import sidekick.app as app
+    assert app._linkify_msgids("plain prose, no anchors") == "plain prose, no anchors"
+
+
+def test_render_md_autolinks_msgid():
+    import sidekick.app as app
+    if app._md is None:
+        import pytest
+        pytest.skip("mistune not installed")
+    assert 'class="msglink"' in str(app.render_md("See #_deadbeef for the setup"))
+
+
+def test_markdown_link_to_msgid_is_upgraded():
+    # A standard markdown link [label](#_id) becomes a msglink, keeping the label.
+    import sidekick.app as app
+    out = app._upgrade_msgid_anchors('<a href="#_a321d2a1">the computation</a>')
+    assert 'class="msglink"' in out and 'data-mid="_a321d2a1"' in out
+    assert ">the computation</a>" in out                    # author's label preserved
+
+
+def test_markdown_link_cross_dialog_is_upgraded():
+    import sidekick.app as app
+    out = app._upgrade_msgid_anchors('<a href="#folder/dlg/_b2c3d4e5">x</a>')
+    assert 'class="msglink xdlg"' in out
+    assert 'href="/open?dialog=folder/dlg#_b2c3d4e5"' in out
+
+
+def test_upgrade_leaves_ordinary_anchors_alone():
+    # External links and heading anchors must NOT be turned into msglinks.
+    import sidekick.app as app
+    out = app._upgrade_msgid_anchors(
+        '<a href="https://example.com">x</a> <a href="#section-title">y</a>')
+    assert "msglink" not in out
+
+
+def test_render_md_upgrades_markdown_msgid_link():
+    import sidekick.app as app
+    if app._md is None:
+        import pytest
+        pytest.skip("mistune not installed")
+    out = str(app.render_md("Back to [the setup](#_deadbeef) now"))
+    assert 'class="msglink"' in out and ">the setup</a>" in out
+
+
+def test_link_button_copies_msgid_anchor():
+    # SolveIt's 🔗 "Copy URL anchor" — the button copies the #_msgid string you
+    # paste inline to link here, not a full URL.
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    from sidekick.client import Msg
+    html = to_xml(app._link_btn(Msg(id="_ff00ff00", msg_type="code", content="x=1")))
+    assert 'data-anchor="#_ff00ff00"' in html
+    assert "_copyMsgLink(this)" in html
+
+
+def test_msgrow_includes_link_button():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    from sidekick.client import Msg
+    app.STATE["dialog"] = "d"
+    html = to_xml(app.MsgRow(Msg(id="_1234abcd", msg_type="note", content="hi"), num=1))
+    assert 'cls="cell-btn link"' in html or 'class="cell-btn link"' in html
+
+
 def test_claude_cli_missing_binary_is_friendly(monkeypatch):
     import sidekick.claude_cli as cc
     monkeypatch.setattr(cc, "claude_bin", lambda: None)
