@@ -476,6 +476,16 @@ class HttpKernelBackend(_InMemoryBackend):
         self._save()                         # persist the new output/plots
         return m
 
+    def eval_exprs(self, dialog: str, content: str) -> tuple[str, list]:
+        """Resolve $`expr` injections in a prompt against the kernel's live
+        namespace (the app process can't reach it directly — it lives in the
+        kernel server). Best-effort: on any failure the prompt is sent as-is."""
+        try:
+            r = self._post("/eval", {"dialog": dialog, "content": content})
+            return r.get("content", content), r.get("warnings", [])
+        except Exception:  # noqa: BLE001 — injection must never break a prompt
+            return content, []
+
     def complete(self, dialog: str, code: str, line: int, col: int) -> list:
         """Code completions at (line, col) from the kernel's live namespace.
         Best-effort: any failure yields no completions rather than an error."""

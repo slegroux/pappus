@@ -249,6 +249,29 @@ to keep it in context even when older cells are trimmed.
 This applies to the bundled **kernel** backend. On a real **solveit** target,
 SolveIt's server assembles the dialog context itself.
 
+#### Inject live values into a prompt
+
+Put `` $`expr` `` anywhere in an *Ask AI* prompt and it's replaced with the value
+of that Python expression — evaluated against the **live kernel namespace, fresh
+each time you send** (SolveIt's variable-injection syntax). So after you run
+`df = pd.read_csv(...)`, asking
+
+> Why might `` $`df.shape` `` rows drop to `` $`len(df.dropna())` `` after dropna?
+
+sends the AI the *actual* numbers, not the literal text. It's the same idea as an
+f-string, in the prompt: a bare name (`` $`n` ``) injects its current value, and a
+full expression (`` $`len(items)` ``, `` $`df.columns.tolist()` ``) is computed on
+the spot. Only the text the AI receives is filled in — the cell keeps the raw
+`` $`…` `` so it re-evaluates on every re-ask. A lone `$` (e.g. `$5`) is left
+alone, and an expression that errors (a typo'd name) becomes a visible
+`` [unresolved `…`] `` marker instead of aborting the prompt, so the AI still sees
+the rest of your question.
+
+This needs the **kernel** backend (the expression runs in its namespace); the
+mock target leaves `` $`…` `` literal, and a real **solveit** target does its own
+injection server-side. Oversized values are truncated so one big object can't blow
+the prompt open.
+
 #### The AI can edit cells (Max plan)
 
 Ask AI doesn't only *answer* — it can **edit the notebook for you**. Ask it to

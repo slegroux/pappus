@@ -16,6 +16,7 @@ Endpoints (simple JSON):
     POST /exec     {dialog,code}                    -> {output, rich}
     POST /complete {dialog,code,line,col}           -> {completions}
     POST /prompt   {dialog,content,model,context}   -> {output, model}
+    POST /eval     {dialog,content}                 -> {content, warnings}
     POST /reset    {dialog}                 -> {ok}
 
 Run:  python -m server.kernel_server --port 5001        # laptop ('local' target)
@@ -30,6 +31,7 @@ import hmac
 import io
 import json
 import os
+import re
 import contextlib
 import warnings
 from http.cookies import SimpleCookie
@@ -206,6 +208,45 @@ def run_code(dialog: str, code: str) -> tuple[str, list]:
     return buf.getvalue().rstrip("\n"), rich
 
 
+# Variable/expression injection: $`expr` in a prompt is evaluated against the
+# dialog's live namespace and replaced with the value, fresh each send — SolveIt's
+# way of putting real kernel values in front of the AI ($`df.shape`, $`len(rows)`).
+_INJECT_RE = re.compile(r"\$`([^`]+)`")
+_INJECT_LIMIT = 4000            # cap a single injected value so one big object
+                               # (a whole DataFrame) can't blow the prompt open.
+
+
+def _inject_str(val) -> str:
+    """Render an injected value as text. str() gives the f-string-like form the
+    user expects ($`name` reads like {name}); oversized values are truncated."""
+    s = str(val)
+    if len(s) <= _INJECT_LIMIT:
+        return s
+    return s[:_INJECT_LIMIT] + f"… [+{len(s) - _INJECT_LIMIT} chars truncated]"
+
+
+def inject_vars(dialog: str, content: str) -> tuple[str, list]:
+    """Replace every $`expr` in `content` with its value from the dialog's kernel
+    namespace. Returns (resolved, warnings). Each expression is eval'd fresh (so
+    it reflects current state); a failing one is left as a visible marker and its
+    error collected, mirroring SolveIt (it never aborts the prompt)."""
+    if "$`" not in content:
+        return content, []
+    ns = _ns(dialog)
+    warnings_: list = []
+
+    def repl(m):
+        expr = m.group(1).strip()
+        try:
+            val = eval(compile(expr, "<inject>", "eval"), ns)   # noqa: S307 — user's own prompt
+            return _inject_str(val)     # str(val) can itself raise (broken __str__) — guard it too
+        except Exception as e:  # noqa: BLE001 — surface, don't crash the prompt
+            warnings_.append(f"{expr}: {type(e).__name__}: {e}")
+            return f"[unresolved `{expr}`: {type(e).__name__}]"
+
+    return _INJECT_RE.sub(repl, content), warnings_
+
+
 # Default API model per provider; override with env (e.g. OPENAI_MODEL=gpt-4.1).
 MODEL_NAMES = {
     "claude": os.environ.get("ANTHROPIC_MODEL", "claude-sonnet-4-6"),
@@ -342,10 +383,15 @@ class Handler(BaseHTTPRequestHandler):
                                   int(payload.get("line", 1)), int(payload.get("col", 0)))
             return self._send(200, {"completions": comps})
         if path == "/prompt":
-            out = run_prompt(payload.get("dialog", "default"),
-                             payload.get("content", ""), payload.get("model", "claude"),
+            dlg = payload.get("dialog", "default")
+            content, _warns = inject_vars(dlg, payload.get("content", ""))
+            out = run_prompt(dlg, content, payload.get("model", "claude"),
                              payload.get("context", ""))
             return self._send(200, {"output": out, "model": payload.get("model", "claude")})
+        if path == "/eval":
+            content, warns = inject_vars(payload.get("dialog", "default"),
+                                         payload.get("content", ""))
+            return self._send(200, {"content": content, "warnings": warns})
         if path == "/reset":
             d = payload.get("dialog", "")
             KERNELS.pop(d, None)
