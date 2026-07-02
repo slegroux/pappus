@@ -71,6 +71,41 @@ _PERSONA = (
     "Be concise, concrete, and encouraging. Default to the smallest helpful next step."
 )
 
+# AI modes (SolveIt's learning / concise / standard). The base persona above is
+# the always-on small-steps foundation; a mode appends a short directive that
+# tunes how much the AI questions, explains, and hands over. `learning` is the
+# default — it's the point of the tool (help the user reach their own
+# understanding), and the persona already leans that way.
+DEFAULT_MODE = "learning"
+_MODE_DIRECTIVES = {
+    "learning": (
+        "\n\nMODE — Learning. Favour the user's understanding over a finished answer. "
+        "Before writing code, check they've thought it through: ask one short guiding "
+        "question, or offer a hint, and leave room for them to try. When they're stuck "
+        "or ask directly, show the smallest piece that unblocks them and explain the "
+        "idea behind it — never hand over a whole solution they could have reached "
+        "themselves. Prefer a leading question to a declaration."
+    ),
+    "concise": (
+        "\n\nMODE — Concise. Minimal prose. Give the next step or answer directly: "
+        "compact, runnable code, no boilerplate, no preamble or recap. At most one "
+        "sentence of reasoning, and only when it's needed."
+    ),
+    "standard": (
+        "\n\nMODE — Standard. Answer helpfully and completely. Explain your reasoning, "
+        "and when asked for code give a complete, correct version with enough "
+        "explanation to follow it. Still build on the notebook's existing state, and "
+        "still leave the running of code to the user."
+    ),
+}
+# (id, label) for the UI selector — order is display order.
+AI_MODES = [("learning", "Learning"), ("concise", "Concise"), ("standard", "Standard")]
+
+
+def _mode_block(mode: str | None) -> str:
+    return _MODE_DIRECTIVES.get(mode or DEFAULT_MODE, _MODE_DIRECTIVES[DEFAULT_MODE])
+
+
 # Appended after the persona when the dialog has prior cells.
 _CONTEXT_INTRO = (
     "\n\nHere is the dialog so far (code, output, notes, and prior Q&A), in order. "
@@ -172,14 +207,16 @@ def _write_mcp_config(dialog: str) -> str:
     return path
 
 
-def system(context: str) -> str:
-    """The SolveIt persona, plus the serialized notebook context when there is any.
+def system(context: str, mode: str | None = None) -> str:
+    """The SolveIt persona + the active mode directive, plus the serialized notebook
+    context when there is any.
 
     The persona always applies — including the first prompt in an empty dialog — so
     the assistant works in the SolveIt small-steps style from the very first turn.
-    The notebook context is appended only when present.
+    `mode` tunes how much it questions/explains (learning/concise/standard). The
+    notebook context is appended only when present.
     """
-    return _PERSONA + (_CONTEXT_INTRO + context if context else "")
+    return _PERSONA + _mode_block(mode) + (_CONTEXT_INTRO + context if context else "")
 
 
 def _cli_cwd() -> str:
@@ -202,7 +239,8 @@ def _env() -> dict:
     return env
 
 
-def _build_cmd(dialog: str, content: str, context: str, stream: bool, model: str | None = None):
+def _build_cmd(dialog: str, content: str, context: str, stream: bool,
+               model: str | None = None, mode: str | None = None):
     """Build the argv and the session id we'll record. Returns (cmd, sid), or
     (None, None) if the `claude` binary isn't installed.
 
@@ -214,7 +252,10 @@ def _build_cmd(dialog: str, content: str, context: str, stream: bool, model: str
     if not claude:
         return None, None
     st = CLI_SESSIONS.get(dialog)
-    resume = bool(st) and context.startswith(st["sent"])
+    # Resume only while the context is still a prefix AND the mode is unchanged —
+    # the mode directive lives in the session's system prompt, which a resume can't
+    # rewrite, so switching mode must start a fresh session to actually take effect.
+    resume = bool(st) and context.startswith(st["sent"]) and st.get("mode") == mode
     fmt = "stream-json" if stream else "json"
     cmd = [claude, "-p", "--output-format", fmt, "--disable-slash-commands",
            # Lean mode: skip MCP servers and *user* settings (hooks, auto-memory,
@@ -245,7 +286,7 @@ def _build_cmd(dialog: str, content: str, context: str, stream: bool, model: str
         sid = str(uuid.uuid4())
         user_msg = content
         cmd += ["--session-id", sid]
-        sysmsg = system(context)            # persona + full notebook context
+        sysmsg = system(context, mode)      # persona + mode + full notebook context
         if tools:                           # teach the tools once, on the fresh turn
             sysmsg += _TOOLS_GUIDANCE
         cmd += ["--append-system-prompt", sysmsg]
@@ -297,9 +338,10 @@ def cost_for(dialog: str) -> dict | None:
     return CLI_COST.get(dialog)
 
 
-def call(dialog: str, content: str, context: str = "", model: str | None = None) -> str:
+def call(dialog: str, content: str, context: str = "", model: str | None = None,
+         mode: str | None = None) -> str:
     """Non-streaming: one `claude -p` call, full text back. Used by the kernel server."""
-    cmd, sid = _build_cmd(dialog, content, context, stream=False, model=model)
+    cmd, sid = _build_cmd(dialog, content, context, stream=False, model=model, mode=mode)
     if cmd is None:
         return MISSING
     try:
@@ -315,7 +357,7 @@ def call(dialog: str, content: str, context: str = "", model: str | None = None)
         return (r.stdout or "").strip() or "[Claude (Max plan): empty response]"
     if data.get("is_error"):
         return f"[Claude (Max plan) error: {data.get('result') or 'unknown'}]"
-    CLI_SESSIONS[dialog] = {"id": data.get("session_id") or sid, "sent": context}
+    CLI_SESSIONS[dialog] = {"id": data.get("session_id") or sid, "sent": context, "mode": mode}
     _accrue(dialog, data)
     return data.get("result", "")
 
@@ -329,7 +371,8 @@ def _popen(cmd, cwd, env):
                             stdin=subprocess.DEVNULL, text=True, bufsize=1, cwd=cwd, env=env)
 
 
-def stream(dialog: str, content: str, context: str = "", model: str | None = None):
+def stream(dialog: str, content: str, context: str = "", model: str | None = None,
+           mode: str | None = None):
     """Streaming: yield text deltas as Claude generates them (for the app's SSE route).
 
     Parses `claude -p --output-format stream-json` events, yielding each
@@ -337,7 +380,7 @@ def stream(dialog: str, content: str, context: str = "", model: str | None = Non
     `result` event so the next turn can resume + send only the delta — same
     contract as `call`.
     """
-    cmd, sid = _build_cmd(dialog, content, context, stream=True, model=model)
+    cmd, sid = _build_cmd(dialog, content, context, stream=True, model=model, mode=mode)
     if cmd is None:
         yield MISSING
         return
@@ -372,7 +415,8 @@ def stream(dialog: str, content: str, context: str = "", model: str | None = Non
         p.wait(timeout=5)
     except Exception:  # noqa: BLE001 — reaping is best-effort
         pass
-    # Advance the session: remember its id and the full context it now knows.
-    CLI_SESSIONS[dialog] = {"id": final_sid, "sent": context}
+    # Advance the session: remember its id, the full context it now knows, and the
+    # mode it was started with (a mode change forces a fresh session — see _build_cmd).
+    CLI_SESSIONS[dialog] = {"id": final_sid, "sent": context, "mode": mode}
     if final_result is not None and not final_result.get("is_error"):
         _accrue(dialog, final_result)                # running token/cost tally

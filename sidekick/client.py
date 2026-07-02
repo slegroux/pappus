@@ -34,6 +34,7 @@ class Msg:
     content: str
     output: str = ""
     model: str | None = None   # which AI model a prompt was routed to
+    ai_mode: str | None = None # persona for a prompt: learning/concise/standard
     muted: bool = False        # if True, excluded from the AI's notebook context
     pinned: bool = False       # if True, always kept in context (survives budget trimming)
     rich: list = field(default_factory=list)   # rich outputs: [{"type": mime, "data": ...}]
@@ -205,8 +206,10 @@ class _InMemoryBackend:
                 return m
         return None
 
-    def add(self, dialog: str, content: str, msg_type: str, model: str | None = None) -> Msg:
-        m = Msg(id="_" + uuid.uuid4().hex[:8], msg_type=msg_type, content=content, model=model)
+    def add(self, dialog: str, content: str, msg_type: str, model: str | None = None,
+            ai_mode: str | None = None) -> Msg:
+        m = Msg(id="_" + uuid.uuid4().hex[:8], msg_type=msg_type, content=content,
+                model=model, ai_mode=ai_mode)
         self._dialogs.setdefault(dialog, []).append(m)
         self._save()
         return m
@@ -403,9 +406,10 @@ class LiveBackend:
     def messages(self, dialog: str) -> list[Msg]:
         return [_live_msg(m) for m in self._dlg(dialog).messages]
 
-    def add(self, dialog: str, content: str, msg_type: str, model: str | None = None) -> Msg:
-        # add_msg has no `model` parameter — SolveIt selects the AI per dialog,
-        # not per message — so `model` stays on our own Msg for display only.
+    def add(self, dialog: str, content: str, msg_type: str, model: str | None = None,
+            ai_mode: str | None = None) -> Msg:
+        # add_msg has no `model`/`mode` parameter — SolveIt selects the AI and mode
+        # per dialog on its own side — so they stay on our own Msg for display only.
         m = self._dlg(dialog).add_msg(content, msg_type=msg_type)
         return _live_msg(m, model if msg_type == "prompt" else None)
 
@@ -471,7 +475,7 @@ class HttpKernelBackend(_InMemoryBackend):
             context = build_context(self._dialogs.get(dialog, []), upto_id=msg_id)
             r = self._post("/prompt", {"dialog": dialog, "content": m.content,
                                        "model": m.model or _fallback_model(),
-                                       "context": context})
+                                       "context": context, "mode": m.ai_mode})
             m.output = r["output"]
         self._save()                         # persist the new output/plots
         return m

@@ -20,7 +20,7 @@ from starlette.datastructures import UploadFile
 
 from .targets import get_target, list_targets, list_models, default_model
 from .client import connect, build_context, est_tokens, _InMemoryBackend
-from .claude_cli import stream as stream_claude, cost_for, CLI_MODELS
+from .claude_cli import stream as stream_claude, cost_for, CLI_MODELS, AI_MODES, DEFAULT_MODE
 from . import secrets_store, export
 from . import paper as paperlib
 
@@ -135,6 +135,7 @@ STATE = {
     "warning": None,
     "dialog": "demo/welcome",
     "model": default_model(),
+    "ai_mode": DEFAULT_MODE,   # AI persona for Ask AI: learning/concise/standard
     "msg_type": "prompt",
     "pending_stream": None,   # (dialog, msg_id) whose answer is being streamed live
     "paper": None,            # {name, status, md, engine} for the reading panel
@@ -1775,6 +1776,16 @@ def ModelSelect():
     return Select(*opts, name="model", cls="msel", title="AI model for Ask AI")
 
 
+def ModeSelect():
+    """The SolveIt AI mode — how the assistant should respond (learning/concise/
+    standard). Submitted with the send form (name="ai_mode") and remembered."""
+    cur = STATE.get("ai_mode", DEFAULT_MODE)
+    opts = [Option(label, value=mid, selected=(mid == cur)) for mid, label in AI_MODES]
+    return Select(*opts, name="ai_mode", cls="msel",
+                  title="AI mode — learning asks guiding questions; concise is terse; "
+                        "standard answers fully")
+
+
 def Composer():
     cur = STATE.get("msg_type", "prompt")
 
@@ -1792,8 +1803,8 @@ def Composer():
             Div(
                 Div(mode("prompt", "Ask AI"), mode("code", "Code"),
                     mode("note", "Note"), cls="modes", id="modeChips"),
-                Div(ModelSelect(), Button("↑", cls="send", type="button",
-                                          onclick="_submitComposer()"),
+                Div(ModeSelect(), ModelSelect(),
+                    Button("↑", cls="send", type="button", onclick="_submitComposer()"),
                     style="display:flex;align-items:center;gap:8px"),
                 cls="row2",
             ),
@@ -2415,16 +2426,20 @@ def dialog_delete_bulk(names: str = "[]"):
 
 
 @rt("/send", methods=["post"])
-def send(content: str, msg_type: str = "prompt", model: str = None, htmx=None):
+def send(content: str, msg_type: str = "prompt", model: str = None,
+         ai_mode: str = None, htmx=None):
     content = (content or "").strip()
     if model:
         STATE["model"] = model           # remember last-used model
+    if ai_mode:
+        STATE["ai_mode"] = ai_mode       # remember last-used AI mode
     if msg_type:
         STATE["msg_type"] = msg_type     # remember last-used compose mode
     if content:
         backend = STATE["backend"]
         use_model = STATE["model"] if msg_type == "prompt" else None
-        m = backend.add(STATE["dialog"], content, msg_type, model=use_model)
+        use_mode = STATE["ai_mode"] if msg_type == "prompt" else None
+        m = backend.add(STATE["dialog"], content, msg_type, model=use_model, ai_mode=use_mode)
         STATE["scroll_to"] = m.id            # render scrolls to the new cell
         if msg_type == "prompt" and _can_stream(backend, use_model):
             # Defer the AI call: the page renders an SSE-wired answer that streams
@@ -2510,7 +2525,7 @@ def stream_answer(dialog: str, id: str):
             return
         STATE["cells_dirty"] = False                     # the AI's tools may flip this
         acc = ""
-        for delta in stream_claude(dialog, content, context, model=m.model):
+        for delta in stream_claude(dialog, content, context, model=m.model, mode=m.ai_mode):
             acc += delta
             # str() unwraps NotStr -> raw (already-safe) markdown HTML for the data lines
             yield sse_message(str(render_md(acc)), event="msg")
