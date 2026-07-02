@@ -2444,6 +2444,22 @@ def _msg_by_id(backend, dialog: str, mid: str):
     return None
 
 
+def _resolve_injections(backend, dialog: str, content: str) -> str:
+    """Fill $`expr` in a prompt with live kernel values before it reaches the AI.
+
+    Only the kernel backend can evaluate (the namespace lives in its server); a
+    real solveit target injects on its own side, and the mock has no namespace —
+    both leave the text untouched. Best-effort by design: never block a prompt.
+    """
+    if not content or "$`" not in content:
+        return content
+    fn = getattr(backend, "eval_exprs", None)
+    if fn is None:
+        return content
+    resolved, _warnings = fn(dialog, content)
+    return resolved
+
+
 def _cell_number(backend, dialog: str, mid: str):
     """The cell's 1-based number (its position in the dialog) — so a single-row
     htmx swap shows the same badge as a full render."""
@@ -2483,6 +2499,10 @@ def stream_answer(dialog: str, id: str):
     backend = STATE["backend"]
     m = _msg_by_id(backend, dialog, id)
     context = build_context(backend.messages(dialog), upto_id=id) if m else ""
+    # Resolve $`expr` injections against the live kernel, fresh at send time. The
+    # cell's stored source keeps the raw $`…`; only what the AI receives is filled
+    # in. A backend with no kernel (mock) leaves them literal.
+    content = _resolve_injections(backend, dialog, m.content) if m else ""
 
     def gen():
         if m is None:
@@ -2490,7 +2510,7 @@ def stream_answer(dialog: str, id: str):
             return
         STATE["cells_dirty"] = False                     # the AI's tools may flip this
         acc = ""
-        for delta in stream_claude(dialog, m.content, context, model=m.model):
+        for delta in stream_claude(dialog, content, context, model=m.model):
             acc += delta
             # str() unwraps NotStr -> raw (already-safe) markdown HTML for the data lines
             yield sse_message(str(render_md(acc)), event="msg")

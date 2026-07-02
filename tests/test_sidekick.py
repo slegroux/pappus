@@ -814,6 +814,102 @@ def test_run_code_trailing_semicolon_suppresses_value():
     assert text == "" and rich == []                    # Jupyter-style suppression
 
 
+# ---- variable / expression injection ($`expr` in prompts) ------------------
+def test_inject_vars_evaluates_against_namespace():
+    import server.kernel_server as ks
+    ks.run_code("inj/ns", "x = 41\nrows = [1, 2, 3]")
+    out, warns = ks.inject_vars("inj/ns", "x+1 is $`x + 1`, $`len(rows)` rows")
+    assert out == "x+1 is 42, 3 rows" and warns == []
+
+
+def test_inject_vars_missing_name_is_marked_not_fatal():
+    import server.kernel_server as ks
+    ks.run_code("inj/miss", "a = 1")
+    out, warns = ks.inject_vars("inj/miss", "value $`nope`")
+    assert "[unresolved `nope`: NameError]" in out         # visible, prompt not aborted
+    assert warns and "NameError" in warns[0]
+
+
+def test_inject_vars_passthrough_without_marker():
+    import server.kernel_server as ks
+    out, warns = ks.inject_vars("inj/none", "plain text, cost is $5")
+    assert out == "plain text, cost is $5" and warns == []  # lone $ is left alone
+
+
+def test_inject_vars_truncates_oversized_value():
+    import server.kernel_server as ks
+    ks.run_code("inj/big", "blob = 'z' * 10000")
+    out, _ = ks.inject_vars("inj/big", "$`blob`")
+    assert len(out) < 10000 and "truncated" in out
+
+
+def test_resolve_injections_noop_without_eval_backend():
+    # Mock backend has no kernel namespace -> $`…` is left literal, never crashes.
+    import sidekick.app as app
+    b = MockBackend()
+    assert app._resolve_injections(b, "d", "keep $`x` literal") == "keep $`x` literal"
+
+
+def test_eval_exprs_backend_resolves_via_server(monkeypatch):
+    # The app's streaming path resolves through the kernel backend's /eval call.
+    b = HttpKernelBackend.__new__(HttpKernelBackend)
+    b._post = lambda path, body: {"content": "got 7", "warnings": []}
+    resolved, warns = b.eval_exprs("d", "got $`3 + 4`")
+    assert resolved == "got 7" and warns == []
+
+
+def test_inject_vars_broken_str_degrades_to_marker():
+    # A value whose __repr__/__str__ raises must not crash the whole prompt.
+    import server.kernel_server as ks
+    ks.run_code("inj/broken",
+                "class Boom:\n"
+                "    def __repr__(self): raise ValueError('nope')\n"
+                "b = Boom()")
+    out, warns = ks.inject_vars("inj/broken", "value $`b` here")
+    assert "[unresolved `b`: ValueError]" in out           # marker, not an exception
+    assert warns and "ValueError" in warns[0]
+
+
+def test_eval_exprs_falls_back_on_server_error():
+    # If the /eval round-trip throws, the prompt is sent as-is — never blocked.
+    b = HttpKernelBackend.__new__(HttpKernelBackend)
+    def boom(path, body): raise ConnectionError("kernel down")
+    b._post = boom
+    resolved, warns = b.eval_exprs("d", "keep $`x`")
+    assert resolved == "keep $`x`" and warns == []
+
+
+def test_stream_path_resolves_injection_before_reaching_ai(monkeypatch):
+    """End-to-end for the real streaming path: /stream must send the AI the
+    *resolved* prompt (kernel values filled in), not the raw $`…` source."""
+    import asyncio
+    import sidekick.app as app
+
+    # A kernel backend whose /eval simulates the server resolving against a live
+    # namespace (x -> 42); everything else is the genuine _InMemoryBackend.
+    b = HttpKernelBackend.__new__(HttpKernelBackend)
+    b._dialogs = {}
+    b._post = lambda path, body: {"content": body["content"].replace("$`x`", "42"),
+                                  "warnings": []} if path == "/eval" else {}
+    m = b.add("inj/stream", "what is $`x`?", "prompt", model="claude-cli")
+
+    seen = {}
+    def fake_stream(dialog, content, context, model=None):
+        seen["content"] = content                          # capture what the AI receives
+        return iter(())                                    # no tokens
+    monkeypatch.setattr(app, "stream_claude", fake_stream)
+    monkeypatch.setitem(app.STATE, "backend", b)
+
+    resp = app.stream_answer("inj/stream", m.id)
+    async def drain():
+        async for _ in resp.body_iterator:
+            pass
+    asyncio.run(drain())
+
+    assert seen.get("content") == "what is 42?"            # resolved, not "$`x`"
+    assert m.content == "what is $`x`?"                    # stored source stays raw
+
+
 def test_kernel_backend_exec_stores_rich_output():
     b = HttpKernelBackend.__new__(HttpKernelBackend)
     b._dialogs = {}
