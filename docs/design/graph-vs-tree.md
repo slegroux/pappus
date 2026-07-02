@@ -119,6 +119,46 @@ capability today; the live backend needs an enumeration primitive first. Existin
 dialogs are **opt-in** to any manifest — nothing is auto-included by folder or
 name.
 
+## Cross-dialog libraries (the tree side, in detail)
+
+The manifest becomes concrete as a **cell-centric library**: the library is a
+first-class object, and *cells* — not dialogs — subscribe to it. This is the
+flexible model. A library can draw cells from many learning dialogs, and one
+dialog can feed several libraries; a dialog never has to "belong" to anything.
+
+- **Membership is a sticky per-cell tag.** A cell opts in with
+  `#| export <lib>:<module>` (no `<lib>:` prefix → today's behaviour: the dialog's
+  own package). Tagging once is enough — editing the cell later does not re-tag it.
+- **Identity is a manifest dialog.** A library is registered as a special
+  *manifest dialog* holding its package name, target path, and deps; its note
+  cells become the generated `README.md` (which `export.tangle` already routes
+  notes into). No separate settings surface, no folder-derived identity — explicit,
+  and it dogfoods the notebook UI.
+- **The library is its live cells; the `.py` is a snapshot.** Two levels of
+  "current," and only one needs a build:
+  - *Logical content* = the set of tagged cells, **always live**. Browsing a
+    library, querying it, or asking the AI to review it reads the cells directly,
+    so an edit shows up immediately — no build.
+  - *Materialized package* = the tangled `.py`, refreshed only on an explicit
+    **Build**. The cells are the source of truth; the `.py` is generated and never
+    hand-edited (nbdev's contract). Build carries a **"N cells changed since last
+    build"** staleness badge so the package is never *silently* stale.
+- **A library working-view.** Opening a library assembles its tagged cells into a
+  virtual notebook you can run, edit (editing the real underlying cells), and
+  extend — cells added there are auto-tagged, and the AI can add to the library on
+  request. So "keep working on the library" happens on the cells (graph), through a
+  library-scoped lens, not by hopping across dialogs.
+- **Provenance closes the loop.** Each tangled cell's header carries a message-ID
+  link back to its source cell (`# source: conv/conv1d #_a1b2c3d4`), so the built
+  package points back into the dialogs where it was worked out. Graph → tree → back
+  to graph.
+
+This resolves two of the open questions below — identity storage (a manifest
+dialog) and provenance (per-cell back-links). **Still open:** *lens vs. graduate*
+(does a tagged cell stay co-owned by its origin dialog, or move into the library's
+home?); *real-nbdev interop vs. plain pip-package*; and *write target* (throwaway
+zip vs. syncing into an on-disk repo path).
+
 ## Open questions before build
 
 Deliberately unresolved — they belong to each feature's own planning. Naming them
@@ -142,8 +182,9 @@ here stops a reader from assuming the roadmap is turnkey (it is not).
   public name — namespace by dialog, error on duplicate, or last-wins? Today it's
   silent concat + first-wins `__all__` shadowing.
 - *Provenance:* `_header` stamps a single `dialog_name`; a multi-source module
-  needs per-cell origin.
-- *Identity storage:* where the manifest lives (file vs. dialog) and its schema.
+  needs per-cell origin. (Direction set — per-cell back-links; schema TBD.)
+- *Identity storage:* decided — a **manifest dialog** (see "Cross-dialog
+  libraries" above); its exact cell schema is still TBD.
 
 **Out of scope for this frame:** SolveIt's `TEMPLATE.ipynb` and `AUTORUN/` have no
 analog in Sidekick and are not addressed here.
