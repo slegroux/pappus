@@ -22,6 +22,8 @@ import re
 import sys
 import uuid
 
+from . import tools_config
+
 CLI_MODELS = {"claude-cli", "claude-cli-fast"}
 # A CLI model id whose answer should use a faster, cheaper model. "fast" maps to
 # the Haiku tier — roughly half the time-to-first-token of the default, for quick
@@ -175,16 +177,9 @@ _TOOLS_GUIDANCE = (
 _ALLOWED_TOOLS = [f"mcp__cells__{t}"
                   for t in ("list_cells", "update_cell", "str_replace", "insert_cell")]
 
-# Web research is a *thinking-partner* tool, not the executor's hands — SolveIt's
-# own dialoghelper ships `search`/`searches`/`read_url`/`web_answer`, so this is
-# faithful to the ethos, unlike Write/Edit/Bash (which we deny). It lets Ask AI
-# ground answers in current facts (library versions, live APIs) instead of its
-# training cutoff. Off via SIDEKICK_WEB_TOOLS=0.
-_WEB_TOOLS = ["WebSearch", "WebFetch"]
-
-
-def _web_tools_enabled() -> bool:
-    return os.environ.get("SIDEKICK_WEB_TOOLS", "1") != "0"
+# Which tools the agent may/may not use is declarative — see sidekick.tools_config
+# (allow: web research etc.; deny: the executor's hands Write/Edit/Bash). The
+# cell-editing MCP tools are wired separately below (they need the MCP server).
 
 
 def _cell_tools_enabled() -> bool:
@@ -273,17 +268,15 @@ def _build_cmd(dialog: str, content: str, context: str, stream: bool,
            # plugins). On a heavy global config these add ~1s+ of per-turn latency,
            # and a notebook assistant needs none of them. Subscription auth is
            # unaffected (it's credentials, not a setting source). Big TTFT win.
-           "--strict-mcp-config", "--setting-sources", "project",
-           # Notebook tools yes, off-screen tools no. The AI gets cell-editing MCP
-           # tools below (like SolveIt's dialoghelper) — edits that land in the
-           # shared notebook you can see, and never *run* code. But `claude -p` is
-           # the full agent, so left alone it also has Write/Edit/Bash: it writes
-           # the whole solution to a scratchpad file and executes it off-screen,
-           # taking the executor's seat the human is supposed to hold. Deny those
-           # three (the agent's hands, NOT *your* Claude Code tools) so its only
-           # move is the visible, in-notebook kind — the SolveIt contract. The
-           # persona alone loses to the agent's defaults.
-           "--disallowed-tools", "Write", "Edit", "Bash"]
+           "--strict-mcp-config", "--setting-sources", "project"]
+    # Off-screen tools stay off. `claude -p` is the full agent; left alone it also
+    # has Write/Edit/Bash and would write the whole solution to a scratchpad and run
+    # it off-screen — taking the executor's seat the human is supposed to hold. The
+    # deny list (default Write/Edit/Bash, see tools_config) keeps its only move the
+    # visible, in-notebook kind: the SolveIt contract.
+    deny = tools_config.deny_list()
+    if deny:
+        cmd += ["--disallowed-tools", *deny]
     if stream:                              # stream-json needs these to emit deltas
         cmd += ["--include-partial-messages", "--verbose"]
     tools = _cell_tools_enabled()
@@ -301,7 +294,7 @@ def _build_cmd(dialog: str, content: str, context: str, stream: bool,
         if tools:                           # teach the tools once, on the fresh turn
             sysmsg += _TOOLS_GUIDANCE
         cmd += ["--append-system-prompt", sysmsg]
-    allow = list(_WEB_TOOLS) if _web_tools_enabled() else []
+    allow = list(tools_config.allow_list())
     if tools:                               # register our cell-editing MCP server
         cmd += ["--mcp-config", _write_mcp_config(dialog)]
         allow += _ALLOWED_TOOLS

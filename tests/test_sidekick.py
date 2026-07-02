@@ -2011,12 +2011,12 @@ def test_build_cmd_no_mcp_when_disabled(monkeypatch):
     assert cmd[-1] == "q"
 
 
-def test_build_cmd_allows_web_tools_by_default(monkeypatch):
-    # Web research is a thinking-partner tool (SolveIt ships it), so Ask AI gets it
-    # by default — while the executor's hands (Write/Edit/Bash) stay denied.
+def test_build_cmd_allows_web_tools_by_default(monkeypatch, tmp_path):
+    # With no tools.json, the ethos-safe defaults apply: web research allowed, the
+    # executor's hands (Write/Edit/Bash) denied.
     from sidekick import claude_cli as cc
     monkeypatch.delenv("SIDEKICK_MCP_TOKEN", raising=False)
-    monkeypatch.delenv("SIDEKICK_WEB_TOOLS", raising=False)
+    monkeypatch.setenv("SIDEKICK_TOOLS", str(tmp_path / "none.json"))   # absent -> defaults
     monkeypatch.setattr(cc, "claude_bin", lambda: "/usr/bin/claude")
     cmd, _ = cc._build_cmd("web/on", "q", "ctx", stream=False)
     assert "WebSearch" in cmd and "WebFetch" in cmd
@@ -2025,14 +2025,35 @@ def test_build_cmd_allows_web_tools_by_default(monkeypatch):
     assert dis == ["Write", "Edit", "Bash"]                # research yes, executor's hands no
 
 
-def test_build_cmd_web_tools_opt_out(monkeypatch):
+def test_build_cmd_honors_tools_config(monkeypatch, tmp_path):
+    # A tools.json is the single source of truth: here, allow only WebSearch and
+    # deny nothing → no WebFetch, no --disallowed-tools.
+    import json
     from sidekick import claude_cli as cc
+    p = tmp_path / "tools.json"
+    p.write_text(json.dumps({"allow": ["WebSearch"], "deny": []}))
     monkeypatch.delenv("SIDEKICK_MCP_TOKEN", raising=False)
-    monkeypatch.setenv("SIDEKICK_WEB_TOOLS", "0")
+    monkeypatch.setenv("SIDEKICK_TOOLS", str(p))
     monkeypatch.setattr(cc, "claude_bin", lambda: "/usr/bin/claude")
-    cmd, _ = cc._build_cmd("web/off", "q", "ctx", stream=False)
-    assert "WebSearch" not in cmd and "--allowedTools" not in cmd
+    cmd, _ = cc._build_cmd("web/cfg", "q", "ctx", stream=False)
+    assert "WebSearch" in cmd and "WebFetch" not in cmd
+    assert "--disallowed-tools" not in cmd
     assert cmd[-1] == "q"
+
+
+def test_tools_config_defaults_and_file(monkeypatch, tmp_path):
+    from sidekick import tools_config as tc
+    monkeypatch.setenv("SIDEKICK_TOOLS", str(tmp_path / "tools.json"))
+    # no file -> ethos-safe defaults
+    assert tc.allow_list() == ["WebSearch", "WebFetch"]
+    assert tc.deny_list() == ["Write", "Edit", "Bash"]
+    # a present key (even []) is honored; a missing key falls back to default
+    tc.save(allow=["WebSearch", "Read"], deny=[])
+    assert tc.allow_list() == ["WebSearch", "Read"] and tc.deny_list() == []
+    import json
+    (tmp_path / "tools.json").write_text(json.dumps({"deny": ["Bash"]}))   # allow omitted
+    assert tc.allow_list() == ["WebSearch", "WebFetch"]    # default allow
+    assert tc.deny_list() == ["Bash"]
 
 
 def _mcp_client():
