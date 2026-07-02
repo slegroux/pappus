@@ -27,7 +27,7 @@ mechanisms, and they are kept orthogonal.**
 | Question | Mechanism | Model | Serves |
 |---|---|---|---|
 | How does my knowledge connect? What does the AI see as context? | dialog names + message links + `build_context` | **graph** | learning, exploration |
-| How is the shipped library laid out? | `#\| export <module>` directives → `export.tangle` | **tree** | building, packaging |
+| How is the shipped library laid out? | `#\| export <module>` directives → nbdev build (or `export.tangle`) | **tree** | building, packaging |
 
 `sidekick/export.py` already embodies this: its docstring calls it *"the inverse
 of `build_context`."* One serializes cells **into** AI context (graph); the other
@@ -90,14 +90,13 @@ file-based CRAFT model doesn't map, and a naming/reference convention does.
   *include-by-reference* (above) — a dialog references another and those cells
   join its `build_context`. Sound direction; the hard parts are named under
   "Open questions" below, not free.
-- **Library (tree side):** `export.py` today tangles a **single** dialog into one
-  package. The gap vs. "select a few dialogs/cells and export them" is
-  **cross-dialog build**. Cell-level selection already exists (the per-cell Export
-  toggle) and module targeting already exists (`#| export <module>`), but the
-  *merge* does not: tangling N dialogs raises collisions the current code resolves
-  silently and lossily — two `#| default_exp core`s concatenate, and `__all__` is
-  "first definition wins" so one dialog's `train()` shadows another's with no
-  diagnostic. The identity of the library is the crux — see next.
+- **Library (tree side):** the build engine is **nbdev** (decided — see "Build
+  engine" below). Sidekick projects a library's tagged cells into nbdev-ready
+  notebooks and nbdev builds the package + docs + tests; module assembly and
+  collision handling are nbdev's job, not ours. Cell-level selection and module
+  targeting already exist (the per-cell Export toggle, `#| export <module>`); what
+  is new is the cross-dialog *projection* to notebooks and the library *identity*
+  (a manifest) — the crux, see next.
 
 ### Library identity is an explicit manifest, not folder-derived
 
@@ -130,19 +129,19 @@ dialog can feed several libraries; a dialog never has to "belong" to anything.
   `#| export <lib>:<module>` (no `<lib>:` prefix → today's behaviour: the dialog's
   own package). Tagging once is enough — editing the cell later does not re-tag it.
 - **Identity is a manifest dialog.** A library is registered as a special
-  *manifest dialog* holding its package name, target path, and deps; its note
-  cells become the generated `README.md` (which `export.tangle` already routes
-  notes into). No separate settings surface, no folder-derived identity — explicit,
-  and it dogfoods the notebook UI.
+  *manifest dialog* holding its package name, nbdev project path, and deps; its
+  note cells describe the library (its README / nbdev index). No separate settings
+  surface, no folder-derived identity — explicit, and it dogfoods the notebook UI.
 - **The library is its live cells; the `.py` is a snapshot.** Two levels of
   "current," and only one needs a build:
   - *Logical content* = the set of tagged cells, **always live**. Browsing a
     library, querying it, or asking the AI to review it reads the cells directly,
     so an edit shows up immediately — no build.
-  - *Materialized package* = the tangled `.py`, refreshed only on an explicit
-    **Build**. The cells are the source of truth; the `.py` is generated and never
-    hand-edited (nbdev's contract). Build carries a **"N cells changed since last
-    build"** staleness badge so the package is never *silently* stale.
+  - *Materialized package* = the built library (`.py` + docs), produced by
+    **nbdev** from generated notebooks, refreshed only on an explicit **Build**.
+    The cells are the source of truth; the generated notebooks and `.py` are never
+    hand-edited. Build carries a **"N cells changed since last build"** staleness
+    badge so it is never *silently* stale.
 - **A library working-view.** Opening a library assembles its tagged cells into a
   virtual notebook you can run, edit (editing the real underlying cells), and
   extend — cells added there are auto-tagged, and the AI can add to the library on
@@ -153,11 +152,44 @@ dialog can feed several libraries; a dialog never has to "belong" to anything.
   package points back into the dialogs where it was worked out. Graph → tree → back
   to graph.
 
-This resolves two of the open questions below — identity storage (a manifest
-dialog) and provenance (per-cell back-links). **Still open:** *lens vs. graduate*
-(does a tagged cell stay co-owned by its origin dialog, or move into the library's
-home?); *real-nbdev interop vs. plain pip-package*; and *write target* (throwaway
-zip vs. syncing into an on-disk repo path).
+**Cell ownership — decided: the *lens* model.** A tagged cell stays in its
+learning dialog; the library is a view over the cells tagged to it. One cell, two
+views — editing it in the library view edits the same cell in its learning dialog
+(edits propagate; that's the point). Membership is a sticky tag, and Build cadence
+is orthogonal to this choice (the `.py` snapshot needs a Build either way). The
+rejected alternative (*graduate* — tagging moves the cell into the library's home)
+added ceremony and pulled cells out of the learning context they were written in.
+
+This also resolves two open questions below — identity storage (a manifest dialog)
+and provenance (per-cell back-links).
+
+### Build engine — decided: delegate to nbdev (the tool)
+
+Sidekick does **not** build the library itself. A library's tagged cells are
+projected into **nbdev-ready `.ipynb` notebooks** (one notebook per module,
+carrying `#| default_exp <module>` plus each cell's `#| export`), written into an
+**nbdev project** whose path the manifest holds; **nbdev** then builds the `.py`
+package, the docs site, the tests, and the release. Sidekick owns the
+*graph→notebook* projection; nbdev owns *notebook→library*. `export.py`'s own
+tangler is demoted to a lightweight "quick zip, no nbdev needed" convenience.
+
+This settles the earlier **write-target** question: the target is an nbdev project
+directory. Source-of-truth chain: **dialog cells (you edit here) → generated
+`.ipynb` (never hand-edited) → nbdev → `.py` + docs + tests**. Note the mild
+inversion of normal nbdev use — the notebooks are a *generated* hand-off artifact,
+so you edit in Sidekick, not in the notebooks, and a re-Build regenerates them.
+Consistent with the lens/snapshot decisions, just one hop longer.
+
+**New open sub-questions (nbdev delegation):**
+- *Notebook granularity:* one notebook per module (recommended — all cells tagged
+  `lib:core` → `core.ipynb`, regardless of source dialog) vs. per source-dialog.
+- *Project lifecycle:* does Sidekick scaffold the nbdev project (`nbdev_new`), or
+  only target an existing one?
+- *Integration depth:* emit notebooks only (you run `nbdev_export`/`nbdev_docs`)
+  vs. Sidekick shells out to nbdev to Build in one click.
+- *Where nbdev runs:* the project's own env, separate from Sidekick's app env.
+- *Provenance carrier:* how the `#_id` back-link rides an emitted cell so it
+  survives into the `.py` (a comment nbdev passes through).
 
 ## Open questions before build
 
@@ -177,14 +209,11 @@ here stops a reader from assuming the roadmap is turnkey (it is not).
   deterministic linearization. `build_context` has no recursion guard today (flat
   scan), so include-by-reference is what *introduces* this.
 
-**Cross-dialog export**
-- *Collision policy:* two dialogs targeting the same module, or defining the same
-  public name — namespace by dialog, error on duplicate, or last-wins? Today it's
-  silent concat + first-wins `__all__` shadowing.
-- *Provenance:* `_header` stamps a single `dialog_name`; a multi-source module
-  needs per-cell origin. (Direction set — per-cell back-links; schema TBD.)
-- *Identity storage:* decided — a **manifest dialog** (see "Cross-dialog
-  libraries" above); its exact cell schema is still TBD.
+**Cross-dialog libraries** — build engine decided (delegate to nbdev), identity
+decided (manifest dialog), cell ownership decided (lens). Module assembly and
+name collisions are now **nbdev's** concern, not ours. Residual questions live
+under "Build engine — delegate to nbdev" above (notebook granularity, project
+lifecycle, integration depth, provenance carrier) and the manifest's cell schema.
 
 **Out of scope for this frame:** SolveIt's `TEMPLATE.ipynb` and `AUTORUN/` have no
 analog in Sidekick and are not addressed here.
