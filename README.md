@@ -150,6 +150,27 @@ provider — Anthropic (Claude), OpenAI (Codex), Zhipu (GLM). Keys are stored in
 variable of the same name always overrides the file. Claude is the default model,
 so once your Anthropic key is set, "Ask AI" talks to your Claude account.
 
+### Which tools the AI may use
+
+Ask AI runs as a `claude` agent, so it *could* have the full tool set. What it may
+and may not do is declarative — one file, `~/.config/solveit-sidekick/tools.json`
+(override with `SIDEKICK_TOOLS`):
+
+```json
+{
+  "allow": ["WebSearch", "WebFetch"],
+  "deny":  ["Write", "Edit", "Bash"]
+}
+```
+
+The **defaults** (no file needed) keep the SolveIt posture: **web research is
+allowed** — a thinking-partner tool (SolveIt's own `dialoghelper` ships
+`search`/`read_url`), so the AI can ground answers in current facts instead of its
+training cutoff — while the **executor's hands are denied** (`Write`/`Edit`/`Bash`:
+running code or working off-screen is your job, not the AI's). Edit the lists to
+taste; set `"deny": []` to fully open it up. The cell-editing tools are wired
+separately (they need the local MCP server) and gated by `SIDEKICK_CELL_TOOLS`.
+
 ## Use it
 
 ```bash
