@@ -175,6 +175,17 @@ _TOOLS_GUIDANCE = (
 _ALLOWED_TOOLS = [f"mcp__cells__{t}"
                   for t in ("list_cells", "update_cell", "str_replace", "insert_cell")]
 
+# Web research is a *thinking-partner* tool, not the executor's hands — SolveIt's
+# own dialoghelper ships `search`/`searches`/`read_url`/`web_answer`, so this is
+# faithful to the ethos, unlike Write/Edit/Bash (which we deny). It lets Ask AI
+# ground answers in current facts (library versions, live APIs) instead of its
+# training cutoff. Off via SIDEKICK_WEB_TOOLS=0.
+_WEB_TOOLS = ["WebSearch", "WebFetch"]
+
+
+def _web_tools_enabled() -> bool:
+    return os.environ.get("SIDEKICK_WEB_TOOLS", "1") != "0"
+
 
 def _cell_tools_enabled() -> bool:
     """Cell-editing tools are live only inside the web-app process, which sets the
@@ -290,9 +301,12 @@ def _build_cmd(dialog: str, content: str, context: str, stream: bool,
         if tools:                           # teach the tools once, on the fresh turn
             sysmsg += _TOOLS_GUIDANCE
         cmd += ["--append-system-prompt", sysmsg]
+    allow = list(_WEB_TOOLS) if _web_tools_enabled() else []
     if tools:                               # register our cell-editing MCP server
-        cmd += ["--mcp-config", _write_mcp_config(dialog),
-                "--allowedTools", *_ALLOWED_TOOLS]
+        cmd += ["--mcp-config", _write_mcp_config(dialog)]
+        allow += _ALLOWED_TOOLS
+    if allow:
+        cmd += ["--allowedTools", *allow]
     # "fast" model selection wins; else an explicit env override; else the
     # subscription default (no --model flag).
     model_flag = _CLI_MODEL_FLAG.get(model) or os.environ.get("SIDEKICK_CLAUDE_CLI_MODEL")
@@ -300,7 +314,7 @@ def _build_cmd(dialog: str, content: str, context: str, stream: bool,
         cmd += ["--model", model_flag]
     if _wants_diagram(content):             # just-in-time: attach diagram conventions to
         user_msg += _DIAGRAM_GUIDANCE       # the turn that asks, not the global persona
-    if tools:                               # `--allowedTools` is variadic; `--` stops
+    if allow:                               # `--allowedTools` is variadic; `--` stops
         cmd.append("--")                    # it from swallowing the prompt positional
     cmd.append(user_msg)                     # prompt is the trailing positional
     return cmd, sid
