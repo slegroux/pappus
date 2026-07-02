@@ -191,6 +191,30 @@ subsections too). The header shows an **"N hidden"** pill, and the collapsed sta
 is **remembered per dialog**. Folding is **view-only** — hidden cells still run
 and still count toward the AI context (use **Mute** to drop a cell from context).
 
+#### Link to any cell
+
+Every cell has a stable id, and you can link to it — SolveIt-style. Hover a cell
+and click the **🔗** button to copy its **`#_<id>` anchor** (that's exactly the
+string you paste to reference it — the copy button *is* the id-getter, so you
+never hunt for one).
+
+Two ways to write a link in a note or AI prompt:
+
+- **Bare reference** — type **`#_<id>`** and it becomes a clickable link.
+- **Markdown link with your own label** — `[jump to the setup](#_<id>)`, the
+  ordinary markdown syntax you already know.
+
+Either way, clicking a **same-dialog** link scrolls to that cell in place (with a
+brief highlight) — no reload, and it won't trip the cell's click-to-edit. Prefix a
+dialog path — **`#folder/dialog/_<id>`** or `[label](#folder/dialog/_<id>)` — to
+link **across dialogs**: clicking opens that dialog at the cell. References inside
+code blocks are left alone, so a `#`-comment in your Python isn't turned into a
+link, and ordinary links (`[docs](https://…)`, `[heading](#section)`) are
+untouched. Because the AI sees each cell tagged with its id, it can drop these
+references into its answers too — "as we set up in `#_a1b2c3d4`…" becomes a real
+link. This is the substrate for treating your dialogs as a **linked, navigable
+knowledge base**.
+
 #### Keyboard shortcuts (Jupyter-style)
 
 The notebook has a **command mode** and an **edit mode**, like Jupyter:
