@@ -2397,3 +2397,65 @@ def test_run_nbdev_missing_binary_is_soft(monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda name: None)
     ok, detail = nx.run_nbdev("/tmp/whatever")
     assert ok is False and "nbdev" in detail.lower()
+
+
+# ---- library registry + in-app UI (sidekick.libraries + app routes) --------
+def test_library_registry_add_get_names_remove(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    from sidekick import libraries
+    lib = libraries.add("audiolib")
+    assert lib["name"] == "audiolib" and lib["pkg"] == "audiolib" and lib["path"]
+    assert libraries.names() == ["audiolib"]
+    assert libraries.get("audiolib")["pkg"] == "audiolib"
+    with pytest.raises(ValueError):
+        libraries.add("audiolib")                       # duplicate name rejected
+    libraries.remove("audiolib")
+    assert libraries.names() == []
+
+
+def test_library_add_custom_pkg_and_path(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    from sidekick import libraries
+    lib = libraries.add("My Lib", pkg="mylib", path="/tmp/x")
+    assert lib["name"] == "My Lib" and lib["pkg"] == "mylib" and lib["path"] == "/tmp/x"
+
+
+def test_set_export_target_replaces_existing():
+    from sidekick import export
+    out = export.set_export_target("#| export old:mod\nx = 1", "audiolib:layers")
+    assert "#| export audiolib:layers" in out
+    assert "old:mod" not in out and "x = 1" in out       # old export gone, body kept
+
+
+def test_cell_export_to_route_tags_cell(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    import sidekick.app as app
+    app.STATE["dialog"] = "lib/tag"
+    b = app.STATE["backend"]
+    b.messages("lib/tag")
+    m = b.add("lib/tag", "class C:\n    pass", "code")
+    app.cell_export_to(id=m.id, lib="audiolib", module="layers")
+    assert "#| export audiolib:layers" in b.messages("lib/tag")[-1].content
+
+
+def test_library_build_route_emits_and_reports(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    import sidekick.app as app
+    from sidekick import libraries, nbdev_export
+    from fasthtml.common import to_xml
+    dest = tmp_path / "audiolib"
+    libraries.add("audiolib", path=str(dest))
+    app.STATE["dialog"] = "lib/x"
+    b = app.STATE["backend"]
+    b.messages("lib/x")
+    b.add("lib/x", "#| export audiolib:core\nclass C:\n    pass", "code")
+    monkeypatch.setattr(nbdev_export, "run_nbdev", lambda d: (False, "nbdev not installed"))
+    html = to_xml(app.library_build(name="audiolib"))
+    assert "Built 'audiolib'" in html and "core" in html
+    assert (dest / "nbs" / "core.ipynb").exists()
+
+
+def test_libraries_page_top_bar_link_present():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    assert 'href="/libraries"' in to_xml(app.Page())

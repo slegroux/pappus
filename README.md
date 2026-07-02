@@ -381,7 +381,11 @@ worked out — and the two stay separate (see
 notebook = one package, libraries are **cell-centric**: tag any cell, in any
 dialog, into a library.
 
-Mark a code cell with a library-scoped export directive:
+**In the app:** the **📦 Libraries** page (top bar) is where you create a library
+(name, package, target dir) and hit **Build**; each library shows a live
+**"N cells · M modules"** count of what's currently tagged to it. On any code cell,
+the hover toolbar's **Lib** picker tags it into a `library:module` — or type the
+directive yourself:
 
 ```python
 #| export audiolib:layers      # this cell → library `audiolib`, module `layers`
@@ -389,7 +393,8 @@ class Conv1d: ...
 ```
 
 (A plain `#| export <module>` with no `lib:` prefix stays dialog-local, as before.)
-Then build the library across **all** your dialogs:
+
+**From the CLI**, build a library across **all** your dialogs:
 
 ```bash
 uv run python -m sidekick.cli library build audiolib ./audiolib

@@ -82,6 +82,15 @@ def toggle_export(code: str) -> str:
     return "#| export\n" + (code or "")
 
 
+def set_export_target(code: str, target: str) -> str:
+    """Set a single ``#| export <target>`` directive, replacing any existing
+    ``#| export`` line(s). Used by the per-cell library picker to tag a cell into
+    ``<lib>:<module>``; other directives (e.g. ``#| default_exp``) are preserved."""
+    kept = [ln for ln in (code or "").splitlines()
+            if not (_DIRECTIVE.match(ln) and _DIRECTIVE.match(ln).group(1) == "export")]
+    return f"#| export {target}\n" + "\n".join(kept)
+
+
 def _public_names(module_src: str) -> list[str]:
     """Top-level def/class/assignment names not starting with ``_`` (in source order)."""
     try:
