@@ -2006,7 +2006,32 @@ def test_build_cmd_no_mcp_when_disabled(monkeypatch):
     monkeypatch.setattr(cc, "claude_bin", lambda: "/usr/bin/claude")
     cc.CLI_SESSIONS.pop("mcp/off", None)
     cmd, _ = cc._build_cmd("mcp/off", "q", "ctx", stream=True)
-    assert "--mcp-config" not in cmd and "--" not in cmd
+    assert "--mcp-config" not in cmd                       # no cell-editing MCP server
+    assert not any("mcp__cells__" in a for a in cmd)       # and no cell tools allowed
+    assert cmd[-1] == "q"
+
+
+def test_build_cmd_allows_web_tools_by_default(monkeypatch):
+    # Web research is a thinking-partner tool (SolveIt ships it), so Ask AI gets it
+    # by default — while the executor's hands (Write/Edit/Bash) stay denied.
+    from sidekick import claude_cli as cc
+    monkeypatch.delenv("SIDEKICK_MCP_TOKEN", raising=False)
+    monkeypatch.delenv("SIDEKICK_WEB_TOOLS", raising=False)
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/usr/bin/claude")
+    cmd, _ = cc._build_cmd("web/on", "q", "ctx", stream=False)
+    assert "WebSearch" in cmd and "WebFetch" in cmd
+    assert "--" in cmd and cmd[-1] == "q"                  # variadic allowlist stopped by --
+    dis = cmd[cmd.index("--disallowed-tools") + 1:cmd.index("--disallowed-tools") + 4]
+    assert dis == ["Write", "Edit", "Bash"]                # research yes, executor's hands no
+
+
+def test_build_cmd_web_tools_opt_out(monkeypatch):
+    from sidekick import claude_cli as cc
+    monkeypatch.delenv("SIDEKICK_MCP_TOKEN", raising=False)
+    monkeypatch.setenv("SIDEKICK_WEB_TOOLS", "0")
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/usr/bin/claude")
+    cmd, _ = cc._build_cmd("web/off", "q", "ctx", stream=False)
+    assert "WebSearch" not in cmd and "--allowedTools" not in cmd
     assert cmd[-1] == "q"
 
 
