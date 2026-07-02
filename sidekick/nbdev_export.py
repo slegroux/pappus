@@ -116,7 +116,7 @@ def library_files(backend, lib: str, pkg_name: str | None = None) -> dict[str, s
 
     Layout::
 
-        settings.ini
+        pyproject.toml       # minimal [tool.nbdev]; nbdev-new writes a fuller one
         nbs/index.ipynb
         nbs/<module>.ipynb   # one per module, nbdev-ready
 
@@ -125,13 +125,22 @@ def library_files(backend, lib: str, pkg_name: str | None = None) -> dict[str, s
     """
     pkg = slug(pkg_name or lib)
     modules = gather(backend, lib)
-    files: dict[str, str] = {"pyproject.toml": _pyproject_toml(pkg)}
-    index = _notebook([_code_cell(f"#| hide\n# {pkg} — generated from Sidekick dialogs.")])
-    files["nbs/index.ipynb"] = json.dumps(index, indent=1) + "\n"
+    files: dict[str, str] = {"pyproject.toml": _pyproject_toml(pkg),
+                             "nbs/index.ipynb": _index_ipynb(pkg)}
     for module, entries in modules.items():
         files[f"nbs/{slug(module)}.ipynb"] = (
             json.dumps(module_notebook(module, entries), indent=1) + "\n")
     return files
+
+
+def _index_ipynb(pkg: str) -> str:
+    nb = _notebook([_code_cell(f"#| hide\n# {pkg} — generated from Sidekick dialogs.")])
+    return json.dumps(nb, indent=1) + "\n"
+
+
+def _module_files(modules: dict[str, list[dict]]) -> dict[str, str]:
+    return {f"nbs/{slug(m)}.ipynb": json.dumps(module_notebook(m, e), indent=1) + "\n"
+            for m, e in modules.items()}
 
 
 def write_files(dest: str, files: dict[str, str]) -> list[str]:
@@ -147,22 +156,87 @@ def write_files(dest: str, files: dict[str, str]) -> list[str]:
     return written
 
 
+def _find_exe(*names: str) -> str | None:
+    """Find a console script by any of `names`, on PATH or in the running
+    interpreter's own bin dir (so it's found when the app runs from a venv whose
+    bin isn't on PATH, e.g. `.venv/bin/python -m uvicorn`). The scripts install as
+    either `nbdev_export` or `nbdev-export` depending on the packaging toolchain."""
+    import os
+    import shutil
+    import sys
+    for n in names:
+        p = shutil.which(n)
+        if p:
+            return p
+    bindir = os.path.dirname(sys.executable)
+    for n in names:
+        p = os.path.join(bindir, n)
+        if os.path.isfile(p):
+            return p
+    return None
+
+
+def is_nbdev_project(dest: str) -> bool:
+    """True if `dest` is already an nbdev project — a pyproject.toml with a
+    [tool.nbdev] section (nbdev's own marker). Rebuilds skip scaffolding."""
+    import os
+    p = os.path.join(dest, "pyproject.toml")
+    try:
+        return os.path.isfile(p) and "[tool.nbdev]" in open(p, encoding="utf-8").read()
+    except OSError:
+        return False
+
+
+def _git_identity() -> tuple[str, str]:
+    """(author, email) from git config, best-effort — used to fill the nbdev
+    project metadata so scaffolding needs no prompts."""
+    import subprocess
+    def cfg(key):
+        try:
+            r = subprocess.run(["git", "config", "--get", key], capture_output=True,
+                               text=True, timeout=5)
+            return r.stdout.strip() if r.returncode == 0 else ""
+        except Exception:  # noqa: BLE001
+            return ""
+    return cfg("user.name"), cfg("user.email")
+
+
+def scaffold_nbdev_new(dest: str, pkg: str, author: str = "", email: str = "",
+                       user: str = "", description: str = "") -> tuple[bool, str]:
+    """Scaffold a full nbdev project in `dest` with `nbdev-new` (LICENSE, docs
+    config, CI, index). Non-interactive (all values passed as flags) but needs
+    network — it downloads the nbdev template from GitHub. Best-effort: the caller
+    falls back to a minimal pyproject when this can't run (offline / no nbdev).
+
+    The template's placeholder module notebook (`nbs/00_core.ipynb`) is removed —
+    Sidekick writes the real module notebooks from your tagged cells."""
+    import os
+    import subprocess
+    exe = _find_exe("nbdev_new", "nbdev-new")
+    if not exe:
+        return False, "nbdev-new not available"
+    os.makedirs(dest, exist_ok=True)
+    args = [exe, "--repo", pkg, "--user", user or pkg,
+            "--author", author or "", "--author_email", email or "",
+            "--description", description or f"{pkg} — generated from Sidekick dialogs"]
+    try:
+        r = subprocess.run(args, cwd=dest, capture_output=True, text=True, timeout=180)
+    except Exception as e:  # noqa: BLE001 — network/timeout etc.; caller falls back
+        return False, f"nbdev-new failed to run: {e}"
+    if r.returncode != 0:
+        return False, (r.stderr or r.stdout or "").strip()[:300] or "nbdev-new nonzero exit"
+    placeholder = os.path.join(dest, "nbs", "00_core.ipynb")
+    if os.path.isfile(placeholder):
+        os.remove(placeholder)
+    return True, "scaffolded a full nbdev project with nbdev-new"
+
+
 def run_nbdev(dest: str) -> tuple[bool, str]:
     """Best-effort: run ``nbdev_export`` in ``dest`` to tangle the notebooks into
     the package. Returns ``(ok, detail)``; a missing nbdev is a soft failure —
     the notebooks are still valid and can be built later."""
-    import os
-    import shutil
     import subprocess
-    import sys
-    # The console script is installed as `nbdev_export` or `nbdev-export`
-    # depending on the packaging toolchain — try both, on PATH and in the running
-    # interpreter's own bin dir (so it's found when the app runs from a venv whose
-    # bin isn't on PATH, e.g. `.venv/bin/python -m uvicorn`).
-    bindir = os.path.dirname(sys.executable)
-    exe = (shutil.which("nbdev_export") or shutil.which("nbdev-export")
-           or next((p for n in ("nbdev_export", "nbdev-export")
-                    if os.path.isfile(p := os.path.join(bindir, n))), None))
+    exe = _find_exe("nbdev_export", "nbdev-export")
     if not exe:
         return False, "nbdev not installed — notebooks emitted; run `nbdev_export` to build the package."
     try:
@@ -175,14 +249,37 @@ def run_nbdev(dest: str) -> tuple[bool, str]:
 
 
 def build_library(backend, lib: str, dest: str, pkg_name: str | None = None) -> dict:
-    """Emit ``lib``'s nbdev project into ``dest`` and try to build it with nbdev.
+    """Build ``lib`` into ``dest``: scaffold the nbdev project once, write the
+    module notebooks from the tagged cells, and tangle to the ``.py`` package.
 
-    Returns ``{"pkg", "modules", "files", "nbdev_ok", "nbdev_detail"}``.
+    Hybrid scaffolding (see docs/design/graph-vs-tree.md): the *first* build to a
+    fresh dir uses ``nbdev-new`` for a full nbdev project (docs/CI/LICENSE/index);
+    *rebuilds* reuse the existing project and just refresh the notebooks. If
+    ``nbdev-new`` can't run (offline / not installed), fall back to a minimal
+    ``pyproject.toml`` — enough to tangle to ``.py``. Disable the scaffold attempt
+    with ``SIDEKICK_NBDEV_SCAFFOLD=0`` (always use minimal).
+
+    Returns ``{"pkg", "modules", "files", "scaffold", "nbdev_ok", "nbdev_detail"}``.
     """
-    files = library_files(backend, lib, pkg_name)
-    write_files(dest, files)
-    nbdev_ok, detail = run_nbdev(dest)
-    modules = [k[len("nbs/"):-len(".ipynb")] for k in files
-               if k.startswith("nbs/") and k != "nbs/index.ipynb"]
-    return {"pkg": slug(pkg_name or lib), "modules": sorted(modules),
-            "files": sorted(files), "nbdev_ok": nbdev_ok, "nbdev_detail": detail}
+    import os
+    pkg = slug(pkg_name or lib)
+    modules = gather(backend, lib)
+    module_files = _module_files(modules)
+
+    if is_nbdev_project(dest):
+        scaffold = "existing nbdev project (reused)"
+    else:
+        want_new = os.environ.get("SIDEKICK_NBDEV_SCAFFOLD", "1") != "0"
+        ok, detail = (scaffold_nbdev_new(dest, pkg, *_git_identity())
+                      if want_new else (False, "scaffold disabled"))
+        if ok:
+            scaffold = detail
+        else:                               # offline-safe minimal project
+            write_files(dest, {"pyproject.toml": _pyproject_toml(pkg),
+                               "nbs/index.ipynb": _index_ipynb(pkg)})
+            scaffold = f"minimal pyproject ({detail})"
+
+    write_files(dest, module_files)         # our module notebooks, always ours
+    nbdev_ok, nb_detail = run_nbdev(dest)
+    return {"pkg": pkg, "modules": sorted(modules), "files": sorted(module_files),
+            "scaffold": scaffold, "nbdev_ok": nbdev_ok, "nbdev_detail": nb_detail}

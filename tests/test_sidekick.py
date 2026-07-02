@@ -2428,14 +2428,59 @@ def test_library_files_emits_pyproject_and_valid_notebooks():
     assert nb["nbformat"] == 4
 
 
-def test_build_library_writes_files_and_degrades_without_nbdev(tmp_path, monkeypatch):
+def test_build_library_minimal_scaffold_and_degrades_without_nbdev(tmp_path, monkeypatch):
+    # SIDEKICK_NBDEV_SCAFFOLD=0 skips nbdev-new (no network) -> minimal pyproject.
     from sidekick import nbdev_export as nx
+    monkeypatch.setenv("SIDEKICK_NBDEV_SCAFFOLD", "0")
     monkeypatch.setattr(nx, "run_nbdev", lambda dest: (False, "nbdev not installed"))
     res = nx.build_library(_lib_backend(), "audiolib", str(tmp_path), pkg_name="audiolib")
     assert res["pkg"] == "audiolib" and set(res["modules"]) == {"layers", "blocks"}
-    assert (tmp_path / "pyproject.toml").exists()
-    assert (tmp_path / "nbs" / "layers.ipynb").exists()
+    assert (tmp_path / "pyproject.toml").exists()             # minimal project written
+    assert (tmp_path / "nbs" / "layers.ipynb").exists()       # module notebooks always ours
     assert res["nbdev_ok"] is False                           # soft failure, notebooks still emitted
+    assert "minimal pyproject" in res["scaffold"]
+
+
+def test_build_library_scaffolds_with_nbdev_new_on_fresh_dir(tmp_path, monkeypatch):
+    # A fresh dir triggers the nbdev-new scaffold (stubbed to avoid network).
+    from sidekick import nbdev_export as nx
+    calls = {}
+
+    def fake_new(dest, pkg, *a, **k):
+        calls["dest"] = dest
+        (Path(dest) / "pyproject.toml").write_text("[tool.nbdev]\nlib_path='x'\nnbs_path='nbs'\n")
+        return True, "scaffolded a full nbdev project with nbdev-new"
+
+    monkeypatch.setattr(nx, "scaffold_nbdev_new", fake_new)
+    monkeypatch.setattr(nx, "run_nbdev", lambda dest: (True, "built"))
+    res = nx.build_library(_lib_backend(), "audiolib", str(tmp_path), pkg_name="audiolib")
+    assert calls["dest"] == str(tmp_path)                     # nbdev-new was invoked
+    assert "nbdev-new" in res["scaffold"]
+    assert (tmp_path / "nbs" / "blocks.ipynb").exists()
+
+
+def test_build_library_reuses_existing_nbdev_project(tmp_path, monkeypatch):
+    # A dir that's already an nbdev project is reused — no scaffold attempt.
+    from sidekick import nbdev_export as nx
+    (tmp_path / "pyproject.toml").write_text("[tool.nbdev]\nlib_path='x'\nnbs_path='nbs'\n")
+
+    def boom(*a, **k):
+        raise AssertionError("scaffold_nbdev_new must not run for an existing project")
+
+    monkeypatch.setattr(nx, "scaffold_nbdev_new", boom)
+    monkeypatch.setattr(nx, "run_nbdev", lambda dest: (True, "built"))
+    res = nx.build_library(_lib_backend(), "audiolib", str(tmp_path), pkg_name="audiolib")
+    assert "existing nbdev project" in res["scaffold"]
+    assert (tmp_path / "nbs" / "layers.ipynb").exists()       # notebooks refreshed
+
+
+def test_is_nbdev_project(tmp_path):
+    from sidekick import nbdev_export as nx
+    assert not nx.is_nbdev_project(str(tmp_path))             # empty
+    (tmp_path / "pyproject.toml").write_text("[project]\nname='x'\n")
+    assert not nx.is_nbdev_project(str(tmp_path))             # pyproject but no [tool.nbdev]
+    (tmp_path / "pyproject.toml").write_text("[tool.nbdev]\nlib_path='x'\n")
+    assert nx.is_nbdev_project(str(tmp_path))                 # marked
 
 
 def test_run_nbdev_missing_binary_is_soft(monkeypatch):
