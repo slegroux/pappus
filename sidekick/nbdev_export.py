@@ -151,11 +151,18 @@ def run_nbdev(dest: str) -> tuple[bool, str]:
     """Best-effort: run ``nbdev_export`` in ``dest`` to tangle the notebooks into
     the package. Returns ``(ok, detail)``; a missing nbdev is a soft failure —
     the notebooks are still valid and can be built later."""
+    import os
     import shutil
     import subprocess
+    import sys
     # The console script is installed as `nbdev_export` or `nbdev-export`
-    # depending on the packaging toolchain — try both.
-    exe = shutil.which("nbdev_export") or shutil.which("nbdev-export")
+    # depending on the packaging toolchain — try both, on PATH and in the running
+    # interpreter's own bin dir (so it's found when the app runs from a venv whose
+    # bin isn't on PATH, e.g. `.venv/bin/python -m uvicorn`).
+    bindir = os.path.dirname(sys.executable)
+    exe = (shutil.which("nbdev_export") or shutil.which("nbdev-export")
+           or next((p for n in ("nbdev_export", "nbdev-export")
+                    if os.path.isfile(p := os.path.join(bindir, n))), None))
     if not exe:
         return False, "nbdev not installed — notebooks emitted; run `nbdev_export` to build the package."
     try:
