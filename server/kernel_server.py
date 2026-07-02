@@ -263,22 +263,22 @@ CLI_SESSIONS = claude_cli.CLI_SESSIONS     # same dict the app's SSE path advanc
 _system = claude_cli.system                # preamble + context, used by the API callers
 
 
-def _call_claude(key: str, content: str, context: str = "") -> str:
+def _call_claude(key: str, content: str, context: str = "", mode: str | None = None) -> str:
     import anthropic
     client = anthropic.Anthropic(api_key=key)
     kw = {"model": MODEL_NAMES["claude"], "max_tokens": 1500,
           "messages": [{"role": "user", "content": content}]}
-    sysmsg = _system(context)
+    sysmsg = _system(context, mode)
     if sysmsg:
         kw["system"] = sysmsg
     return client.messages.create(**kw).content[0].text
 
 
-def _call_openai(key: str, content: str, context: str = "") -> str:
+def _call_openai(key: str, content: str, context: str = "", mode: str | None = None) -> str:
     from openai import OpenAI
     client = OpenAI(api_key=key)
     msgs = [{"role": "user", "content": content}]
-    sysmsg = _system(context)
+    sysmsg = _system(context, mode)
     if sysmsg:
         msgs.insert(0, {"role": "system", "content": sysmsg})
     r = client.chat.completions.create(
@@ -287,11 +287,11 @@ def _call_openai(key: str, content: str, context: str = "") -> str:
     return r.choices[0].message.content
 
 
-def _call_zhipu(key: str, content: str, context: str = "") -> str:
+def _call_zhipu(key: str, content: str, context: str = "", mode: str | None = None) -> str:
     from zhipuai import ZhipuAI
     client = ZhipuAI(api_key=key)
     msgs = [{"role": "user", "content": content}]
-    sysmsg = _system(context)
+    sysmsg = _system(context, mode)
     if sysmsg:
         msgs.insert(0, {"role": "system", "content": sysmsg})
     r = client.chat.completions.create(model=MODEL_NAMES["glm"], messages=msgs)
@@ -302,15 +302,17 @@ CALLERS = {"claude": _call_claude, "codex": _call_openai, "glm": _call_zhipu}
 SDK_MODULE = {"claude": "anthropic", "codex": "openai", "glm": "zhipuai"}
 
 
-def run_prompt(dialog: str, content: str, model: str, context: str = "") -> str:
+def run_prompt(dialog: str, content: str, model: str, context: str = "",
+               mode: str | None = None) -> str:
     """Route a prompt to its provider using the key from the shared secrets store
     (Settings page or env). `context` is the serialized notebook (cells above the
-    prompt); it's passed to the model as a system preamble. All three providers
-    make real calls when keyed."""
+    prompt); it's passed to the model as a system preamble. `mode` selects the AI
+    persona (learning/concise/standard). All three providers make real calls when
+    keyed."""
     import importlib
 
     if model in CLI_MODELS:               # subscription-backed Claude (no API key)
-        return claude_cli.call(dialog, content, context, model=model)
+        return claude_cli.call(dialog, content, context, model=model, mode=mode)
 
     try:
         from sidekick.secrets_store import key_for_model, PROVIDERS
@@ -328,7 +330,7 @@ def run_prompt(dialog: str, content: str, model: str, context: str = "") -> str:
             return (f"[{label}] {sdk} SDK not installed — start the server with "
                     f"`uv run --extra llm ...` to enable live {label} calls.")
         try:                                  # real provider call
-            return caller(api_key, content, context)
+            return caller(api_key, content, context, mode)
         except Exception as e:  # noqa: BLE001 — surface provider/runtime errors in the UI
             return f"[{label} error: {e}]"
 
@@ -386,7 +388,7 @@ class Handler(BaseHTTPRequestHandler):
             dlg = payload.get("dialog", "default")
             content, _warns = inject_vars(dlg, payload.get("content", ""))
             out = run_prompt(dlg, content, payload.get("model", "claude"),
-                             payload.get("context", ""))
+                             payload.get("context", ""), payload.get("mode"))
             return self._send(200, {"output": out, "model": payload.get("model", "claude")})
         if path == "/eval":
             content, warns = inject_vars(payload.get("dialog", "default"),

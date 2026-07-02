@@ -272,6 +272,26 @@ mock target leaves `` $`…` `` literal, and a real **solveit** target does its 
 injection server-side. Oversized values are truncated so one big object can't blow
 the prompt open.
 
+#### AI modes — learning / concise / standard
+
+Next to the model picker in the composer is a **mode** dropdown (SolveIt's
+`learning` / `concise` / `standard`) that tunes *how* the AI responds. The
+small-steps persona is always on underneath; the mode layers a directive on top:
+
+- **learning** (default) — favours your understanding over a finished answer. It
+  asks a short guiding question or gives a hint and leaves room for you to try;
+  when you're stuck it shows the smallest unblocking piece and the idea behind it,
+  rather than handing over a whole solution. This is the point of the tool.
+- **concise** — minimal prose, compact runnable code, no boilerplate or recap.
+- **standard** — answers fully, with complete code and explanation when you ask.
+
+The chosen mode is remembered and stored on each prompt (like the model), so a
+re-ask uses the mode it was sent with. Switching mode mid-dialog takes effect on
+the next turn — on the subscription (`claude-cli`) path a mode change starts a
+fresh session so the new directive actually applies (a resumed session can't
+rewrite its own system prompt). Works on every backend: the persona/mode is built
+app-side and sent as the model's system preamble.
+
 #### The AI can edit cells (Max plan)
 
 Ask AI doesn't only *answer* — it can **edit the notebook for you**. Ask it to

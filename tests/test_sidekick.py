@@ -628,7 +628,7 @@ def test_claude_cli_fresh_session_sends_full_context(monkeypatch):
     # lean mode: no MCP servers, no user settings (hooks/auto-memory) -> faster TTFT
     assert "--strict-mcp-config" in cmd
     assert cmd[cmd.index("--setting-sources") + 1] == "project"
-    assert cc.CLI_SESSIONS["cli/d1"] == {"id": "sid-1", "sent": "<code>x=1</code>"}
+    assert cc.CLI_SESSIONS["cli/d1"] == {"id": "sid-1", "sent": "<code>x=1</code>", "mode": None}
 
 
 def test_claude_cli_appended_cells_resume_with_only_the_delta(monkeypatch):
@@ -662,7 +662,86 @@ def test_claude_cli_edit_above_starts_a_fresh_session(monkeypatch):
     cc.call("cli/d3", "q", context=edited)
     cmd = cap[-1]["cmd"]
     assert "--session-id" in cmd and "--resume" not in cmd      # reset, not resumed
-    assert cc.CLI_SESSIONS["cli/d3"] == {"id": "sid-new", "sent": edited}
+    assert cc.CLI_SESSIONS["cli/d3"] == {"id": "sid-new", "sent": edited, "mode": None}
+
+
+# ---- AI modes (learning / concise / standard personas) ---------------------
+def test_system_prompt_carries_mode_directive():
+    import sidekick.claude_cli as cc
+    for mode, needle in (("learning", "MODE — Learning"),
+                         ("concise", "MODE — Concise"),
+                         ("standard", "MODE — Standard")):
+        s = cc.system("<code>x=1</code>", mode)
+        assert needle in s and "<code>x=1</code>" in s        # mode + context both present
+
+
+def test_system_prompt_defaults_to_learning():
+    import sidekick.claude_cli as cc
+    assert "MODE — Learning" in cc.system("", None)           # unset -> learning
+    assert "MODE — Learning" in cc.system("", "bogus")        # unknown -> learning
+
+
+def test_claude_cli_threads_mode_into_system_prompt(monkeypatch):
+    import sidekick.claude_cli as cc
+    cc.CLI_SESSIONS.pop("cli/mode1", None)
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/bin/claude")
+    cap = []
+    monkeypatch.setattr(cc, "_run_cli", _mk_cli_run(cap, result="ok", session_id="sid-m"))
+    cc.call("cli/mode1", "q", context="<code>x=1</code>", mode="concise")
+    cmd = cap[-1]["cmd"]
+    sys_arg = cmd[cmd.index("--append-system-prompt") + 1]
+    assert "MODE — Concise" in sys_arg                        # the chosen persona shipped
+    assert cc.CLI_SESSIONS["cli/mode1"]["mode"] == "concise"  # recorded for resume checks
+
+
+def test_mode_change_forces_a_fresh_session(monkeypatch):
+    import sidekick.claude_cli as cc
+    # A resumable session (context stays a prefix) but recorded under a different mode.
+    cc.CLI_SESSIONS["cli/mode2"] = {"id": "sid-old", "sent": "<code>x=1</code>",
+                                    "mode": "learning"}
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/bin/claude")
+    cap = []
+    monkeypatch.setattr(cc, "_run_cli", _mk_cli_run(cap, result="ok", session_id="sid-2"))
+    cc.call("cli/mode2", "q", context="<code>x=1</code>\n<code>y=2</code>", mode="standard")
+    cmd = cap[-1]["cmd"]
+    assert "--session-id" in cmd and "--resume" not in cmd    # switch -> fresh, not resumed
+    assert "MODE — Standard" in cmd[cmd.index("--append-system-prompt") + 1]
+
+
+def test_run_prompt_passes_mode_to_api_caller(monkeypatch):
+    # Non-CLI (API) models get the mode through run_prompt -> caller -> _system.
+    import server.kernel_server as ks
+    import sidekick.secrets_store as ss
+    seen = {}
+
+    def fake_caller(key, content, context, mode):
+        seen["mode"] = mode
+        return "ok"
+
+    monkeypatch.setattr(ks, "CALLERS", {"claude": fake_caller})
+    monkeypatch.setattr(ks, "SDK_MODULE", {"claude": "json"})   # a module that imports fine
+    monkeypatch.setattr(ss, "key_for_model", lambda m: "key")   # run_prompt re-imports this
+    monkeypatch.setattr(ss, "PROVIDERS", {"claude": ("Claude", "ANTHROPIC_API_KEY")})
+    out = ks.run_prompt("d", "q", "claude", context="c", mode="concise")
+    assert out == "ok" and seen["mode"] == "concise"
+
+
+def test_send_route_stores_ai_mode_on_prompt():
+    import sidekick.app as app
+    app.STATE["dialog"] = "mode/route"
+    app.STATE["backend"].messages("mode/route")
+    app.send(content="hello?", msg_type="prompt", model="claude-cli", ai_mode="concise")
+    assert app.STATE["ai_mode"] == "concise"                 # sticky selection
+    assert app.STATE["backend"].messages("mode/route")[-1].ai_mode == "concise"
+
+
+def test_mode_select_renders_current_selection():
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    app.STATE["ai_mode"] = "standard"
+    html = to_xml(app.ModeSelect())
+    assert 'name="ai_mode"' in html and 'value="standard" selected' in html
+    app.STATE["ai_mode"] = app.DEFAULT_MODE                  # restore default for other tests
 
 
 def test_claude_cli_missing_binary_is_friendly(monkeypatch):
@@ -705,7 +784,7 @@ def test_claude_cli_stream_yields_deltas_and_records_session(monkeypatch):
     assert chunks == ["Hel", "lo ", "world"]               # streamed in order
     cmd = cap[-1]["cmd"]
     assert "stream-json" in cmd and "--session-id" in cmd   # streaming, fresh session
-    assert cc.CLI_SESSIONS["cli/s1"] == {"id": "sid-s1", "sent": "<code>x=1</code>"}
+    assert cc.CLI_SESSIONS["cli/s1"] == {"id": "sid-s1", "sent": "<code>x=1</code>", "mode": None}
 
 
 def test_claude_cli_stream_resumes_on_append(monkeypatch):
@@ -894,7 +973,7 @@ def test_stream_path_resolves_injection_before_reaching_ai(monkeypatch):
     m = b.add("inj/stream", "what is $`x`?", "prompt", model="claude-cli")
 
     seen = {}
-    def fake_stream(dialog, content, context, model=None):
+    def fake_stream(dialog, content, context, model=None, mode=None):
         seen["content"] = content                          # capture what the AI receives
         return iter(())                                    # no tokens
     monkeypatch.setattr(app, "stream_claude", fake_stream)
@@ -1098,7 +1177,7 @@ def test_stream_route_emits_deltas_and_persists_output(monkeypatch):
     b.messages("stream/route")
     m = b.add("stream/route", "add x and y?", "prompt", model="claude-cli")
     app.STATE["pending_stream"] = ("stream/route", m.id)
-    monkeypatch.setattr(app, "stream_claude", lambda d, c, ctx, model=None: iter(["4", "2"]))
+    monkeypatch.setattr(app, "stream_claude", lambda d, c, ctx, model=None, mode=None: iter(["4", "2"]))
 
     resp = app.stream_answer(dialog="stream/route", id=m.id)
 
