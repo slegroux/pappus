@@ -423,10 +423,19 @@ uv run python -m sidekick.cli library build audiolib ./audiolib
 
 Sidekick gathers every cell tagged `audiolib:*` — from however many dialogs —
 groups them by module, and **projects them into an nbdev project** (one notebook
-per module). If [nbdev](https://nbdev.fast.ai) is installed it then runs
-`nbdev-export` to tangle the notebooks into a real `.py` package; if not, the
-notebooks are emitted and you can build them later. Sidekick owns the
-*cells → notebooks* step; **nbdev** owns *notebooks → package + docs + tests*.
+per module). Sidekick owns the *cells → notebooks* step; **nbdev** owns
+*notebooks → package + docs + tests*.
+
+Scaffolding is **hybrid**: the *first* build to a fresh dir runs
+[`nbdev-new`](https://nbdev.fast.ai) for a full nbdev project (`pyproject.toml`
+with `[tool.nbdev]`, `LICENSE`, docs config, CI, `index.ipynb`); *rebuilds* reuse
+that project and just refresh the notebooks, then `nbdev-export` tangles them into
+the `.py` package. `nbdev-new` needs network (it fetches the template from GitHub,
+whose unauthenticated API is rate-limited) — if it can't run, Build **falls back**
+to a minimal `pyproject.toml`, which is enough to tangle to `.py`, just without the
+docs/CI extras. Set `SIDEKICK_NBDEV_SCAFFOLD=0` to always use the minimal path
+(offline, no GitHub). Either way the package builds; install nbdev with the
+`nbdev` extra (`uv pip install "solveit-sidekick[nbdev]"`).
 
 Two nice properties fall out:
 

@@ -183,10 +183,12 @@ Consistent with the lens/snapshot decisions, just one hop longer.
 **New open sub-questions (nbdev delegation):**
 - *Notebook granularity:* one notebook per module (recommended — all cells tagged
   `lib:core` → `core.ipynb`, regardless of source dialog) vs. per source-dialog.
-- *Project lifecycle:* does Sidekick scaffold the nbdev project (`nbdev_new`), or
-  only target an existing one?
-- *Integration depth:* emit notebooks only (you run `nbdev_export`/`nbdev_docs`)
-  vs. Sidekick shells out to nbdev to Build in one click.
+- *Project lifecycle:* **decided — hybrid.** First build to a fresh dir runs
+  `nbdev-new` (full project); rebuilds reuse the existing project and just refresh
+  notebooks. If `nbdev-new` can't run (offline / GitHub rate-limited), fall back to
+  a minimal `pyproject.toml`. Opt out with `SIDEKICK_NBDEV_SCAFFOLD=0`.
+- *Integration depth:* **decided — Sidekick shells out** to `nbdev-export` on Build
+  (one click), best-effort; if nbdev is absent the notebooks are still emitted.
 - *Where nbdev runs:* the project's own env, separate from Sidekick's app env.
 - *Provenance carrier:* how the `#_id` back-link rides an emitted cell so it
   survives into the `.py` (a comment nbdev passes through).
