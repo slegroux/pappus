@@ -21,7 +21,7 @@ from starlette.datastructures import UploadFile
 from .targets import get_target, list_targets, list_models, default_model
 from .client import connect, build_context, est_tokens, _InMemoryBackend
 from .claude_cli import stream as stream_claude, cost_for, CLI_MODELS, AI_MODES, DEFAULT_MODE
-from . import secrets_store, export
+from . import secrets_store, export, libraries, nbdev_export
 from . import paper as paperlib
 
 
@@ -526,6 +526,8 @@ a.msglink:hover{border-bottom-style:solid}
   background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px;
   box-shadow:0 6px 18px rgba(0,0,0,.12)}
 .ins-col{display:flex;flex-direction:column;gap:3px;min-width:80px}
+.lib-form{display:flex;flex-direction:column;gap:6px;min-width:190px}
+.lib-form .keyinput{font-size:12px;padding:5px 8px}
 .ins-col-head{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:2px}
 .ins-item{text-align:left;font-size:12px;border:1px solid var(--line);background:#fff;border-radius:7px;
   padding:4px 9px;cursor:pointer;color:var(--ink)}
@@ -850,9 +852,40 @@ def _copy_menu(mid):
                      title="Copy this cell into another dialog", menu_cls="type-menu copy-menu")
 
 
+def _current_export_target(content: str) -> tuple[str | None, str]:
+    """The (lib, module) a code cell's `#| export lib:module` points at, if any."""
+    for name, arg in export._directives(content)[0]:
+        if name == "export":
+            return nbdev_export.parse_lib_target(arg)
+    return None, "core"
+
+
+def _lib_menu(m):
+    """Per-cell dropdown to tag a code cell into a registered library:module.
+    Hidden when no libraries exist yet (create one on the Libraries page)."""
+    libs = libraries.load()
+    if not libs:
+        return None
+    cur_lib, cur_mod = _current_export_target(m.content)
+    opts = [Option(lib["name"], value=lib["name"], selected=(lib["name"] == cur_lib))
+            for lib in libs]
+    form = Form(
+        Span("Export to library", cls="ins-col-head"),
+        Select(*opts, name="lib", cls="msel"),
+        Input(name="module", value=(cur_mod if cur_lib else "core"),
+              placeholder="module", cls="keyinput", style="width:120px"),
+        Input(type="hidden", name="id", value=m.id),
+        Button("Tag", cls="cell-btn run", type="submit"),
+        hx_post="/cell/export-to", hx_target="#stream", hx_swap="outerHTML",
+        cls="lib-form")
+    label = f"Lib: {cur_lib}" if cur_lib else "Lib ▾"
+    return _dropdown(label, form, title="Tag this cell into a library", menu_cls="ins-menu")
+
+
 def _ctx_buttons(m):
-    """Type / Insert / Copy / Export / Mute / Pin / Delete — in both rendered and edit
-    modes. Code cells also get an Export toggle (the `#| export` package directive)."""
+    """Type / Insert / Copy / Export / Lib / Mute / Pin / Delete — in both rendered
+    and edit modes. Code cells also get an Export toggle (`#| export`) and, when
+    libraries exist, a Lib picker (`#| export <lib>:<module>`)."""
     mid = m.id
     exported = m.msg_type == "code" and export.has_export(m.content)
     btns = []
@@ -861,6 +894,9 @@ def _ctx_buttons(m):
             "Exported" if exported else "Export", "/cell/export",
             cls="cell-btn exp" + (" on" if exported else ""), vals={"id": mid},
             title="Toggle whether this cell is tangled into the exported package (#| export)"))
+        lib_menu = _lib_menu(m)
+        if lib_menu is not None:
+            btns.append(lib_menu)
     copy_menu = _copy_menu(mid)
     return [
         _type_menu(m),
@@ -1960,6 +1996,72 @@ def SettingsPage(saved=False):
     )
 
 
+def _lib_result_banner(result):
+    if not result:
+        return ""
+    if result.get("error"):
+        return Div("⚠ " + result["error"], cls="banner")
+    nb = ("✓ built with nbdev" if result.get("nbdev_ok")
+          else "notebooks emitted — " + result.get("nbdev_detail", ""))
+    mods = ", ".join(result.get("modules") or []) or "no tagged cells"
+    return Div(f"Built '{result['name']}': {mods}  ·  {nb}  ·  → {result.get('path','')}",
+               cls="saved")
+
+
+def LibrariesPage(result=None, saved=False):
+    backend = STATE["backend"]
+    cards = []
+    for lib in libraries.load():
+        mods = nbdev_export.gather(backend, lib["name"])
+        ncells = sum(len(v) for v in mods.values())
+        summary = (f"{ncells} cells · {len(mods)} modules"
+                   + (f" ({', '.join(sorted(mods))})" if mods else " · nothing tagged yet"))
+        cards.append(Div(
+            Div(Strong(lib["name"]), Span(f"  ·  pkg {lib['pkg']}", cls="muted"), cls="prov-head"),
+            Div(summary, cls="muted small"),
+            Div(f"→ {lib['path']}", cls="muted small"),
+            Div(Form(Input(type="hidden", name="name", value=lib["name"]),
+                     Button("Build", cls="cell-btn run", type="submit"),
+                     method="post", action="/library/build", style="display:inline"),
+                Form(Input(type="hidden", name="name", value=lib["name"]),
+                     Button("Remove", cls="cell-btn del", type="submit"),
+                     method="post", action="/library/remove", style="display:inline",
+                     onsubmit=f"return confirm('Remove library {lib['name']}? "
+                              f"(the registry entry only — no files are deleted)')"),
+                cls="lib-actions", style="display:flex;gap:8px;margin-top:8px"),
+            cls="prov-card"))
+    if not cards:
+        cards = [Div("No libraries yet. Create one below, then tag code cells with the "
+                     "Lib picker (or type ", Code("#| export <name>:<module>"), ").",
+                     cls="settings-intro")]
+    add_form = Form(
+        Span("New library", cls="ins-col-head"),
+        Input(name="name", placeholder="name — used as #| export <name>:module", cls="keyinput"),
+        Input(name="pkg", placeholder="package name (optional; defaults to a slug of name)",
+              cls="keyinput"),
+        Input(name="path", placeholder="nbdev project dir (optional)", cls="keyinput"),
+        Button("Add library", cls="save-btn", type="submit"),
+        method="post", action="/library/add")
+    return Html(
+        Head(Title("Libraries · SolveIt Sidekick"), *app.hdrs, Style(CSS)),
+        Body(Div(
+            Div(
+                Div(A("←  Back", href="/", cls="back"), Div("Libraries", cls="title"),
+                    cls="settings-top"),
+                (Div("✓ Saved.", cls="saved") if saved else ""),
+                _lib_result_banner(result),
+                Div("Build a Python library from cells tagged across your dialogs. Sidekick "
+                    "projects them into an nbdev project; nbdev builds the package. See the "
+                    "design note for the model.", cls="settings-intro"),
+                *cards,
+                add_form,
+                cls="settings-wrap",
+            ),
+            cls="settings-page",
+        )),
+    )
+
+
 # Table of contents built from note headings (h1–h6 inside .note-view). Lives in
 # Page() (not #stream), so it persists across htmx swaps; STREAM_JS calls
 # window.buildTOC() on each render to keep it in sync. Toggle state is saved.
@@ -2329,6 +2431,8 @@ def Page():
                                 A("Python package (.zip)", href="/export/package"),
                                 cls="export-menu"),
                             cls="export"),
+                    A("📦", href="/libraries", cls="gear",
+                      title="Libraries — build packages from tagged cells"),
                     A("⚙", href="/settings", cls="gear", title="Settings — API keys"),
                     TargetSwitcher(),
                     cls="topbar-right"),
@@ -2493,6 +2597,50 @@ def settings_post(ANTHROPIC_API_KEY: str = "", ZHIPU_API_KEY: str = "",
         STATE["model"] = default_model
     use_target(STATE["target_name"])         # reconnect so new key takes effect
     return SettingsPage(saved=True)
+
+
+@rt("/libraries", methods=["get"])
+def libraries_get():
+    return LibrariesPage()
+
+
+@rt("/library/add", methods=["post"])
+def library_add(name: str = "", pkg: str = "", path: str = ""):
+    try:
+        libraries.add(name, pkg or None, path or None)
+    except ValueError as e:
+        return LibrariesPage(result={"error": str(e)})
+    return LibrariesPage(saved=True)
+
+
+@rt("/library/remove", methods=["post"])
+def library_remove(name: str = ""):
+    libraries.remove(name)
+    return LibrariesPage()
+
+
+@rt("/library/build", methods=["post"])
+def library_build(name: str = ""):
+    lib = libraries.get(name)
+    if lib is None:
+        return LibrariesPage(result={"error": f"no library named '{name}'"})
+    res = nbdev_export.build_library(STATE["backend"], name, lib["path"], lib["pkg"])
+    return LibrariesPage(result={"name": name, "path": lib["path"], **res})
+
+
+@rt("/cell/export-to", methods=["post"])
+def cell_export_to(id: str, lib: str = "", module: str = "core"):
+    """Tag a code cell into `<lib>:<module>` (the per-cell library picker)."""
+    backend = STATE["backend"]
+    m = _msg_by_id(backend, STATE["dialog"], id)
+    if m is not None and m.msg_type == "code" and lib.strip():
+        target = f"{lib.strip()}:{module.strip() or 'core'}"
+        new = export.set_export_target(m.content, target)
+        if isinstance(backend, _InMemoryBackend):
+            m.content = new
+        elif hasattr(backend, "update"):
+            backend.update(STATE["dialog"], id, new)
+    return Stream()
 
 
 @rt("/rename", methods=["post"])
