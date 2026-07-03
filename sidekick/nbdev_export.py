@@ -189,46 +189,53 @@ def is_nbdev_project(dest: str) -> bool:
 
 def _git_identity() -> tuple[str, str]:
     """(author, email) from git config, best-effort — used to fill the nbdev
-    project metadata so scaffolding needs no prompts."""
+    project metadata so scaffolding needs no prompts. Double-quotes are stripped:
+    some configs store the name *with* quotes (`user.name = "Jane Doe"`), which
+    would double up when interpolated into the pyproject TOML and break it."""
     import subprocess
     def cfg(key):
         try:
             r = subprocess.run(["git", "config", "--get", key], capture_output=True,
                                text=True, timeout=5)
-            return r.stdout.strip() if r.returncode == 0 else ""
+            return r.stdout.replace('"', "").strip() if r.returncode == 0 else ""
         except Exception:  # noqa: BLE001
             return ""
     return cfg("user.name"), cfg("user.email")
 
 
-def scaffold_nbdev_new(dest: str, pkg: str, author: str = "", email: str = "",
-                       user: str = "", description: str = "") -> tuple[bool, str]:
-    """Scaffold a full nbdev project in `dest` with `nbdev-new` (LICENSE, docs
-    config, CI, index). Non-interactive (all values passed as flags) but needs
-    network — it downloads the nbdev template from GitHub. Best-effort: the caller
-    falls back to a minimal pyproject when this can't run (offline / no nbdev).
+def scaffold_nbdev(dest: str, pkg: str, author: str = "", email: str = "",
+                   user: str = "", description: str = "") -> tuple[bool, str]:
+    """Generate a real nbdev `pyproject.toml` (with the full `[tool.nbdev]`,
+    `[project.entry-points.nbdev]`, setuptools config) using nbdev's own config
+    generator, ``nbdev_create_config`` — **offline**.
 
-    The template's placeholder module notebook (`nbs/00_core.ipynb`) is removed —
-    Sidekick writes the real module notebooks from your tagged cells."""
+    This deliberately avoids `nbdev-new`, whose one-time template download hits the
+    *unauthenticated* GitHub API (hardcoded `authenticate=False`, so a token can't
+    fix it) and gets rate-limited. `nbdev_create_config` touches no network, so it
+    never rate-limits; the tradeoff is the template extras (LICENSE, CI, docs
+    `index.ipynb`, styles) that full `nbdev-new` adds are not generated — Sidekick
+    writes the module notebooks + a stub index itself. Run in a subprocess of the
+    interpreter that has nbdev; the caller falls back to a minimal pyproject if it
+    can't run (nbdev not installed)."""
+    import json
     import os
     import subprocess
-    exe = _find_exe("nbdev_new", "nbdev-new")
-    if not exe:
-        return False, "nbdev-new not available"
+    import sys
     os.makedirs(dest, exist_ok=True)
-    args = [exe, "--repo", pkg, "--user", user or pkg,
-            "--author", author or "", "--author_email", email or "",
-            "--description", description or f"{pkg} — generated from Sidekick dialogs"]
+    kw = {"repo": pkg, "user": user or pkg, "author": author or "",
+          "author_email": email or "", "path": dest,
+          "description": description or f"{pkg} — generated from Sidekick dialogs"}
+    script = ("import sys, json\n"
+              "from nbdev.config import nbdev_create_config\n"
+              "nbdev_create_config(**json.loads(sys.argv[1]))\n")
     try:
-        r = subprocess.run(args, cwd=dest, capture_output=True, text=True, timeout=180)
-    except Exception as e:  # noqa: BLE001 — network/timeout etc.; caller falls back
-        return False, f"nbdev-new failed to run: {e}"
+        r = subprocess.run([sys.executable, "-c", script, json.dumps(kw)],
+                           cwd=dest, capture_output=True, text=True, timeout=60)
+    except Exception as e:  # noqa: BLE001 — caller falls back to minimal pyproject
+        return False, f"nbdev_create_config failed to run: {e}"
     if r.returncode != 0:
-        return False, (r.stderr or r.stdout or "").strip()[:300] or "nbdev-new nonzero exit"
-    placeholder = os.path.join(dest, "nbs", "00_core.ipynb")
-    if os.path.isfile(placeholder):
-        os.remove(placeholder)
-    return True, "scaffolded a full nbdev project with nbdev-new"
+        return False, (r.stderr or r.stdout or "").strip()[:300] or "nbdev_create_config error"
+    return True, "generated nbdev pyproject.toml with nbdev_create_config (offline)"
 
 
 def run_nbdev(dest: str) -> tuple[bool, str]:
@@ -252,12 +259,12 @@ def build_library(backend, lib: str, dest: str, pkg_name: str | None = None) -> 
     """Build ``lib`` into ``dest``: scaffold the nbdev project once, write the
     module notebooks from the tagged cells, and tangle to the ``.py`` package.
 
-    Hybrid scaffolding (see docs/design/graph-vs-tree.md): the *first* build to a
-    fresh dir uses ``nbdev-new`` for a full nbdev project (docs/CI/LICENSE/index);
-    *rebuilds* reuse the existing project and just refresh the notebooks. If
-    ``nbdev-new`` can't run (offline / not installed), fall back to a minimal
-    ``pyproject.toml`` — enough to tangle to ``.py``. Disable the scaffold attempt
-    with ``SIDEKICK_NBDEV_SCAFFOLD=0`` (always use minimal).
+    Scaffolding (see docs/design/graph-vs-tree.md): the *first* build to a fresh dir
+    generates a real nbdev ``pyproject.toml`` with ``nbdev_create_config`` —
+    **offline**, so no GitHub rate limit (unlike ``nbdev-new``); *rebuilds* reuse
+    the existing project and just refresh the notebooks. If nbdev isn't installed,
+    fall back to a minimal ``pyproject.toml`` — still enough to tangle to ``.py``.
+    Force the minimal path with ``SIDEKICK_NBDEV_SCAFFOLD=0``.
 
     Returns ``{"pkg", "modules", "files", "scaffold", "nbdev_ok", "nbdev_detail"}``.
     """
@@ -269,12 +276,18 @@ def build_library(backend, lib: str, dest: str, pkg_name: str | None = None) -> 
     if is_nbdev_project(dest):
         scaffold = "existing nbdev project (reused)"
     else:
-        want_new = os.environ.get("SIDEKICK_NBDEV_SCAFFOLD", "1") != "0"
-        ok, detail = (scaffold_nbdev_new(dest, pkg, *_git_identity())
-                      if want_new else (False, "scaffold disabled"))
+        want = os.environ.get("SIDEKICK_NBDEV_SCAFFOLD", "1") != "0"
+        ok, detail = (scaffold_nbdev(dest, pkg, *_git_identity())
+                      if want else (False, "scaffold disabled"))
         if ok:
+            # create_config writes only pyproject.toml. Add the stub index, and a
+            # stub __init__.py with __version__ — its pyproject reads the version
+            # dynamically from `<pkg>.__version__`, which must resolve before the
+            # first `nbdev-export` can run (nbdev regenerates __init__ afterwards).
+            write_files(dest, {"nbs/index.ipynb": _index_ipynb(pkg),
+                               f"{pkg}/__init__.py": '__version__ = "0.0.1"\n'})
             scaffold = detail
-        else:                               # offline-safe minimal project
+        else:                               # minimal, offline-safe project
             write_files(dest, {"pyproject.toml": _pyproject_toml(pkg),
                                "nbs/index.ipynb": _index_ipynb(pkg)})
             scaffold = f"minimal pyproject ({detail})"

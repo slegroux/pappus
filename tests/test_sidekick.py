@@ -2441,21 +2441,22 @@ def test_build_library_minimal_scaffold_and_degrades_without_nbdev(tmp_path, mon
     assert "minimal pyproject" in res["scaffold"]
 
 
-def test_build_library_scaffolds_with_nbdev_new_on_fresh_dir(tmp_path, monkeypatch):
-    # A fresh dir triggers the nbdev-new scaffold (stubbed to avoid network).
+def test_build_library_scaffolds_on_fresh_dir(tmp_path, monkeypatch):
+    # A fresh dir triggers nbdev_create_config (stubbed — offline anyway).
     from sidekick import nbdev_export as nx
     calls = {}
 
-    def fake_new(dest, pkg, *a, **k):
+    def fake_scaffold(dest, pkg, *a, **k):
         calls["dest"] = dest
         (Path(dest) / "pyproject.toml").write_text("[tool.nbdev]\nlib_path='x'\nnbs_path='nbs'\n")
-        return True, "scaffolded a full nbdev project with nbdev-new"
+        return True, "generated nbdev pyproject.toml with nbdev_create_config (offline)"
 
-    monkeypatch.setattr(nx, "scaffold_nbdev_new", fake_new)
+    monkeypatch.setattr(nx, "scaffold_nbdev", fake_scaffold)
     monkeypatch.setattr(nx, "run_nbdev", lambda dest: (True, "built"))
     res = nx.build_library(_lib_backend(), "audiolib", str(tmp_path), pkg_name="audiolib")
-    assert calls["dest"] == str(tmp_path)                     # nbdev-new was invoked
-    assert "nbdev-new" in res["scaffold"]
+    assert calls["dest"] == str(tmp_path)                     # scaffold was invoked
+    assert "nbdev_create_config" in res["scaffold"]
+    assert (tmp_path / "nbs" / "index.ipynb").exists()        # index written on success
     assert (tmp_path / "nbs" / "blocks.ipynb").exists()
 
 
@@ -2465,9 +2466,9 @@ def test_build_library_reuses_existing_nbdev_project(tmp_path, monkeypatch):
     (tmp_path / "pyproject.toml").write_text("[tool.nbdev]\nlib_path='x'\nnbs_path='nbs'\n")
 
     def boom(*a, **k):
-        raise AssertionError("scaffold_nbdev_new must not run for an existing project")
+        raise AssertionError("scaffold_nbdev must not run for an existing project")
 
-    monkeypatch.setattr(nx, "scaffold_nbdev_new", boom)
+    monkeypatch.setattr(nx, "scaffold_nbdev", boom)
     monkeypatch.setattr(nx, "run_nbdev", lambda dest: (True, "built"))
     res = nx.build_library(_lib_backend(), "audiolib", str(tmp_path), pkg_name="audiolib")
     assert "existing nbdev project" in res["scaffold"]
@@ -2551,3 +2552,21 @@ def test_libraries_page_top_bar_link_present():
     import sidekick.app as app
     from fasthtml.common import to_xml
     assert 'href="/libraries"' in to_xml(app.Page())
+
+
+def test_git_identity_strips_quotes(monkeypatch):
+    # Some git configs store the name WITH quotes (`user.name = "Jane Doe"`); those
+    # must be stripped or they double up and break the generated pyproject TOML.
+    import subprocess
+    from sidekick import nbdev_export as nx
+
+    def fake_run(cmd, **kw):
+        key = cmd[-1]
+        out = '"Jane Doe"\n' if key == "user.name" else "jane@example.com\n"
+        class R:
+            returncode = 0
+            stdout = out
+        return R()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    assert nx._git_identity() == ("Jane Doe", "jane@example.com")   # no stray quotes
