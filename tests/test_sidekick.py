@@ -2101,10 +2101,14 @@ def test_tools_config_defaults_and_file(monkeypatch, tmp_path):
     assert tc.deny_list() == ["Bash"]
 
 
-def _mcp_client():
+def _mcp_client(client_host="127.0.0.1"):
+    # The /internal/* routes are loopback-only; present a loopback client host so
+    # these tests stand in for the legitimate on-box MCP caller (TestClient's
+    # default host is "testclient", which the loopback guard would reject).
     from starlette.testclient import TestClient
     import sidekick.app as app
-    return app, TestClient(app.app), app.STATE["mcp_token"]
+    tc = TestClient(app.app, client=(client_host, 50000))
+    return app, tc, app.STATE["mcp_token"]
 
 
 def test_internal_cells_forbidden_without_token():
@@ -2112,6 +2116,18 @@ def test_internal_cells_forbidden_without_token():
     app.STATE["dialog"] = "mcp/list"
     app.STATE["backend"].messages("mcp/list")
     assert client.get("/internal/cells", params={"dialog": "mcp/list", "tok": "bad"}).status_code == 403
+
+
+def test_internal_route_rejects_nonloopback_origin_even_with_valid_token():
+    # A correct token from off-box must still be refused — the cell-mutation routes
+    # are loopback-only, a second factor beyond the token (guards SIDEKICK_HOST=0.0.0.0).
+    app, client, tok = _mcp_client(client_host="10.0.0.5")
+    bk = app.STATE["backend"]; d = "mcp/lan"; bk.messages(d)
+    m = bk.add(d, "keep", "code")
+    r = client.post("/internal/cell/update",
+                    data={"dialog": d, "id": m.id, "content": "hijacked", "tok": tok})
+    assert r.status_code == 403
+    assert bk.messages(d)[-1].content == "keep"        # unchanged
 
 
 def test_internal_cell_update_edits_live_backend():

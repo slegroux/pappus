@@ -9,6 +9,7 @@ The whole point: the target switcher in the top-right flips between your laptop
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
@@ -2868,7 +2869,27 @@ def stream_answer(dialog: str, id: str):
 # the streamed answer's `done` event reloads it.
 def _mcp_ok(tok: str) -> bool:
     want = STATE.get("mcp_token")
-    return bool(want) and tok == want
+    # constant-time compare — these routes rewrite arbitrary notebook cells, so
+    # don't leak the token length/prefix through `==` timing.
+    return bool(want) and hmac.compare_digest(tok or "", want)
+
+
+def _loopback_req(request) -> bool:
+    """True when the request comes from loopback. The /internal/* routes mutate the
+    live notebook; the shared token is a second factor, not the only one, so they
+    must stay unreachable off-box even when the UI is bound to 0.0.0.0
+    (SIDEKICK_HOST). If we can't determine the client (no request), fail closed."""
+    client = getattr(request, "client", None) if request is not None else None
+    host = getattr(client, "host", "") if client is not None else None
+    return host in ("127.0.0.1", "::1", "localhost", "")
+
+
+def _mcp_guard(request, tok: str):
+    """Shared gate for /internal/* routes: loopback origin AND valid token. Returns
+    a 403 response to short-circuit, or None when the request may proceed."""
+    if not _loopback_req(request) or not _mcp_ok(tok):
+        return _json({"ok": False, "error": "forbidden"}, 403)
+    return None
 
 
 def _json(obj, status: int = 200):
@@ -2877,10 +2898,10 @@ def _json(obj, status: int = 200):
 
 
 @rt("/internal/cells")
-def internal_cells(dialog: str, tok: str = ""):
+def internal_cells(dialog: str, tok: str = "", request=None):
     """List a dialog's cells for the AI (id, type, source)."""
-    if not _mcp_ok(tok):
-        return _json({"ok": False, "error": "forbidden"}, 403)
+    if (deny := _mcp_guard(request, tok)) is not None:
+        return deny
     backend = STATE["backend"]
     cells = [{"id": m.id, "type": m.msg_type, "content": m.content or "",
               "output": m.output or ""} for m in backend.messages(dialog)]
@@ -2888,9 +2909,9 @@ def internal_cells(dialog: str, tok: str = ""):
 
 
 @rt("/internal/cell/update", methods=["post"])
-def internal_cell_update(dialog: str, id: str, content: str = "", tok: str = ""):
-    if not _mcp_ok(tok):
-        return _json({"ok": False, "error": "forbidden"}, 403)
+def internal_cell_update(dialog: str, id: str, content: str = "", tok: str = "", request=None):
+    if (deny := _mcp_guard(request, tok)) is not None:
+        return deny
     backend = STATE["backend"]
     if not hasattr(backend, "update") or _msg_by_id(backend, dialog, id) is None:
         return _json({"ok": False, "error": f"no cell {id}"}, 404)
@@ -2900,9 +2921,10 @@ def internal_cell_update(dialog: str, id: str, content: str = "", tok: str = "")
 
 
 @rt("/internal/cell/str_replace", methods=["post"])
-def internal_cell_str_replace(dialog: str, id: str, old: str = "", new: str = "", tok: str = ""):
-    if not _mcp_ok(tok):
-        return _json({"ok": False, "error": "forbidden"}, 403)
+def internal_cell_str_replace(dialog: str, id: str, old: str = "", new: str = "",
+                              tok: str = "", request=None):
+    if (deny := _mcp_guard(request, tok)) is not None:
+        return deny
     backend = STATE["backend"]
     m = _msg_by_id(backend, dialog, id)
     if m is None or not hasattr(backend, "update"):
@@ -2920,9 +2942,9 @@ def internal_cell_str_replace(dialog: str, id: str, old: str = "", new: str = ""
 
 @rt("/internal/cell/insert", methods=["post"])
 def internal_cell_insert(dialog: str, content: str = "", cell_type: str = "code",
-                         after_id: str = "", tok: str = ""):
-    if not _mcp_ok(tok):
-        return _json({"ok": False, "error": "forbidden"}, 403)
+                         after_id: str = "", tok: str = "", request=None):
+    if (deny := _mcp_guard(request, tok)) is not None:
+        return deny
     if cell_type not in ("code", "note", "prompt"):
         return _json({"ok": False, "error": "bad cell_type"}, 400)
     backend = STATE["backend"]
