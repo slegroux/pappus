@@ -156,6 +156,33 @@ def write_files(dest: str, files: dict[str, str]) -> list[str]:
     return written
 
 
+def prune_orphan_modules(dest: str, pkg: str, keep_modules) -> list[str]:
+    """Delete generated module notebooks (and their tangled ``.py``) that are no
+    longer in the library, so a retagged or deleted cell can't leave a phantom
+    module behind — the cells stay the source of truth (graph-vs-tree.md).
+
+    Scoped tightly: only ``nbs/<module>.ipynb`` files are candidates (never
+    ``index.ipynb``), and a ``<pkg>/<module>.py`` is removed only when its matching
+    generated notebook is being removed — so user files and nbdev's own
+    ``__init__.py`` / ``_modidx.py`` are never touched. Returns removed relpaths.
+    """
+    import glob
+    import os
+    keep = {slug(m) for m in keep_modules}
+    removed: list[str] = []
+    for nb in glob.glob(os.path.join(dest, "nbs", "*.ipynb")):
+        stem = os.path.splitext(os.path.basename(nb))[0]
+        if stem == "index" or stem in keep:
+            continue
+        os.remove(nb)
+        removed.append(os.path.relpath(nb, dest))
+        py = os.path.join(dest, pkg, f"{stem}.py")
+        if os.path.isfile(py):
+            os.remove(py)
+            removed.append(os.path.relpath(py, dest))
+    return removed
+
+
 def _find_exe(*names: str) -> str | None:
     """Find a console script by any of `names`, on PATH or in the running
     interpreter's own bin dir (so it's found when the app runs from a venv whose
@@ -292,7 +319,12 @@ def build_library(backend, lib: str, dest: str, pkg_name: str | None = None) -> 
                                "nbs/index.ipynb": _index_ipynb(pkg)})
             scaffold = f"minimal pyproject ({detail})"
 
+    # Reconcile against the live cell set BEFORE writing: drop notebooks (and their
+    # tangled .py) for modules that no longer have any tagged cell, so a rebuild
+    # after a retag/delete doesn't leave a phantom module in the package.
+    pruned = prune_orphan_modules(dest, pkg, modules.keys())
     write_files(dest, module_files)         # our module notebooks, always ours
     nbdev_ok, nb_detail = run_nbdev(dest)
     return {"pkg": pkg, "modules": sorted(modules), "files": sorted(module_files),
-            "scaffold": scaffold, "nbdev_ok": nbdev_ok, "nbdev_detail": nb_detail}
+            "pruned": pruned, "scaffold": scaffold,
+            "nbdev_ok": nbdev_ok, "nbdev_detail": nb_detail}

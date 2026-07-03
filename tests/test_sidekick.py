@@ -2602,6 +2602,35 @@ def test_build_library_reuses_existing_nbdev_project(tmp_path, monkeypatch):
     assert (tmp_path / "nbs" / "layers.ipynb").exists()       # notebooks refreshed
 
 
+def test_build_library_prunes_orphaned_modules_on_retag(tmp_path, monkeypatch):
+    # Retagging every cell to a new module must not leave the old module's notebook
+    # (or its tangled .py) behind — the live cells are the source of truth.
+    from sidekick import nbdev_export as nx
+    monkeypatch.setenv("SIDEKICK_NBDEV_SCAFFOLD", "0")        # minimal, offline
+    monkeypatch.setattr(nx, "run_nbdev", lambda dest: (False, "skipped"))
+    nx.build_library(_lib_backend(), "audiolib", str(tmp_path), pkg_name="audiolib")
+    assert (tmp_path / "nbs" / "layers.ipynb").exists()
+    assert (tmp_path / "nbs" / "blocks.ipynb").exists()
+    # simulate a prior nbdev tangle + nbdev-owned files in the package dir
+    pkgdir = tmp_path / "audiolib"; pkgdir.mkdir(exist_ok=True)
+    (pkgdir / "layers.py").write_text("# tangled")
+    (pkgdir / "blocks.py").write_text("# tangled")
+    (pkgdir / "__init__.py").write_text("__version__ = '0'")  # nbdev-owned, must survive
+    # retag: cells now target a single new module
+    b = MockBackend()
+    b.add("conv/conv1d", "#| export audiolib:newmod\nclass X:\n    pass", "code")
+    res = nx.build_library(b, "audiolib", str(tmp_path), pkg_name="audiolib")
+    assert not (tmp_path / "nbs" / "layers.ipynb").exists()   # orphan notebooks gone
+    assert not (tmp_path / "nbs" / "blocks.ipynb").exists()
+    assert not (pkgdir / "layers.py").exists()                # and their tangled .py
+    assert not (pkgdir / "blocks.py").exists()
+    assert (tmp_path / "nbs" / "newmod.ipynb").exists()       # the current module written
+    assert (tmp_path / "nbs" / "index.ipynb").exists()        # index never pruned
+    assert (pkgdir / "__init__.py").exists()                  # nbdev-owned file untouched
+    assert set(res["pruned"]) == {"nbs/layers.ipynb", "nbs/blocks.ipynb",
+                                  "audiolib/layers.py", "audiolib/blocks.py"}
+
+
 def test_is_nbdev_project(tmp_path):
     from sidekick import nbdev_export as nx
     assert not nx.is_nbdev_project(str(tmp_path))             # empty
