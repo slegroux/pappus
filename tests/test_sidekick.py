@@ -2192,6 +2192,45 @@ def test_internal_cell_insert_after():
     assert [c.content for c in bk.messages(d)] == ["first", "second", "third"]
 
 
+def test_cells_dirty_mark_during_stream_survives_to_consume():
+    """The stream generator resets cells_dirty at the start of a turn; an MCP cell
+    edit on another thread mid-turn must still be seen by the end-of-turn consume."""
+    import threading
+    import sidekick.app as app
+    app._reset_cells_dirty()                            # gen: start of turn
+    t = threading.Thread(target=app._mark_cells_dirty)  # the AI edits a cell mid-turn
+    t.start(); t.join()
+    assert app._consume_cells_dirty() is True           # gen: end of turn — edit seen
+    assert app.STATE["cells_dirty"] is False            # and cleared
+
+
+def test_cells_dirty_consume_atomic_no_lost_update():
+    """A mark racing the consume is never silently dropped: it is either observed by
+    that consume or left set for the next one. With a non-atomic read-then-reset a
+    mark landing between the read and the reset would be lost."""
+    import threading
+    import sidekick.app as app
+    app._reset_cells_dirty()
+    observed = 0
+    ROUNDS = 200
+    for _ in range(ROUNDS):
+        go = threading.Event()
+
+        def marker():
+            go.wait()
+            app._mark_cells_dirty()
+
+        t = threading.Thread(target=marker)
+        t.start()
+        go.set()                                        # release ~simultaneously with consume
+        if app._consume_cells_dirty():
+            observed += 1
+        t.join()
+        if app._consume_cells_dirty():                  # a mark that landed just after
+            observed += 1
+    assert observed == ROUNDS                           # every mark accounted for, none lost
+
+
 def test_mcp_server_dispatches_tools(monkeypatch):
     import server.mcp_cells as mc
     calls = []
