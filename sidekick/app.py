@@ -2446,7 +2446,8 @@ def Page():
                             Div(A("Jupyter notebook (.ipynb)", href="/export/ipynb"),
                                 A("Markdown (.md)", href="/export/md"),
                                 A("Python package (.zip)", href="/export/package"),
-                                A("Blog post (Quarto .zip)", href="/export/blog"),
+                                A("Publish to blog", href="/publish/blog", target="_blank",
+                                  title="Build this dialog into your Quarto blog and open it"),
                                 cls="export-menu"),
                             cls="export"),
                     A("📦 Libraries", href="/libraries", cls="gear",
@@ -3176,26 +3177,41 @@ def export_md():
     return _download(to_markdown(msgs), fname, "text/markdown; charset=utf-8")
 
 
-@rt("/export/blog")
-def export_blog():
-    """Publish the current dialog as a one-post Quarto blog and return it zipped.
+@rt("/publish/blog")
+def publish_blog():
+    """Publish the current dialog as a post into your Quarto blog, then open it.
 
     A dialog is already a literate document (prose + code + outputs), so a blog is
-    a per-dialog export — the publishing sibling of `.ipynb`/`.md`/`.zip`, not a
-    cross-dialog collection like a library. We hand back the rendered `_site/`
-    (directly hostable: open `index.html`); if quarto isn't installed the render
-    soft-fails and we zip the source project instead, still renderable later."""
-    import tempfile
+    a per-dialog *publish* — the sibling of the ⬇ file exports, not a cross-dialog
+    collection like a library. It builds in place into a persistent blog project
+    (`blog.default_blog_dir()`), which accumulates posts across dialogs, and we
+    redirect to the freshly-rendered post. If quarto isn't installed the render
+    soft-fails and we flash where the source project was written instead."""
     from datetime import date
+    from starlette.responses import RedirectResponse
     from . import blog
     dialog = STATE["dialog"]
-    dest = tempfile.mkdtemp(prefix="sidekick-blog-")
-    result = blog.build_blog(STATE["backend"], [dialog], dest, title=dialog,
-                             date=date.today().isoformat())
-    site = os.path.join(dest, "_site")
-    root = site if (result["render_ok"] and os.path.isdir(site)) else dest
-    name = export.slug(dialog)
-    return _download(blog.zip_dir(root, arcprefix=name), f"{name}-blog.zip", "application/zip")
+    result = blog.build_blog(STATE["backend"], [dialog], blog.default_blog_dir(),
+                             title="Sidekick Blog", date=date.today().isoformat())
+    if not result["render_ok"]:
+        STATE["flash"] = f"Post written to {blog.default_blog_dir()} — {result['render_detail']}"
+        return RedirectResponse("/", status_code=303)
+    return RedirectResponse(f"/blog/posts/{export.slug(dialog)}.html", status_code=303)
+
+
+@rt("/blog/{path:path}")
+def blog_site(path: str):
+    """Serve the rendered blog (its `_site/`), with a path-traversal guard —
+    mirrors the /vendor asset route. Bare `/blog/` serves the listing index."""
+    from starlette.responses import FileResponse, PlainTextResponse
+    from . import blog
+    site = Path(blog.default_blog_dir()) / "_site"
+    p = (site / (path or "index.html")).resolve()
+    if p.is_dir():
+        p = p / "index.html"
+    if str(p).startswith(str(site.resolve())) and p.is_file():
+        return FileResponse(p)
+    return PlainTextResponse("not found", status_code=404)
 
 
 def _convert_paper_async(path: str, name: str | None = None):

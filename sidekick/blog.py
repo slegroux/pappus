@@ -170,21 +170,16 @@ def blog_files(posts: dict[str, dict], title: str) -> dict[str, str]:
     return files
 
 
-def zip_dir(root: str, arcprefix: str = "") -> bytes:
-    """Zip a directory tree on disk into bytes — for handing a built blog (the
-    rendered ``_site/``, or the source project) to the browser as a download.
-    Every entry is nested under ``arcprefix/`` so unzipping makes one folder."""
-    import io
+def default_blog_dir() -> str:
+    """The persistent Quarto blog project on disk. A blog is a *project you build
+    in place* (like a library or an nbdev project), not a throwaway artifact — so
+    it lives under the same data root as your dialogs (``SIDEKICK_DATA``, else
+    ``~/.config/solveit-sidekick``) and accumulates posts across sessions."""
     import os
-    import zipfile
-    buf = io.BytesIO()
-    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for dirpath, _, files in os.walk(root):
-            for f in sorted(files):
-                full = os.path.join(dirpath, f)
-                rel = os.path.relpath(full, root)
-                zf.write(full, os.path.join(arcprefix, rel) if arcprefix else rel)
-    return buf.getvalue()
+    from pathlib import Path
+    base = os.environ.get("SIDEKICK_DATA")
+    base = Path(base).expanduser() if base else Path.home() / ".config" / "solveit-sidekick"
+    return str(base / "blog")
 
 
 # ---- disk + render ----------------------------------------------------------
