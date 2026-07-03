@@ -33,6 +33,7 @@ import json
 import os
 import re
 import contextlib
+import threading
 import warnings
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -67,6 +68,41 @@ def _check_auth(expected: str | None, cookie_header: str) -> bool:
 # Per-dialog execution namespaces — this is the "kernel" state.
 KERNELS: dict[str, dict] = {}
 
+# Serialize work per dialog. The server is a ThreadingHTTPServer, so two requests
+# for the SAME dialog (two /exec, or /exec racing /complete or /reset) would run
+# against one shared namespace dict simultaneously — interleaved exec corrupts
+# state, and iterating the namespace (completion, the var list in run_prompt) while
+# another thread mutates it raises RuntimeError. Each dialog gets its own lock;
+# _LOCKS_GUARD guards the registry itself (and the structural KERNELS mutations in
+# _ns/reset/rename). Lock order is always per-dialog-lock THEN _LOCKS_GUARD, so
+# multi-dialog ops (/rename) can't deadlock.
+_LOCKS: dict[str, threading.Lock] = {}
+_LOCKS_GUARD = threading.Lock()
+
+
+def _lock_for(dialog: str) -> threading.Lock:
+    with _LOCKS_GUARD:
+        lk = _LOCKS.get(dialog)
+        if lk is None:
+            lk = threading.Lock()
+            _LOCKS[dialog] = lk
+        return lk
+
+
+@contextlib.contextmanager
+def _dialog_locks(*dialogs: str):
+    """Hold the per-dialog lock(s) for `dialogs`. Deduped and sorted so two
+    concurrent multi-dialog ops (e.g. /rename a↔b) acquire in the same order and
+    never deadlock."""
+    locks = [_lock_for(d) for d in sorted(set(dialogs))]
+    for lk in locks:
+        lk.acquire()
+    try:
+        yield
+    finally:
+        for lk in reversed(locks):
+            lk.release()
+
 
 def _ns(dialog: str) -> dict:
     ns = KERNELS.get(dialog)
@@ -97,7 +133,14 @@ def _b64(data: bytes) -> str:
 def _capture_figs() -> list:
     """Grab any open matplotlib figures as PNGs, then clear them (inline-plot
     behavior). Returns [] when matplotlib isn't even imported, so there's no cost
-    for non-plotting code."""
+    for non-plotting code.
+
+    KNOWN LIMITATION (not fixed by the per-dialog exec lock): pyplot's figure
+    registry is process-global, so two dialogs plotting concurrently can cross
+    figures — this reads whatever figures are open process-wide, not just this
+    dialog's. The per-dialog lock in run_code serializes same-dialog execs but
+    cannot isolate the global pyplot state across different dialogs. Fixing it
+    needs per-dialog figure isolation, out of scope for the lock change."""
     import sys
     plt = sys.modules.get("matplotlib.pyplot")
     if plt is None:
@@ -155,8 +198,9 @@ def complete_code(dialog: str, code: str, line: int, col: int) -> list:
     except ImportError:
         return []
     try:
-        script = jedi.Interpreter(code, namespaces=[_ns(dialog)])
-        comps = script.complete(line, col)
+        with _dialog_locks(dialog):     # don't introspect a namespace mid-exec
+            script = jedi.Interpreter(code, namespaces=[_ns(dialog)])
+            comps = script.complete(line, col)
     except Exception:  # noqa: BLE001 — jedi can raise on odd partial source
         return []
     out = []
@@ -171,7 +215,6 @@ def run_code(dialog: str, code: str) -> tuple[str, list]:
     Returns (text, rich) where text is stdout/stderr plus the last expression's
     repr, and rich is a list of MIME-typed outputs (plots, images, dataframes).
     """
-    ns = _ns(dialog)
     buf = io.StringIO()
     rich: list = []
     try:
@@ -186,25 +229,27 @@ def run_code(dialog: str, code: str) -> tuple[str, list]:
     if not suppress and tree.body and isinstance(tree.body[-1], ast.Expr):
         last_expr = ast.Expression(tree.body.pop().value)
 
-    try:
-        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf), \
-                warnings.catch_warnings():
-            # plt.show() is a no-op under the headless Agg backend, but matplotlib
-            # still warns "FigureCanvasAgg is non-interactive…" to stderr — pure
-            # noise here, since _capture_figs() renders the figure inline anyway.
-            warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
-            exec(compile(tree, "<dialog>", "exec"), ns)
-            if last_expr is not None:
-                val = eval(compile(last_expr, "<dialog>", "eval"), ns)
-                if val is not None:
-                    r = _rich_repr(val)
-                    if r:
-                        rich.append(r)
-                    else:
-                        print(repr(val), file=buf)
-    except Exception as e:  # noqa: BLE001 — surface kernel errors as output
-        print(f"{type(e).__name__}: {e}", file=buf)
-    rich = _capture_figs() + rich          # plots created during the cell, newest cell-state
+    with _dialog_locks(dialog):        # serialize exec/complete against this namespace
+        ns = _ns(dialog)
+        try:
+            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf), \
+                    warnings.catch_warnings():
+                # plt.show() is a no-op under the headless Agg backend, but matplotlib
+                # still warns "FigureCanvasAgg is non-interactive…" to stderr — pure
+                # noise here, since _capture_figs() renders the figure inline anyway.
+                warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
+                exec(compile(tree, "<dialog>", "exec"), ns)
+                if last_expr is not None:
+                    val = eval(compile(last_expr, "<dialog>", "eval"), ns)
+                    if val is not None:
+                        r = _rich_repr(val)
+                        if r:
+                            rich.append(r)
+                        else:
+                            print(repr(val), file=buf)
+        except Exception as e:  # noqa: BLE001 — surface kernel errors as output
+            print(f"{type(e).__name__}: {e}", file=buf)
+        rich = _capture_figs() + rich      # plots created during the cell, newest cell-state
     return buf.getvalue().rstrip("\n"), rich
 
 
@@ -232,10 +277,9 @@ def inject_vars(dialog: str, content: str) -> tuple[str, list]:
     error collected, mirroring SolveIt (it never aborts the prompt)."""
     if "$`" not in content:
         return content, []
-    ns = _ns(dialog)
     warnings_: list = []
 
-    def repl(m):
+    def repl(m, ns):
         expr = m.group(1).strip()
         try:
             val = eval(compile(expr, "<inject>", "eval"), ns)   # noqa: S307 — user's own prompt
@@ -244,7 +288,9 @@ def inject_vars(dialog: str, content: str) -> tuple[str, list]:
             warnings_.append(f"{expr}: {type(e).__name__}: {e}")
             return f"[unresolved `{expr}`: {type(e).__name__}]"
 
-    return _INJECT_RE.sub(repl, content), warnings_
+    with _dialog_locks(dialog):     # eval against a stable namespace, not one mid-exec
+        ns = _ns(dialog)
+        return _INJECT_RE.sub(lambda m: repl(m, ns), content), warnings_
 
 
 # Default API model per provider; override with env (e.g. OPENAI_MODEL=gpt-4.1).
@@ -334,7 +380,8 @@ def run_prompt(dialog: str, content: str, model: str, context: str = "",
         except Exception as e:  # noqa: BLE001 — surface provider/runtime errors in the UI
             return f"[{label} error: {e}]"
 
-    known = [k for k in _ns(dialog) if not k.startswith("__")]
+    with _dialog_locks(dialog):     # snapshot keys without racing a concurrent exec
+        known = [k for k in _ns(dialog) if not k.startswith("__")]
     bits = [f"notebook context: {len(context)} chars"] if context else []
     if known:
         bits.append(f"kernel vars: {', '.join(known)}")
@@ -405,15 +452,17 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, {"ok": bool(p), "added": added, "path": p})
         if path == "/reset":
             d = payload.get("dialog", "")
-            KERNELS.pop(d, None)
-            CLI_SESSIONS.pop(d, None)         # drop the CLI session too
+            with _dialog_locks(d):            # don't drop a namespace mid-exec
+                KERNELS.pop(d, None)
+                CLI_SESSIONS.pop(d, None)     # drop the CLI session too
             return self._send(200, {"ok": True})
         if path == "/rename":
             old, new = payload.get("old", ""), payload.get("new", "")
-            if old in KERNELS and new:
-                KERNELS[new] = KERNELS.pop(old)
-            if old in CLI_SESSIONS and new:    # carry the session to the new name
-                CLI_SESSIONS[new] = CLI_SESSIONS.pop(old)
+            with _dialog_locks(old, new):     # hold both ends across the move
+                if old in KERNELS and new:
+                    KERNELS[new] = KERNELS.pop(old)
+                if old in CLI_SESSIONS and new:  # carry the session to the new name
+                    CLI_SESSIONS[new] = CLI_SESSIONS.pop(old)
             return self._send(200, {"ok": True})
         return self._send(404, {"error": "not found"})
 

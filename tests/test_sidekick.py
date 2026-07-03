@@ -987,6 +987,51 @@ def test_run_code_trailing_semicolon_suppresses_value():
     assert text == "" and rich == []                    # Jupyter-style suppression
 
 
+def test_run_code_concurrent_same_dialog_no_lost_updates():
+    """Threads exec'ing into ONE dialog are serialized by the per-dialog lock, so a
+    read-modify-write spanning statements never loses an increment. The sleep
+    between read and write releases the GIL to widen the race window — without the
+    lock the final count would fall short of N."""
+    import threading
+    import server.kernel_server as ks
+    ks.run_code("conc/same", "acc = 0")
+    N = 20
+
+    def bump():
+        ks.run_code("conc/same", "_t = acc\nimport time\ntime.sleep(0.001)\nacc = _t + 1")
+
+    threads = [threading.Thread(target=bump) for _ in range(N)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    text, _ = ks.run_code("conc/same", "acc")
+    assert text == str(N)                               # every increment landed
+
+
+def test_run_code_concurrent_different_dialogs_stay_isolated():
+    """Concurrent execs in different dialogs keep separate namespaces — one
+    dialog's variable never bleeds into another's."""
+    import threading
+    import server.kernel_server as ks
+    errors: list = []
+
+    def work(dialog, val):
+        for _ in range(20):
+            ks.run_code(dialog, f"who = {val!r}")
+            text, _ = ks.run_code(dialog, "who")
+            if text != repr(val):
+                errors.append((dialog, text))
+
+    ta = threading.Thread(target=work, args=("conc/a", "A"))
+    tb = threading.Thread(target=work, args=("conc/b", "B"))
+    ta.start()
+    tb.start()
+    ta.join()
+    tb.join()
+    assert errors == []
+
+
 # ---- variable / expression injection ($`expr` in prompts) ------------------
 def test_inject_vars_evaluates_against_namespace():
     import server.kernel_server as ks
