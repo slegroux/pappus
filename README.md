@@ -402,29 +402,40 @@ worked out — and the two stay separate (see
 notebook = one package, libraries are **cell-centric**: tag any cell, in any
 dialog, into a library.
 
-**In the app:** the **📦 Libraries** page (top bar) is where you create a library
-(name, package, target dir) and hit **Build**; each library shows a live
-**"N cells · M modules"** count of what's currently tagged to it. On any code cell,
-the hover toolbar's **Lib** picker tags it into a `library:module` — or type the
-directive yourself:
+### Step by step
 
-```python
-#| export audiolib:layers      # this cell → library `audiolib`, module `layers`
-class Conv1d: ...
-```
+1. **Tag cells.** On a code cell, hover for the **Lib** picker → choose a library
+   and a module (or type the directive yourself). Cells from *different* dialogs
+   can feed the same library.
 
-(A plain `#| export <module>` with no `lib:` prefix stays dialog-local, as before.)
+   ```python
+   #| export audiolib:layers      # this cell → library `audiolib`, module `layers`
+   class Conv1d: ...
+   ```
 
-**From the CLI**, build a library across **all** your dialogs:
+   A plain `#| export <module>` with no `lib:` prefix stays dialog-local, as before.
+2. **Register the library.** Open **📦 Libraries** (top bar) → *New library* (a
+   name; package name and target dir are optional). Each card shows a live
+   **"N cells · M modules"** count of what's tagged to it, and its on-disk path.
+3. **Build.** Click **Build** on the card — or, from the CLI, across all dialogs:
 
-```bash
-uv run python -m sidekick.cli library build audiolib ./audiolib
-```
+   ```bash
+   uv run python -m sidekick.cli library build audiolib ./audiolib
+   ```
 
-Sidekick gathers every cell tagged `audiolib:*` — from however many dialogs —
-groups them by module, and **projects them into an nbdev project** (one notebook
-per module). Sidekick owns the *cells → notebooks* step; **nbdev** owns
-*notebooks → package + docs + tests*.
+   Sidekick gathers every cell tagged `audiolib:*`, groups them by module, and
+   tangles them into a real `.py` package. The banner reports the result
+   (`✓ built with nbdev`) and where it landed.
+4. **Use it.** Click **Use in kernel**, then `import audiolib` in any code cell —
+   no `sys.path` boilerplate. (Or `pip install -e <the dir>` to use it elsewhere.)
+5. **Improve.** Each generated function links back to its source cell (see
+   *Provenance* below); click through, edit the cell, then **Build** again.
+
+### How it works
+
+Sidekick owns the *cells → notebooks* step; **nbdev** owns *notebooks → package +
+docs + tests*. It projects the tagged cells into an nbdev project (one notebook per
+module) and runs `nbdev-export`.
 
 On the *first* build to a fresh dir, Sidekick generates a real nbdev
 `pyproject.toml` (full `[tool.nbdev]`, entry-points, setuptools config) with
