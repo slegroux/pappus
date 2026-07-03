@@ -426,16 +426,19 @@ groups them by module, and **projects them into an nbdev project** (one notebook
 per module). Sidekick owns the *cells → notebooks* step; **nbdev** owns
 *notebooks → package + docs + tests*.
 
-Scaffolding is **hybrid**: the *first* build to a fresh dir runs
-[`nbdev-new`](https://nbdev.fast.ai) for a full nbdev project (`pyproject.toml`
-with `[tool.nbdev]`, `LICENSE`, docs config, CI, `index.ipynb`); *rebuilds* reuse
-that project and just refresh the notebooks, then `nbdev-export` tangles them into
-the `.py` package. `nbdev-new` needs network (it fetches the template from GitHub,
-whose unauthenticated API is rate-limited) — if it can't run, Build **falls back**
-to a minimal `pyproject.toml`, which is enough to tangle to `.py`, just without the
-docs/CI extras. Set `SIDEKICK_NBDEV_SCAFFOLD=0` to always use the minimal path
-(offline, no GitHub). Either way the package builds; install nbdev with the
-`nbdev` extra (`uv pip install "solveit-sidekick[nbdev]"`).
+On the *first* build to a fresh dir, Sidekick generates a real nbdev
+`pyproject.toml` (full `[tool.nbdev]`, entry-points, setuptools config) with
+[nbdev](https://nbdev.fast.ai)'s own `nbdev_create_config` — **offline**;
+*rebuilds* reuse the existing project and just refresh the notebooks, then
+`nbdev-export` tangles them into the `.py` package. This deliberately avoids
+`nbdev-new`, whose one-time template download hits the *unauthenticated* GitHub
+API (hardcoded, so a token can't fix it) and gets rate-limited — `nbdev_create_config`
+touches no network, so Build never rate-limits. The tradeoff: the template extras
+`nbdev-new` adds (`LICENSE`, `.github` CI, docs styling) aren't generated — run
+`nbdev-new` yourself once if you want them. If nbdev isn't installed, Build falls
+back to a minimal `pyproject.toml` (still tangles to `.py`); `SIDEKICK_NBDEV_SCAFFOLD=0`
+forces that path. Install nbdev with the `nbdev` extra
+(`uv pip install "solveit-sidekick[nbdev]"`).
 
 Two nice properties fall out:
 
