@@ -480,6 +480,15 @@ class HttpKernelBackend(_InMemoryBackend):
         self._save()                         # persist the new output/plots
         return m
 
+    def add_syspath(self, path: str) -> bool:
+        """Put `path` on the kernel's sys.path so a built library there becomes
+        importable from any dialog. Best-effort; returns whether it took."""
+        try:
+            r = self._post("/syspath", {"path": path})
+            return bool(r.get("ok"))
+        except Exception:  # noqa: BLE001 — never break the UI over this
+            return False
+
     def eval_exprs(self, dialog: str, content: str) -> tuple[str, list]:
         """Resolve $`expr` injections in a prompt against the kernel's live
         namespace (the app process can't reach it directly — it lives in the
