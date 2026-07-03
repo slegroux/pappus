@@ -2570,3 +2570,40 @@ def test_git_identity_strips_quotes(monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", fake_run)
     assert nx._git_identity() == ("Jane Doe", "jane@example.com")   # no stray quotes
+
+
+def test_add_syspath_backend_posts_to_kernel():
+    from sidekick.client import HttpKernelBackend
+    b = HttpKernelBackend.__new__(HttpKernelBackend)
+    seen = {}
+    b._post = lambda path, body: seen.update(path=path, body=body) or {"ok": True, "added": True}
+    assert b.add_syspath("/tmp/mylib") is True
+    assert seen["path"] == "/syspath" and seen["body"] == {"path": "/tmp/mylib"}
+
+
+def test_library_use_route_adds_path_and_reports(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    import sidekick.app as app
+    from sidekick import libraries
+    from sidekick.client import HttpKernelBackend
+    from fasthtml.common import to_xml
+    libraries.add("mylib", path=str(tmp_path / "mylib"))
+    b = HttpKernelBackend.__new__(HttpKernelBackend)
+    b._dialogs = {}                                          # LibrariesPage gathers over dialogs
+    added = {}
+    b.add_syspath = lambda p: added.setdefault("p", p) or True
+    monkeypatch.setitem(app.STATE, "backend", b)
+    html = to_xml(app.library_use(name="mylib"))
+    assert added["p"] == str(tmp_path / "mylib")             # library dir put on kernel path
+    assert "is on the kernel path" in html and "import mylib" in html
+
+
+def test_library_use_button_kernel_only(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    import sidekick.app as app
+    from sidekick import libraries
+    from sidekick.client import MockBackend
+    from fasthtml.common import to_xml
+    libraries.add("mylib", path=str(tmp_path / "mylib"))
+    monkeypatch.setitem(app.STATE, "backend", MockBackend())   # no add_syspath
+    assert "Use in kernel" not in to_xml(app.LibrariesPage())

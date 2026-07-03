@@ -2001,6 +2001,14 @@ def _lib_result_banner(result):
         return ""
     if result.get("error"):
         return Div("⚠ " + result["error"], cls="banner")
+    if result.get("use"):
+        pkg = result["pkg"]
+        if result.get("ok"):
+            return Div(Span(f"'{result['use']}' is on the kernel path — "),
+                       Code(f"import {pkg}"),
+                       Span(" now works in any dialog (build it first if you haven't)."),
+                       cls="saved")
+        return Div("⚠ couldn't reach the kernel to add the path.", cls="banner")
     nb = ("✓ built with nbdev" if result.get("nbdev_ok")
           else "notebooks emitted — " + result.get("nbdev_detail", ""))
     mods = ", ".join(result.get("modules") or []) or "no tagged cells"
@@ -2010,25 +2018,34 @@ def _lib_result_banner(result):
 
 def LibrariesPage(result=None, saved=False):
     backend = STATE["backend"]
+    has_kernel = hasattr(backend, "add_syspath")
     cards = []
     for lib in libraries.load():
         mods = nbdev_export.gather(backend, lib["name"])
         ncells = sum(len(v) for v in mods.values())
         summary = (f"{ncells} cells · {len(mods)} modules"
                    + (f" ({', '.join(sorted(mods))})" if mods else " · nothing tagged yet"))
+        actions = [Form(Input(type="hidden", name="name", value=lib["name"]),
+                        Button("Build", cls="cell-btn run", type="submit"),
+                        method="post", action="/library/build", style="display:inline")]
+        if has_kernel:
+            actions.append(Form(
+                Input(type="hidden", name="name", value=lib["name"]),
+                Button("Use in kernel", cls="cell-btn", type="submit",
+                       title=f"Put this library on the kernel path so `import {lib['pkg']}` "
+                             f"works in any dialog"),
+                method="post", action="/library/use", style="display:inline"))
+        actions.append(Form(
+            Input(type="hidden", name="name", value=lib["name"]),
+            Button("Remove", cls="cell-btn del", type="submit"),
+            method="post", action="/library/remove", style="display:inline",
+            onsubmit=f"return confirm('Remove library {lib['name']}? "
+                     f"(the registry entry only — no files are deleted)')"))
         cards.append(Div(
             Div(Strong(lib["name"]), Span(f"  ·  pkg {lib['pkg']}", cls="muted"), cls="prov-head"),
             Div(summary, cls="muted small"),
             Div(f"→ {lib['path']}", cls="muted small"),
-            Div(Form(Input(type="hidden", name="name", value=lib["name"]),
-                     Button("Build", cls="cell-btn run", type="submit"),
-                     method="post", action="/library/build", style="display:inline"),
-                Form(Input(type="hidden", name="name", value=lib["name"]),
-                     Button("Remove", cls="cell-btn del", type="submit"),
-                     method="post", action="/library/remove", style="display:inline",
-                     onsubmit=f"return confirm('Remove library {lib['name']}? "
-                              f"(the registry entry only — no files are deleted)')"),
-                cls="lib-actions", style="display:flex;gap:8px;margin-top:8px"),
+            Div(*actions, cls="lib-actions", style="display:flex;gap:8px;margin-top:8px"),
             cls="prov-card"))
     if not cards:
         cards = [Div("No libraries yet. Create one below, then tag code cells with the "
@@ -2627,6 +2644,20 @@ def library_build(name: str = ""):
         return LibrariesPage(result={"error": f"no library named '{name}'"})
     res = nbdev_export.build_library(STATE["backend"], name, lib["path"], lib["pkg"])
     return LibrariesPage(result={"name": name, "path": lib["path"], **res})
+
+
+@rt("/library/use", methods=["post"])
+def library_use(name: str = ""):
+    """Make a built library importable in the kernel (put its dir on sys.path)."""
+    lib = libraries.get(name)
+    if lib is None:
+        return LibrariesPage(result={"error": f"no library named '{name}'"})
+    fn = getattr(STATE["backend"], "add_syspath", None)
+    if fn is None:
+        return LibrariesPage(result={"error": "this target has no kernel to import into "
+                                              "(switch to the kernel backend)"})
+    ok = fn(lib["path"])
+    return LibrariesPage(result={"use": name, "pkg": lib["pkg"], "ok": ok})
 
 
 @rt("/cell/export-to", methods=["post"])

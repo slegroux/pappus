@@ -394,6 +394,15 @@ class Handler(BaseHTTPRequestHandler):
             content, warns = inject_vars(payload.get("dialog", "default"),
                                          payload.get("content", ""))
             return self._send(200, {"content": content, "warnings": warns})
+        if path == "/syspath":
+            # Make a built library importable in the kernel: put its dir on
+            # sys.path (process-global, so it's importable from every dialog).
+            import sys
+            p = (payload.get("path") or "").strip()
+            added = bool(p) and p not in sys.path
+            if added:
+                sys.path.insert(0, p)
+            return self._send(200, {"ok": bool(p), "added": added, "path": p})
         if path == "/reset":
             d = payload.get("dialog", "")
             KERNELS.pop(d, None)

@@ -453,6 +453,13 @@ The dialog cells are the source of truth; the notebooks and `.py` are generated
 (never hand-edited), so you keep improving the library by editing the cells and
 rebuilding.
 
+**Use it back in a dialog.** After Build, click **Use in kernel** on the library's
+card — Sidekick puts the built package on the kernel's path, so `import <pkg>`
+just works in any code cell (no `sys.path` boilerplate). That closes the loop:
+build a library from your cells, import it back, use it, and — via the provenance
+links — click straight back to the source cell when you want to change something.
+(Kernel backend only; on a real solveit target you'd install the package yourself.)
+
 ## Reading papers (and web pages)
 
 Open a source with the **📄** button — **choose a PDF** or **paste any URL** — and
