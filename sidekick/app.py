@@ -2429,6 +2429,7 @@ def Page():
                             Div(A("Jupyter notebook (.ipynb)", href="/export/ipynb"),
                                 A("Markdown (.md)", href="/export/md"),
                                 A("Python package (.zip)", href="/export/package"),
+                                A("Blog post (Quarto .zip)", href="/export/blog"),
                                 cls="export-menu"),
                             cls="export"),
                     A("📦 Libraries", href="/libraries", cls="gear",
@@ -3142,6 +3143,28 @@ def export_md():
     msgs = STATE["backend"].messages(STATE["dialog"])
     fname = STATE["dialog"].replace("/", "-") + ".md"
     return _download(to_markdown(msgs), fname, "text/markdown; charset=utf-8")
+
+
+@rt("/export/blog")
+def export_blog():
+    """Publish the current dialog as a one-post Quarto blog and return it zipped.
+
+    A dialog is already a literate document (prose + code + outputs), so a blog is
+    a per-dialog export — the publishing sibling of `.ipynb`/`.md`/`.zip`, not a
+    cross-dialog collection like a library. We hand back the rendered `_site/`
+    (directly hostable: open `index.html`); if quarto isn't installed the render
+    soft-fails and we zip the source project instead, still renderable later."""
+    import tempfile
+    from datetime import date
+    from . import blog
+    dialog = STATE["dialog"]
+    dest = tempfile.mkdtemp(prefix="sidekick-blog-")
+    result = blog.build_blog(STATE["backend"], [dialog], dest, title=dialog,
+                             date=date.today().isoformat())
+    site = os.path.join(dest, "_site")
+    root = site if (result["render_ok"] and os.path.isdir(site)) else dest
+    name = export.slug(dialog)
+    return _download(blog.zip_dir(root, arcprefix=name), f"{name}-blog.zip", "application/zip")
 
 
 def _convert_paper_async(path: str, name: str | None = None):

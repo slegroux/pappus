@@ -9,6 +9,13 @@ Usage:
                                      project cells tagged `#| export <lib>:<mod>`
                                      across all dialogs into an nbdev project at
                                      <dest>, then build it with nbdev if installed
+    sidekick blog build <dialog> <dest> [--title <t>] [--author <a>]
+    sidekick blog build --all <dest>   [--title <t>] [--author <a>]
+                                     project a dialog (or every dialog with
+                                     --all) into a Quarto blog at <dest> — one
+                                     post each, outputs kept — and render it with
+                                     quarto if installed. --author defaults to the
+                                     git user.name
 """
 from __future__ import annotations
 
@@ -112,8 +119,59 @@ def cmd_library(args):
     return 0
 
 
+def cmd_blog(args):
+    """`sidekick blog build <dialog> <dest> [--title T]` (or `--all <dest>`)."""
+    from datetime import date as _date
+    from . import blog
+    from .client import connect
+    if not args or args[0] != "build":
+        print("usage: sidekick blog build <dialog> <dest> [--title <t>] [--author <a>]\n"
+              "       sidekick blog build --all <dest> [--title <t>] [--author <a>]", file=sys.stderr)
+        return 2
+    rest = args[1:]
+    title = "Sidekick"
+    if "--title" in rest:
+        i = rest.index("--title")
+        title = rest[i + 1] if i + 1 < len(rest) else title
+        del rest[i:i + 2]
+    author = None            # None → build_blog defaults it from git user.name
+    if "--author" in rest:
+        i = rest.index("--author")
+        author = rest[i + 1] if i + 1 < len(rest) else author
+        del rest[i:i + 2]
+    all_dialogs = "--all" in rest
+    rest = [a for a in rest if a != "--all"]
+
+    backend, warning = connect(get_target())
+    if warning:
+        print(f"  ⚠ {warning}")
+
+    if all_dialogs:
+        if len(rest) < 1:
+            print("usage: sidekick blog build --all <dest> [--title <t>]", file=sys.stderr)
+            return 2
+        dest = rest[0]
+        dialogs = backend.list_dialogs() or []
+        if not dialogs:
+            print("No dialogs found — nothing to publish.")
+            return 0
+    else:
+        if len(rest) < 2:
+            print("usage: sidekick blog build <dialog> <dest> [--title <t>]", file=sys.stderr)
+            return 2
+        dialogs, dest = [rest[0]], rest[1]
+
+    result = blog.build_blog(backend, dialogs, dest, title=title,
+                             date=_date.today().isoformat(), author=author)
+    print(f"Built blog '{title}' at {dest}")
+    print(f"  posts: {', '.join(result['posts'])}")
+    print(f"  files: {len(result['files'])}")
+    print(f"  quarto: {'✓ ' if result['render_ok'] else '· '}{result['render_detail']}")
+    return 0
+
+
 COMMANDS = {"targets": cmd_targets, "doctor": cmd_doctor, "up": cmd_up,
-            "serve": cmd_serve, "library": cmd_library}
+            "serve": cmd_serve, "library": cmd_library, "blog": cmd_blog}
 
 
 def main(argv=None):
