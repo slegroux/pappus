@@ -168,6 +168,23 @@ def test_toggle_export_keeps_default_exp():
     assert not export.has_export(off)
 
 
+def test_export_ops_preserve_extra_export_lines_and_tangle_to_both():
+    # A hand-authored cell exporting to TWO modules: the UI ops must not collapse
+    # it to one, and tangle must emit the cell into both modules.
+    code = "#| export a\n#| export b\nx = 1"
+    # set_export_target replaces only the first export line; the second survives
+    retagged = export.set_export_target(code, "c")
+    assert "#| export c" in retagged and "#| export b" in retagged
+    # toggle_export only touches the plain (arg-less) export; targeted ones survive
+    plus = export.toggle_export("#| export a\ndef f(): return 1")   # add plain export
+    assert plus.count("#| export") == 2 and "#| export a" in plus
+    back = export.toggle_export(plus)                               # remove only the plain one
+    assert back.count("#| export") == 1 and "#| export a" in back
+    # tangle emits the two-target cell into BOTH modules
+    mods, _ = export.tangle([Msg(id="_c", msg_type="code", content=retagged)], "pkg")
+    assert "x = 1" in mods.get("c", "") and "x = 1" in mods.get("b", "")
+
+
 def test_export_package_route_returns_zip():
     """The /export/package route tangles the live dialog into a downloadable zip."""
     import io
