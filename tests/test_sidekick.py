@@ -1593,6 +1593,33 @@ def test_arxiv_url_rewrites_to_pdf():
     assert pl._arxiv_pdf("https://example.com/post") is None        # not arXiv
 
 
+def test_fetch_guard_rejects_nonhttp_and_private_hosts(monkeypatch):
+    from sidekick import paper as pl
+    import pytest as _pt
+    # non-http(s) scheme (file:// local-file read) — refused before any I/O
+    with _pt.raises(pl._BlockedURLError):
+        pl._check_url_allowed("file:///etc/passwd")
+    # loopback and cloud-metadata link-local (numeric IPs → no DNS needed)
+    with _pt.raises(pl._BlockedURLError):
+        pl._check_url_allowed("http://127.0.0.1/internal")
+    with _pt.raises(pl._BlockedURLError):
+        pl._check_url_allowed("http://169.254.169.254/latest/meta-data/")
+    # _fetch itself must refuse before opening a connection
+    with _pt.raises(pl._BlockedURLError):
+        pl._fetch("file:///etc/passwd")
+
+
+def test_fetch_guard_allows_public_host_and_honors_escape_hatch(monkeypatch):
+    from sidekick import paper as pl
+    # a host that resolves to a public IP passes (getaddrinfo mocked — no live network)
+    monkeypatch.setattr(pl.socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 443))])
+    pl._check_url_allowed("https://example.com/paper.pdf")          # does not raise
+    # the escape hatch permits private hosts (legitimate intranet papers)
+    monkeypatch.setenv("SIDEKICK_ALLOW_PRIVATE_URLS", "1")
+    pl._check_url_allowed("http://127.0.0.1/intranet")              # allowed now
+
+
 def test_convert_url_html_is_article_extracted_and_cached(monkeypatch, tmp_path):
     monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
     from sidekick import paper as pl
