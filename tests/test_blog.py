@@ -126,3 +126,30 @@ def test_build_blog_defaults_author_from_git(tmp_path, monkeypatch):
     post = json.loads((tmp_path / "posts" / "intro.ipynb").read_text())
     fm = "".join(post["cells"][0]["source"])
     assert 'author: "Grace Hopper"' in fm
+
+
+def test_publish_dialog_rename_leaves_one_post(tmp_path):
+    # Publishing, renaming the dialog, then re-publishing must reconcile: the old
+    # post is pruned (its dialog no longer exists), leaving exactly one.
+    be = _FakeBackend({"topic/a": _dialog()})
+    r1 = blog.publish_dialog(be, "topic/a", str(tmp_path), date="2026-07-02")
+    assert (tmp_path / "posts" / f"{r1['slug']}.ipynb").exists()
+    be._d["topic/b"] = be._d.pop("topic/a")                  # rename: old name disappears
+    r2 = blog.publish_dialog(be, "topic/b", str(tmp_path), date="2026-07-02")
+    posts = list((tmp_path / "posts").glob("*.ipynb"))
+    assert len(posts) == 1 and posts[0].name == f"{r2['slug']}.ipynb"
+    assert f"posts/{r1['slug']}.ipynb" in r2["pruned"]       # orphan removed
+
+
+def test_publish_dialog_distinct_slug_on_collision(tmp_path):
+    # Two different dialog names that slug to the same base must not overwrite each
+    # other; a re-publish reuses the dialog's own recorded slug (stable URL).
+    be = _FakeBackend({"topic/a": _dialog(), "topic-a": _dialog()})
+    r1 = blog.publish_dialog(be, "topic/a", str(tmp_path))
+    r2 = blog.publish_dialog(be, "topic-a", str(tmp_path))
+    assert r1["slug"] != r2["slug"]                          # de-duped against disk
+    assert (tmp_path / "posts" / f"{r1['slug']}.ipynb").exists()
+    assert (tmp_path / "posts" / f"{r2['slug']}.ipynb").exists()
+    r1b = blog.publish_dialog(be, "topic/a", str(tmp_path))
+    assert r1b["slug"] == r1["slug"]                         # re-publish reuses its slug
+    assert len(list((tmp_path / "posts").glob("*.ipynb"))) == 2

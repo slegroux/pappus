@@ -69,26 +69,46 @@ def has_export(code: str) -> bool:
 
 
 def toggle_export(code: str) -> str:
-    """Add or remove a top-level ``#| export`` directive.
+    """Add or remove the plain (argument-less) ``#| export`` directive.
 
-    The UI's per-cell Export toggle calls this so the directive text stays the
-    single source of truth. Removing drops every ``#| export`` line but leaves
-    ``#| default_exp`` intact; adding prepends a plain ``#| export``.
+    The UI's per-cell Export toggle calls this. It is **target-preserving**: only
+    the plain ``#| export`` (no argument) the button owns is toggled — a
+    hand-authored or library ``#| export <target>`` line, and ``#| default_exp``,
+    are left untouched (``tangle`` emits a cell to *every* target, so those extra
+    lines are real). Removing drops just the plain line; adding prepends one.
     """
-    if has_export(code):
-        kept = [ln for ln in (code or "").splitlines()
-                if not (_DIRECTIVE.match(ln) and _DIRECTIVE.match(ln).group(1) == "export")]
-        return "\n".join(kept)
+    out, removed = [], False
+    for ln in (code or "").splitlines():
+        m = _DIRECTIVE.match(ln)
+        if m and m.group(1) == "export" and not m.group(2).strip() and not removed:
+            removed = True                      # drop only this plain export line
+            continue
+        out.append(ln)
+    if removed:
+        return "\n".join(out)
     return "#| export\n" + (code or "")
 
 
 def set_export_target(code: str, target: str) -> str:
-    """Set a single ``#| export <target>`` directive, replacing any existing
-    ``#| export`` line(s). Used by the per-cell library picker to tag a cell into
-    ``<lib>:<module>``; other directives (e.g. ``#| default_exp``) are preserved."""
-    kept = [ln for ln in (code or "").splitlines()
-            if not (_DIRECTIVE.match(ln) and _DIRECTIVE.match(ln).group(1) == "export")]
-    return f"#| export {target}\n" + "\n".join(kept)
+    """Point the cell's ``#| export`` directive at ``<target>``.
+
+    Used by the per-cell library picker to tag a cell into ``<lib>:<module>``. It
+    replaces the **first** ``#| export`` line (the one the picker shows) in place
+    and **preserves any additional** ``#| export`` lines — so a cell hand-authored
+    to export to two modules keeps both. ``#| default_exp`` and everything else are
+    kept. If the cell has no ``#| export`` yet, one is prepended.
+    """
+    out, replaced = [], False
+    for ln in (code or "").splitlines():
+        m = _DIRECTIVE.match(ln)
+        if m and m.group(1) == "export" and not replaced:
+            out.append(f"#| export {target}")   # replace the first export in place
+            replaced = True
+        else:
+            out.append(ln)
+    if not replaced:
+        out.insert(0, f"#| export {target}")
+    return "\n".join(out)
 
 
 def _public_names(module_src: str) -> list[str]:

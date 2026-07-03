@@ -9,6 +9,7 @@ The whole point: the target switcher in the top-right flips between your laptop
 """
 from __future__ import annotations
 
+import hmac
 import json
 import os
 import re
@@ -207,6 +208,52 @@ STATE = {
     "scroll_to": None,        # cell id to scroll into view once (e.g. after a composer send)
     "cells_dirty": False,     # set when the AI's MCP tools edit cells mid-stream → reload
 }
+
+# STATE is process-global (single-user prototype). The one genuinely concurrent
+# access is the AI's MCP tools flipping `cells_dirty` from the internal-route
+# thread WHILE the SSE generator streams an answer on another thread — a plain
+# bool read-modify-write that can lose the "a cell was edited" signal. This lock
+# guards those cross-thread transitions (cells_dirty set/consume, pending_stream
+# set/clear, dialog switch). It is deliberately NOT a full session-scoping of
+# STATE — that larger refactor is out of scope here.
+_STATE_LOCK = threading.Lock()
+
+
+def _mark_cells_dirty() -> None:
+    """Record that the AI edited a cell (called from the internal-route thread while
+    a prompt streams elsewhere)."""
+    with _STATE_LOCK:
+        STATE["cells_dirty"] = True
+
+
+def _reset_cells_dirty() -> None:
+    with _STATE_LOCK:
+        STATE["cells_dirty"] = False
+
+
+def _consume_cells_dirty() -> bool:
+    """Atomically read-and-clear cells_dirty — the stream generator's end-of-turn
+    check, so a concurrent _mark_cells_dirty isn't lost between read and reset."""
+    with _STATE_LOCK:
+        was = STATE.get("cells_dirty", False)
+        STATE["cells_dirty"] = False
+        return was
+
+
+def _set_pending_stream(dialog: str, mid: str) -> None:
+    with _STATE_LOCK:
+        STATE["pending_stream"] = (dialog, mid)
+
+
+def _clear_pending_stream(dialog: str, mid: str) -> None:
+    with _STATE_LOCK:
+        if STATE.get("pending_stream") == (dialog, mid):
+            STATE["pending_stream"] = None
+
+
+def _set_dialog(name: str) -> None:
+    with _STATE_LOCK:
+        STATE["dialog"] = name
 
 
 def _init_cell_tools() -> None:
@@ -2684,7 +2731,7 @@ def rename_dialog(old: str, new: str):
     if new and new != old and hasattr(backend, "rename"):
         try:
             backend.rename(old, new)
-            STATE["dialog"] = new
+            _set_dialog(new)
         except ValueError as e:
             STATE["warning"] = str(e)          # surfaced as the banner
     return Page()
@@ -2692,7 +2739,7 @@ def rename_dialog(old: str, new: str):
 
 @rt("/open")
 def open_dialog(dialog: str):
-    STATE["dialog"] = dialog
+    _set_dialog(dialog)
     return Page()
 
 
@@ -2702,7 +2749,7 @@ def new_dialog():
     existing = set(STATE["backend"].list_dialogs())
     while f"untitled/dialog-{n}" in existing:
         n += 1
-    STATE["dialog"] = f"untitled/dialog-{n}"
+    _set_dialog(f"untitled/dialog-{n}")
     STATE["backend"].messages(STATE["dialog"])  # touch -> create
     return Page()
 
@@ -2716,7 +2763,7 @@ def _delete_dialogs(targets: list[str]):
             backend.delete_dialog(d)
     if STATE["dialog"] in targets:
         remaining = backend.list_dialogs()
-        STATE["dialog"] = remaining[0] if remaining else "demo/welcome"
+        _set_dialog(remaining[0] if remaining else "demo/welcome")
         backend.messages(STATE["dialog"])       # touch -> ensure it exists
 
 
@@ -2758,7 +2805,7 @@ def send(content: str, msg_type: str = "prompt", model: str = None,
         if msg_type == "prompt" and _can_stream(backend, use_model):
             # Defer the AI call: the page renders an SSE-wired answer that streams
             # tokens in (the browser opens /stream), instead of blocking here.
-            STATE["pending_stream"] = (STATE["dialog"], m.id)
+            _set_pending_stream(STATE["dialog"], m.id)
         elif msg_type in ("code", "prompt"):
             backend.exec(STATE["dialog"], m.id)
     # The composer posts via htmx → swap just #stream (no full-page reload, so the
@@ -2806,7 +2853,7 @@ def cell_run(id: str, content: str = ""):
         backend.update(STATE["dialog"], id, content)
     m = _msg_by_id(backend, STATE["dialog"], id)
     if m is not None and m.msg_type == "prompt" and _can_stream(backend, m.model):
-        STATE["pending_stream"] = (STATE["dialog"], id)   # re-ask, streamed live
+        _set_pending_stream(STATE["dialog"], id)          # re-ask, streamed live
         # The #stream swap resets the scroll container to the top, so bring the
         # re-run cell (and its "Thinking…" spinner) back into view — otherwise a
         # mid-notebook re-ask looks frozen because the spinner is below the fold.
@@ -2837,21 +2884,19 @@ def stream_answer(dialog: str, id: str):
         if m is None:
             yield sse_message(Div(""), event="done")
             return
-        STATE["cells_dirty"] = False                     # the AI's tools may flip this
+        _reset_cells_dirty()                             # the AI's tools may flip this
         acc = ""
         for delta in stream_claude(dialog, content, context, model=m.model, mode=m.ai_mode):
             acc += delta
             # str() unwraps NotStr -> raw (already-safe) markdown HTML for the data lines
             yield sse_message(str(render_md(acc)), event="msg")
-        edited = STATE.get("cells_dirty", False)
+        edited = _consume_cells_dirty()                  # atomic read+clear vs the MCP thread
         if not acc and edited:                           # tool-only turn: say something
             acc = "_Updated the notebook cells as requested._"
         m.output = acc or m.output
         if hasattr(backend, "_save"):
             backend._save()                              # flush to disk so a reload keeps the answer
-        if STATE.get("pending_stream") == (dialog, id):
-            STATE["pending_stream"] = None
-        STATE["cells_dirty"] = False
+        _clear_pending_stream(dialog, id)
         yield sse_message(str(render_md(m.output)), event="msg")   # final state
         # Refresh the foot-of-stream meter with this turn's accrued cost/usage
         # without a full reload (the client swaps just #ctxMeter's text).
@@ -2868,7 +2913,27 @@ def stream_answer(dialog: str, id: str):
 # the streamed answer's `done` event reloads it.
 def _mcp_ok(tok: str) -> bool:
     want = STATE.get("mcp_token")
-    return bool(want) and tok == want
+    # constant-time compare — these routes rewrite arbitrary notebook cells, so
+    # don't leak the token length/prefix through `==` timing.
+    return bool(want) and hmac.compare_digest(tok or "", want)
+
+
+def _loopback_req(request) -> bool:
+    """True when the request comes from loopback. The /internal/* routes mutate the
+    live notebook; the shared token is a second factor, not the only one, so they
+    must stay unreachable off-box even when the UI is bound to 0.0.0.0
+    (SIDEKICK_HOST). If we can't determine the client (no request), fail closed."""
+    client = getattr(request, "client", None) if request is not None else None
+    host = getattr(client, "host", "") if client is not None else None
+    return host in ("127.0.0.1", "::1", "localhost", "")
+
+
+def _mcp_guard(request, tok: str):
+    """Shared gate for /internal/* routes: loopback origin AND valid token. Returns
+    a 403 response to short-circuit, or None when the request may proceed."""
+    if not _loopback_req(request) or not _mcp_ok(tok):
+        return _json({"ok": False, "error": "forbidden"}, 403)
+    return None
 
 
 def _json(obj, status: int = 200):
@@ -2877,10 +2942,10 @@ def _json(obj, status: int = 200):
 
 
 @rt("/internal/cells")
-def internal_cells(dialog: str, tok: str = ""):
+def internal_cells(dialog: str, tok: str = "", request=None):
     """List a dialog's cells for the AI (id, type, source)."""
-    if not _mcp_ok(tok):
-        return _json({"ok": False, "error": "forbidden"}, 403)
+    if (deny := _mcp_guard(request, tok)) is not None:
+        return deny
     backend = STATE["backend"]
     cells = [{"id": m.id, "type": m.msg_type, "content": m.content or "",
               "output": m.output or ""} for m in backend.messages(dialog)]
@@ -2888,21 +2953,22 @@ def internal_cells(dialog: str, tok: str = ""):
 
 
 @rt("/internal/cell/update", methods=["post"])
-def internal_cell_update(dialog: str, id: str, content: str = "", tok: str = ""):
-    if not _mcp_ok(tok):
-        return _json({"ok": False, "error": "forbidden"}, 403)
+def internal_cell_update(dialog: str, id: str, content: str = "", tok: str = "", request=None):
+    if (deny := _mcp_guard(request, tok)) is not None:
+        return deny
     backend = STATE["backend"]
     if not hasattr(backend, "update") or _msg_by_id(backend, dialog, id) is None:
         return _json({"ok": False, "error": f"no cell {id}"}, 404)
     backend.update(dialog, id, content)
-    STATE["cells_dirty"] = True
+    _mark_cells_dirty()
     return _json({"ok": True, "message": f"updated cell {id}"})
 
 
 @rt("/internal/cell/str_replace", methods=["post"])
-def internal_cell_str_replace(dialog: str, id: str, old: str = "", new: str = "", tok: str = ""):
-    if not _mcp_ok(tok):
-        return _json({"ok": False, "error": "forbidden"}, 403)
+def internal_cell_str_replace(dialog: str, id: str, old: str = "", new: str = "",
+                              tok: str = "", request=None):
+    if (deny := _mcp_guard(request, tok)) is not None:
+        return deny
     backend = STATE["backend"]
     m = _msg_by_id(backend, dialog, id)
     if m is None or not hasattr(backend, "update"):
@@ -2914,15 +2980,15 @@ def internal_cell_str_replace(dialog: str, id: str, old: str = "", new: str = ""
     if n > 1:
         return _json({"ok": False, "error": f"old_str matches {n}× (must be unique)"}, 400)
     backend.update(dialog, id, src.replace(old, new))
-    STATE["cells_dirty"] = True
+    _mark_cells_dirty()
     return _json({"ok": True, "message": f"edited cell {id}"})
 
 
 @rt("/internal/cell/insert", methods=["post"])
 def internal_cell_insert(dialog: str, content: str = "", cell_type: str = "code",
-                         after_id: str = "", tok: str = ""):
-    if not _mcp_ok(tok):
-        return _json({"ok": False, "error": "forbidden"}, 403)
+                         after_id: str = "", tok: str = "", request=None):
+    if (deny := _mcp_guard(request, tok)) is not None:
+        return deny
     if cell_type not in ("code", "note", "prompt"):
         return _json({"ok": False, "error": "bad cell_type"}, 400)
     backend = STATE["backend"]
@@ -2930,7 +2996,7 @@ def internal_cell_insert(dialog: str, content: str = "", cell_type: str = "code"
         m = backend.insert(dialog, content, cell_type, after_id, above=False)
     else:
         m = backend.add(dialog, content, cell_type)
-    STATE["cells_dirty"] = True
+    _mark_cells_dirty()
     return _json({"ok": True, "message": f"inserted cell {m.id}"})
 
 
@@ -3088,7 +3154,7 @@ def cell_exec(id: str):
     m = _msg_by_id(backend, STATE["dialog"], id)
     if m is not None and m.msg_type == "prompt" and _can_stream(backend, m.model):
         m.output = ""                                     # clear stale answer to re-stream
-        STATE["pending_stream"] = (STATE["dialog"], id)   # re-ask, streamed live
+        _set_pending_stream(STATE["dialog"], id)          # re-ask, streamed live
         # The #stream swap resets the scroll container to the top, so a mid-notebook
         # re-run looks frozen — the "Thinking…" spinner is below the fold. Bring the
         # re-run cell back into view (matches /cell/run).
@@ -3191,12 +3257,12 @@ def publish_blog():
     from starlette.responses import RedirectResponse
     from . import blog
     dialog = STATE["dialog"]
-    result = blog.build_blog(STATE["backend"], [dialog], blog.default_blog_dir(),
-                             title="Sidekick Blog", date=date.today().isoformat())
+    result = blog.publish_dialog(STATE["backend"], dialog, blog.default_blog_dir(),
+                                 title="Sidekick Blog", date=date.today().isoformat())
     if not result["render_ok"]:
         STATE["flash"] = f"Post written to {blog.default_blog_dir()} — {result['render_detail']}"
         return RedirectResponse("/", status_code=303)
-    return RedirectResponse(f"/blog/posts/{export.slug(dialog)}.html", status_code=303)
+    return RedirectResponse(f"/blog/posts/{result['slug']}.html", status_code=303)
 
 
 @rt("/blog/{path:path}")
@@ -3350,7 +3416,7 @@ def _append_passage(p: dict, text: str):
     dialog = _paper_dialog(backend, p)
     backend.add(dialog, text, "note")            # the passage to read…
     code = backend.add(dialog, "", "code")       # …and a cell to reimplement it
-    STATE["dialog"] = dialog
+    _set_dialog(dialog)
     STATE["editing"] = code.id                   # open the code cell, focused & in view
 
 
@@ -3399,7 +3465,7 @@ def paper_import(mode: str = "para"):
     backend.messages(name)                       # create the dialog
     for c in chunks:
         backend.add(name, c, "note")
-    STATE["dialog"] = name
+    _set_dialog(name)
     STATE["paper"] = None                        # it's in the notebook now; close the panel
     return Page()
 
