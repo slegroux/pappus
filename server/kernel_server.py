@@ -73,9 +73,10 @@ KERNELS: dict[str, dict] = {}
 # against one shared namespace dict simultaneously — interleaved exec corrupts
 # state, and iterating the namespace (completion, the var list in run_prompt) while
 # another thread mutates it raises RuntimeError. Each dialog gets its own lock;
-# _LOCKS_GUARD guards the registry itself (and the structural KERNELS mutations in
-# _ns/reset/rename). Lock order is always per-dialog-lock THEN _LOCKS_GUARD, so
-# multi-dialog ops (/rename) can't deadlock.
+# _LOCKS_GUARD guards only the registry lookup in _lock_for and is released before
+# any per-dialog lock is held (never nested), so no lock-ordering cycle exists.
+# _dialog_locks sorts+dedups its dialogs so concurrent multi-dialog ops (/rename
+# a↔b) acquire in the same order and can't deadlock.
 _LOCKS: dict[str, threading.Lock] = {}
 _LOCKS_GUARD = threading.Lock()
 
