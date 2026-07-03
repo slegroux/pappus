@@ -3257,12 +3257,12 @@ def publish_blog():
     from starlette.responses import RedirectResponse
     from . import blog
     dialog = STATE["dialog"]
-    result = blog.build_blog(STATE["backend"], [dialog], blog.default_blog_dir(),
-                             title="Sidekick Blog", date=date.today().isoformat())
+    result = blog.publish_dialog(STATE["backend"], dialog, blog.default_blog_dir(),
+                                 title="Sidekick Blog", date=date.today().isoformat())
     if not result["render_ok"]:
         STATE["flash"] = f"Post written to {blog.default_blog_dir()} — {result['render_detail']}"
         return RedirectResponse("/", status_code=303)
-    return RedirectResponse(f"/blog/posts/{export.slug(dialog)}.html", status_code=303)
+    return RedirectResponse(f"/blog/posts/{result['slug']}.html", status_code=303)
 
 
 @rt("/blog/{path:path}")
