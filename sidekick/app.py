@@ -9,10 +9,12 @@ The whole point: the target switcher in the top-right flips between your laptop
 """
 from __future__ import annotations
 
+import contextvars
 import hmac
 import json
 import os
 import re
+import secrets
 import threading
 from urllib.parse import quote
 
@@ -20,10 +22,11 @@ from fasthtml.common import *
 from starlette.datastructures import UploadFile
 
 from .targets import get_target, list_targets, list_models, default_model
-from .client import connect, build_context, est_tokens, _InMemoryBackend, MockBackend
+from .client import (connect, build_context, est_tokens, _InMemoryBackend, MockBackend,
+                     HttpKernelBackend)
 from .claude_cli import (stream as stream_claude, call as call_claude,
                          cost_for, CLI_MODELS, AI_MODES, DEFAULT_MODE)
-from . import secrets_store, export, libraries, nbdev_export
+from . import secrets_store, export, libraries, nbdev_export, scaffold
 from . import paper as paperlib
 
 
@@ -216,6 +219,7 @@ STATE = {
     "ai_mode": DEFAULT_MODE,   # AI persona for Ask AI: learning/concise/standard
     "msg_type": "prompt",
     "pending_stream": None,   # (dialog, msg_id) whose answer is being streamed live
+    "pending_run": {},        # {(dialog, msg_id): run_id} code cells whose exec is streaming
     "paper": None,            # {name, status, md, engine} for the reading panel
     "editing": None,          # cell id to render in edit mode once (just-inserted cell)
     "scroll_to": None,        # cell id to scroll into view once (e.g. after a composer send)
@@ -230,6 +234,65 @@ STATE = {
 # set/clear, dialog switch). It is deliberately NOT a full session-scoping of
 # STATE — that larger refactor is out of scope here.
 _STATE_LOCK = threading.Lock()
+
+# ---- per-tab (session-scoped) UI state --------------------------------------
+# Two browser tabs used to clobber each other because ALL of STATE is process-
+# global. A handful of keys are genuinely PER-TAB (which notebook this tab is
+# viewing, and its one-shot render transients); the rest are genuinely shared
+# (the backend connection, target, warning banner, user model/mode prefs, and
+# the AI/kernel streaming coordination flags written from cookie-less threads).
+#
+# The per-tab keys get an additive session overlay: each browser session (keyed
+# by an `sk_sid` cookie, see _SessionScope below) has its own dict in SESSIONS,
+# and `cur/set_cur/pop_cur` read/write that overlay WHEN a session is in scope,
+# else fall back to the module-global STATE. That fallback is what keeps the
+# existing suite working unchanged: tests call handlers directly (no request →
+# no session in scope) and keep seeing/setting global STATE exactly as before.
+PER_TAB = ("dialog", "editing", "scroll_to", "flash")
+SESSIONS: dict[str, dict] = {}
+# The current request's session id, or None when no request is in scope (import
+# time, background threads, direct test calls). Set by _SessionScope per request.
+_CUR_SID: contextvars.ContextVar[str | None] = contextvars.ContextVar("sk_sid", default=None)
+
+
+def _overlay() -> dict | None:
+    """The current session's per-tab overlay dict, or None when no session is in
+    scope (→ callers fall back to the shared global STATE)."""
+    sid = _CUR_SID.get()
+    if sid is None:
+        return None
+    return SESSIONS.setdefault(sid, {})
+
+
+def cur(key: str, default=None):
+    """Read a per-tab key: the session overlay if it holds this key, else the
+    shared global STATE (which is also the no-session/back-compat path)."""
+    ov = _overlay()
+    if ov is not None and key in ov:
+        return ov[key]
+    return STATE.get(key, default)
+
+
+def set_cur(key: str, value) -> None:
+    """Write a per-tab key into the current session overlay; with no session in
+    scope, write the shared global STATE (back-compat for direct calls)."""
+    ov = _overlay()
+    with _STATE_LOCK:
+        if ov is not None:
+            ov[key] = value
+        else:
+            STATE[key] = value
+
+
+def pop_cur(key: str, default=None):
+    """Read-and-clear a one-shot per-tab transient. In a session, pop only from
+    that session's overlay (never the global — so a transient set in one tab
+    can't leak into another). With no session, pop the global STATE."""
+    ov = _overlay()
+    with _STATE_LOCK:
+        if ov is not None:
+            return ov.pop(key, default)
+        return STATE.pop(key, default)
 
 
 def _mark_cells_dirty() -> None:
@@ -264,9 +327,42 @@ def _clear_pending_stream(dialog: str, mid: str) -> None:
             STATE["pending_stream"] = None
 
 
-def _set_dialog(name: str) -> None:
+def _set_pending_run(dialog: str, mid: str, run_id: str) -> None:
     with _STATE_LOCK:
-        STATE["dialog"] = name
+        STATE["pending_run"][(dialog, mid)] = run_id
+
+
+def _pending_run_id(dialog: str, mid: str) -> str | None:
+    with _STATE_LOCK:
+        return STATE["pending_run"].get((dialog, mid))
+
+
+def _clear_pending_run(dialog: str, mid: str) -> None:
+    with _STATE_LOCK:
+        STATE["pending_run"].pop((dialog, mid), None)
+
+
+def _exec_streams(backend) -> bool:
+    """Stream a code cell's execution (exec_start → poll → done) only for the real
+    kernel backend. The in-process mock runs synchronously, so it keeps the plain
+    blocking path (its exec_start would just complete in one poll anyway)."""
+    return isinstance(backend, HttpKernelBackend) and hasattr(backend, "exec_start")
+
+
+def _start_streamed_exec(backend, dialog: str, mid: str) -> None:
+    """Kick off an async run on the kernel and mark the cell pending so it renders
+    the live-exec view (SSE-wired). If the kernel is unreachable (run_id is None),
+    fall back to the blocking exec path so the cell still shows a readable error."""
+    run_id = backend.exec_start(dialog, mid)
+    if run_id:
+        _set_pending_run(dialog, mid, run_id)
+        set_cur("scroll_to", mid)
+    else:
+        backend.exec(dialog, mid)             # kernel down → sync degrade
+
+
+def _set_dialog(name: str) -> None:
+    set_cur("dialog", name)
 
 
 def _init_cell_tools() -> None:
@@ -295,8 +391,8 @@ def use_target(name: str):
     STATE.update(target_name=name, backend=backend, warning=warning)
     if not backend.list_dialogs():
         pass
-    if STATE["dialog"] not in (backend.list_dialogs() or [STATE["dialog"]]):
-        STATE["dialog"] = backend.list_dialogs()[0] if backend.list_dialogs() else "demo/welcome"
+    if cur("dialog") not in (backend.list_dialogs() or [cur("dialog")]):
+        set_cur("dialog", backend.list_dialogs()[0] if backend.list_dialogs() else "demo/welcome")
 
 
 def _ensure_target() -> None:
@@ -319,392 +415,22 @@ try:
 except Exception:  # noqa: BLE001 — no config yet; resolved for real on startup
     _dbg("initial target unresolved at import; deferring to startup")
 
+# ---- bundled static assets (JS/CSS) ----------------------------------------
+# Large front-end JS/CSS blocks live as files under sidekick/static and are
+# served from /static (see the /static route). Their text is loaded back into
+# the module-level constants so they stay importable (tests) and so the file
+# served over HTTP is byte-identical to what the page references.
+_STATIC_DIR = Path(__file__).parent / "static"
+
+
+def _static_text(rel: str) -> str:
+    """Read a bundled static asset's text (keeps the JS/CSS constants in sync
+    with the files served at /static)."""
+    return (_STATIC_DIR / rel).read_text(encoding="utf-8")
+
+
 # ---- styling: Claude desktop look ------------------------------------------
-CSS = """
-:root{
-  --bg:#F0EEE6; --panel:#FAF9F5; --sidebar:#F0EEE6; --ink:#2B2A27; --muted:#73706A;
-  --line:#E4E1D8; --accent:#D97757; --accent-ink:#fff; --code-bg:#2B2A27; --code-ink:#EFE9DD;
-  --md-code-bg:#EAE6DA;  /* non-runnable code in answers/notes; sync with _LightCodeStyle */
-  --bubble-user:#F5E9E2; --chip:#EDEAE1;
-}
-*{box-sizing:border-box} html,body{margin:0;height:100%}
-body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
-  background:var(--bg);color:var(--ink);font-size:15px;line-height:1.55}
-/* global top bar over a flex row of columns; any column can be hidden */
-.app{display:flex;flex-direction:column;height:100vh;--side-w:264px;--toc-w:244px;--paper-w:50%}
-.cols{display:flex;flex:1;min-height:0}
-/* drag-to-resize handles between columns: zero-width flex items with a wider
-   invisible hit area straddling the seam, so resizing adds no layout gap. */
-.gutter{flex:0 0 0;position:relative;z-index:6}
-.gutter::before{content:"";position:absolute;top:0;bottom:0;left:-3px;width:7px;cursor:col-resize}
-.gutter:hover::before,.gutter.dragging::before{background:var(--accent);opacity:.5}
-.app.no-side .gutter-side{display:none}
-.gutter-paper,.gutter-toc{display:none}
-.app.paper-open .gutter-paper{display:block}
-.app.paper-collapsed .gutter-paper{display:none}
-.app.toc-open .gutter-toc{display:block}
-body.col-resizing{cursor:col-resize;user-select:none}
-.app.no-side .side{display:none}
-.topbar-left{display:flex;align-items:center;gap:12px;min-width:0}
-.topbar-right{display:flex;align-items:center;gap:12px}
-/* paper reading panel (left column, toggled open when a paper is loaded) */
-.paper{display:none;background:var(--panel);border-right:1px solid var(--line);overflow:auto;padding:16px 18px;min-width:0}
-.app.paper-open .paper{display:flex;flex-direction:column;flex:0 0 var(--paper-w)}
-.app.paper-open.no-paper .paper,.app.no-paper .gutter-paper{display:none}   /* topbar 📖 toggle */
-.paper-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}
-.paper-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
-.paper-import{margin:0;display:flex;align-items:center;gap:5px}
-.paper-name{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.paper-converting{margin-top:14px;color:var(--muted);font-size:13px;font-style:italic}
-.paper-body{margin-top:10px;font-size:13px;line-height:1.6}
-.paper-body img{max-width:100%}
-/* collapsed paper: hide the text, keep the header (incl. Next section) in a
-   compact strip so the notebook reclaims the width. */
-.paper-toggle{cursor:pointer;transition:transform .12s}
-.app.paper-collapsed .paper-toggle{transform:rotate(-90deg)}
-.app.paper-collapsed .paper-body,.app.paper-collapsed .paper-badge{display:none}
-.app.paper-collapsed .paper{flex:0 0 auto}
-.app.paper-collapsed .paper-name{max-width:150px}
-/* secondary import options (stepper + bulk), behind a small "Import…" menu */
-.paper-import-menu{position:absolute;right:0;top:28px;z-index:30;display:flex;flex-direction:column;gap:6px;
-  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;min-width:210px;
-  box-shadow:0 6px 18px rgba(0,0,0,.12)}
-.paper-import-menu .ins-col-head{margin:2px 0 0}
-/* floating toolbar shown when you highlight text in the paper */
-.sel-tools{position:absolute;z-index:60;display:none;gap:6px;box-shadow:0 4px 12px rgba(0,0,0,.20);
-  border-radius:8px}
-.sel-btn{border:none;border-radius:8px;padding:5px 11px;font-size:12px;cursor:pointer;white-space:nowrap}
-.sel-btn.import{background:var(--accent);color:#fff;font-weight:600}
-.sel-btn:not(.import){background:var(--panel);color:var(--ink);border:1px solid var(--line)}
-/* the 📄 topbar icon IS the file picker: a label wrapping a hidden file input */
-.paper-file{display:none}
-/* "open a source" dropdown: a PDF file pick or a web-page URL */
-.src-form{position:absolute;right:0;top:28px;z-index:30;display:flex;flex-direction:column;gap:8px;
-  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;min-width:248px;
-  box-shadow:0 6px 18px rgba(0,0,0,.12)}
-.src-file-label{font-size:13px;font-weight:600;color:var(--accent);cursor:pointer}
-.src-url{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;font-size:13px;outline:none}
-.src-url:focus{border-color:var(--accent)}
-/* table of contents (right column, toggleable, full-height so it stays in view) */
-.toc{display:none;background:var(--sidebar);border-left:1px solid var(--line);
-  padding:16px 14px;overflow:auto}
-.app.toc-open .toc{display:flex;flex-direction:column;flex:0 0 var(--toc-w)}
-.toc-head{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
-.toc-list{display:flex;flex-direction:column;gap:1px}
-.toc-link{display:block;text-decoration:none;color:var(--ink);font-size:13px;padding:4px 8px;border-radius:7px;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
-.toc-link:hover{background:#E8E5DB}
-.toc-h1{font-weight:600}
-.toc-h2{padding-left:18px}
-.toc-h3{padding-left:30px;color:var(--muted)}
-.toc-h4,.toc-h5,.toc-h6{padding-left:42px;color:var(--muted);font-size:12px}
-.toc-empty{font-size:12px;color:var(--muted);font-style:italic;padding:4px 8px}
-.toc-toggle{cursor:pointer}
-/* sidebar */
-.side{flex:0 0 var(--side-w);background:var(--sidebar);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 12px;overflow:auto}
-.brand{display:flex;align-items:center;gap:9px;font-weight:600;padding:6px 8px 14px}
-.brand .dot{width:22px;height:22px;border-radius:6px;background:var(--accent);display:grid;place-items:center;color:#fff;font-size:13px}
-.newbtn{display:flex;align-items:center;gap:8px;width:100%;border:1px solid var(--line);background:var(--panel);
-  color:var(--ink);border-radius:10px;padding:9px 12px;cursor:pointer;font-size:14px;margin-bottom:12px}
-.newbtn:hover{border-color:#d4d0c4}
-.seclabel{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);padding:8px 8px 4px}
-.conv{display:block;padding:8px 10px;border-radius:8px;color:var(--ink);text-decoration:none;font-size:14px;cursor:pointer;
-  flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.conv:hover{background:#E8E5DB} .conv.active{background:#E3DFD3;font-weight:500}
-/* a dialog row: open-link + a ⋯ actions menu revealed on hover */
-.conv-row{display:flex;align-items:center;gap:2px;position:relative}
-.conv-actions{position:relative;flex:0 0 auto}
-.conv-dots{list-style:none;cursor:pointer;color:var(--muted);opacity:0;padding:2px 7px;border-radius:6px;
-  font-size:16px;line-height:1;transition:opacity .12s}
-.conv-dots::-webkit-details-marker{display:none}
-.conv-row:hover .conv-dots,.conv-actions[open] .conv-dots{opacity:.65}
-.conv-dots:hover{opacity:1;background:#E8E5DB}
-.conv-menu{position:absolute;right:0;top:26px;z-index:30;background:var(--panel);border:1px solid var(--line);
-  border-radius:8px;padding:4px;box-shadow:0 6px 18px rgba(0,0,0,.14);min-width:120px}
-.conv-del-form{margin:0}
-.conv-del{display:block;width:100%;text-align:left;border:none;background:none;color:#B3402F;cursor:pointer;
-  font:inherit;font-size:13px;padding:6px 10px;border-radius:6px}
-.conv-del:hover{background:#F6E8E4}
-.folder>.conv-row,.folder>.folder{margin-left:10px}
-/* multi-select (shift/⌘-click) + bulk-delete bar */
-.conv-row.sel>.conv{background:#E6F2EA;box-shadow:inset 2px 0 0 var(--accent)}
-.sel-bar{display:none;align-items:center;gap:6px;margin:4px 2px 6px;padding:5px 8px;border-radius:8px;
-  background:#FBF3E7;border:1px solid #E3C7AE}
-.sel-count{flex:1 1 auto;font-size:12px;color:var(--muted)}
-.sel-del{border:none;background:none;color:#B3402F;font:inherit;font-size:12px;font-weight:600;cursor:pointer;
-  padding:3px 7px;border-radius:6px}
-.sel-del:hover{background:#F6E8E4}
-.sel-clear{border:none;background:none;color:var(--muted);font:inherit;font-size:12px;cursor:pointer;padding:3px 5px}
-.sel-clear:hover{color:var(--ink)}
-.folder-label{list-style:none;cursor:pointer;font-size:11px;letter-spacing:.04em;text-transform:uppercase;
-  color:var(--muted);padding:8px 8px 4px;user-select:none}
-.folder-label::-webkit-details-marker{display:none}
-.folder-label::before{content:"▸ ";font-size:9px;display:inline-block;transition:transform .12s}
-.folder[open]>.folder-label::before{transform:rotate(90deg)}
-.side-foot{margin-top:auto;font-size:12px;color:var(--muted);padding:8px}
-/* main */
-.main{flex:1 1 0;display:flex;flex-direction:column;min-width:0;min-height:0}  /* min-height:0 lets .stream scroll, not .main */
-.topbar{flex-shrink:0;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 22px;border-bottom:1px solid var(--line)}
-.title{font-weight:600}
-.title-form{margin:0}
-.title-edit{font-weight:600;font-size:15px;font-family:inherit;color:var(--ink);
-  border:1px solid transparent;background:transparent;border-radius:7px;padding:4px 8px;
-  min-width:240px;outline:none}
-.title-edit:hover{border-color:var(--line)}
-.title-edit:focus{border-color:var(--accent);background:var(--panel)}
-.gear{text-decoration:none;font-size:18px;color:var(--muted);line-height:1}
-.gear:hover{color:var(--ink)}
-.gear.tgl{cursor:pointer;border-radius:7px;padding:2px 4px;transition:opacity .12s,background .12s}
-/* a panel-toggle whose panel is hidden: dimmed, so what's collapsed is obvious */
-.gear.tgl.off{opacity:.34}
-.gear.tgl.off:hover{opacity:1;background:var(--chip)}
-/* export dropdown */
-.export{position:relative}
-.export>summary{list-style:none;cursor:pointer}
-.export>summary::-webkit-details-marker{display:none}
-.export-menu{position:absolute;right:0;top:28px;z-index:20;display:flex;flex-direction:column;gap:2px;
-  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px;min-width:188px;
-  box-shadow:0 6px 18px rgba(0,0,0,.10)}
-.export-menu a{text-decoration:none;color:var(--ink);font-size:13px;padding:6px 10px;border-radius:7px;white-space:nowrap}
-.export-menu a:hover{background:#E8E5DB}
-/* settings */
-.settings-page{min-height:100vh;background:var(--bg);overflow:auto}
-.settings-wrap{max-width:640px;margin:0 auto;padding:28px 22px 60px}
-.settings-top{display:flex;align-items:center;gap:14px;margin-bottom:6px}
-.back{text-decoration:none;color:var(--muted);font-size:14px}
-.back:hover{color:var(--ink)}
-.settings-intro{color:var(--muted);font-size:13px;margin:8px 0 20px;line-height:1.5}
-.saved{background:#E6F2EA;border:1px solid #BFE0CC;color:#2C6B45;padding:8px 12px;border-radius:8px;margin-bottom:14px;font-size:14px}
-.prov-card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px}
-.prov-head{margin-bottom:4px}
-.prov-status{font-size:13px;margin-bottom:9px}
-.prov-status.ok{color:#2C6B45}.prov-status.off{color:var(--muted)}
-.keyinput{width:100%;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font:inherit;background:#fff;color:var(--ink);outline:none}
-.keyinput:focus{border-color:var(--accent)}
-.muted{color:var(--muted)}.small{font-size:12px;margin-top:6px}
-.pill-default{background:var(--accent);color:#fff;font-size:11px;border-radius:999px;padding:2px 8px;margin-left:8px}
-.save-btn{background:var(--accent);border:none;color:#fff;border-radius:10px;padding:10px 22px;font-size:14px;cursor:pointer;margin-top:4px}
-.save-btn:hover{filter:brightness(1.05)}
-.target{display:flex;align-items:center;gap:8px}
-.target form{display:inline}
-.pill{display:inline-flex;align-items:center;gap:7px;background:var(--chip);border:1px solid var(--line);
-  border-radius:999px;padding:6px 12px;font-size:13px;cursor:pointer}
-.led{width:8px;height:8px;border-radius:50%}
-.led.live{background:#3FA66A;box-shadow:0 0 0 3px rgba(63,166,106,.18)}
-.led.mock{background:#C9A227;box-shadow:0 0 0 3px rgba(201,162,39,.18)}
-select.tsel{appearance:none;background:var(--chip);border:1px solid var(--line);border-radius:999px;
-  padding:6px 30px 6px 12px;font-size:13px;cursor:pointer;color:var(--ink)}
-.banner{background:#FBF3E7;border-bottom:1px solid #EAD9BE;color:#7A5B1E;padding:8px 22px;font-size:13px}
-/* conversation */
-.stream{flex:1;overflow:auto;padding:14px 0}
-.wrap{max-width:760px;margin:0 auto;padding:0 22px}
-.row{margin-bottom:9px}
-.who{font-size:11px;color:var(--muted);margin-bottom:2px;display:flex;align-items:center;gap:6px}
-.tag{font-size:10px;border:1px solid var(--line);border-radius:6px;padding:0 5px;color:var(--muted)}
-/* collapsible heading sections */
-.sec-caret{cursor:pointer;color:var(--ink);opacity:.6;font-size:18px;line-height:1;user-select:none;
-  transition:transform .12s,opacity .12s;display:inline-flex;align-items:center;
-  width:20px;height:20px;justify-content:center;border-radius:6px}
-.sec-caret:hover{opacity:1;background:var(--chip)}
-.sec-caret.collapsed{transform:rotate(-90deg)}
-.sec-count{font-size:11px;color:var(--muted);background:var(--chip);border-radius:10px;padding:0 7px}
-#stream .row.sec-hidden{display:none}
-.bubble{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px 12px}
-.bubble.user{background:var(--bubble-user);border-color:#EBD9CD}
-.bubble.note{background:transparent;border:none;padding:2px 0}
-/* AI "working" indicators: a spinning wheel while we wait for the first token,
-   then a blinking caret at the tail of the answer while it streams in. */
-.thinking{display:inline-flex;align-items:center;gap:8px;color:var(--muted);font-size:13px}
-.spinner{display:inline-block;width:13px;height:13px;border:2px solid var(--line);
-  border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-.bubble.streaming::after{content:'▌';color:var(--accent);margin-left:1px;
-  animation:caret-blink 1s step-start infinite}
-@keyframes caret-blink{50%{opacity:0}}
-pre.code{background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:10px 14px;overflow:auto;
-  font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;margin:0}
-.out{margin-top:4px;border-left:2px solid var(--line);padding:3px 0 3px 12px;color:var(--muted);
-  font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;white-space:pre-wrap}
-.empty{color:var(--muted);text-align:center;margin-top:60px}
-/* composer */
-.composer{padding:0 0 22px} .composer .wrap{padding:0 22px}
-.box{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:10px 12px;
-  box-shadow:0 1px 2px rgba(0,0,0,.03)}
-.box textarea{width:100%;border:none;outline:none;resize:none;background:transparent;font:inherit;color:var(--ink);min-height:46px}
-.row2{display:flex;align-items:center;justify-content:space-between;margin-top:6px}
-.modes{display:flex;gap:6px}
-.mode{font-size:12px;border:1px solid var(--line);background:#fff;border-radius:8px;height:32px;padding:0 12px;
-  display:inline-flex;align-items:center;cursor:pointer;color:var(--muted)}
-.mode input{display:none}
-.mode.sel{background:var(--accent);border-color:var(--accent);color:#fff}
-select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-radius:8px;height:32px;padding:0 24px 0 12px;
-  font-size:12px;cursor:pointer;color:var(--ink)}
-.send{background:var(--accent);border:none;color:#fff;border-radius:8px;width:32px;height:32px;cursor:pointer;font-size:15px}
-.send:hover{filter:brightness(1.05)}
-.hint{font-size:11px;color:var(--muted);margin-top:8px;text-align:center}
-/* editable cells */
-.cell-edit{width:100%;border:1px solid var(--line);border-radius:11px;padding:11px 13px;font:inherit;
-  background:var(--panel);color:var(--ink);resize:none;outline:none;overflow:hidden;min-height:42px;display:block;
-  field-sizing:content}     /* auto-grows to fit content (Chrome/Edge/Safari); JS fallback below */
-.cell-edit:focus{border-color:var(--accent)}
-.cell-edit.code-edit{font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;
-  background:var(--code-bg);color:var(--code-ink);border-color:#3a3933}
-.cell-actions{display:flex;gap:6px;margin-left:auto;opacity:0;transition:opacity .12s}
-.row:hover .cell-actions,.cell-actions:focus-within,.cell-actions.show{opacity:1}
-/* rendered cells are click-to-edit; hint it on hover */
-.clickedit{cursor:text;border-radius:9px;transition:outline-color .12s}
-.clickedit:hover{outline:1px dashed var(--line);outline-offset:4px}
-.note-view{padding:1px 0}.prompt-view{white-space:pre-wrap}
-.note-view .muted,.prompt-view .muted,.code-view .muted{font-style:italic}
-/* pygments code block (server-side highlight, inline colors) */
-.code-view .highlight{margin:0;border-radius:11px;overflow:auto}
-.code-view .highlight pre{margin:0;padding:8px 13px;border-radius:11px;
-  font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;line-height:1.45}
-/* CodeMirror: highlight-while-editing for code cells (matches the rendered look) */
-.CodeMirror{height:auto;border:1px solid #3a3933;border-radius:11px;
-  font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;line-height:1.5}
-.CodeMirror-scroll{min-height:auto}
-.CodeMirror-lines{padding:9px 0}
-/* Re-map CodeMirror's monokai onto Pygments' exact monokai palette, so a code
-   cell looks IDENTICAL rendered (Pygments) vs being edited (CodeMirror). CM's
-   own theme uses `span.cm-*` selectors, so we match that specificity to win. */
-.cm-s-monokai.CodeMirror{color:#f8f8f2}
-.cm-s-monokai span.cm-keyword{color:#66d9ef}
-.cm-s-monokai span.cm-operator{color:#ff4689}
-.cm-s-monokai span.cm-def{color:#a6e22e}
-.cm-s-monokai span.cm-variable,.cm-s-monokai span.cm-variable-2,
-.cm-s-monokai span.cm-property{color:#f8f8f2}
-.cm-s-monokai span.cm-builtin,.cm-s-monokai span.cm-variable-3,
-.cm-s-monokai span.cm-type{color:#f8f8f2}
-.cm-s-monokai span.cm-string,.cm-s-monokai span.cm-string-2{color:#e6db74}
-.cm-s-monokai span.cm-number,.cm-s-monokai span.cm-atom{color:#ae81ff}
-.cm-s-monokai span.cm-comment{color:#959077}
-.cm-s-monokai span.cm-meta,.cm-s-monokai span.cm-qualifier{color:#a6e22e}
-.cell-btn{font-size:12px;border:1px solid var(--line);background:#fff;border-radius:7px;padding:3px 11px;
-  cursor:pointer;color:var(--muted);line-height:1.6}
-.cell-btn:hover{border-color:#d4d0c4;color:var(--ink)}
-.cell-btn.run{background:var(--accent);color:#fff;border-color:var(--accent)}
-.cell-btn.run:hover{filter:brightness(1.05);color:#fff}
-.cell-btn.del:hover{border-color:#C0584B;color:#C0584B}
-.cell-btn.link{padding:3px 8px}
-.cell-btn.link.copied{border-color:var(--accent);color:var(--accent)}
-/* #_msgid references in notes / AI answers */
-a.msglink{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent);
-  font-variant-numeric:tabular-nums;cursor:pointer}
-a.msglink:hover{border-bottom-style:solid}
-/* brief pulse when you jump to a cell via a link */
-@keyframes msgflash{0%{background:rgba(217,119,87,.22)}100%{background:transparent}}
-.row.msg-flash{animation:msgflash 1.6s ease-out;border-radius:10px}
-.cell-btn.ins{color:#2C6B45;font-weight:600}
-.cell-btn.ins:hover{border-color:#BFE0CC;background:#E6F2EA}
-.ins{position:relative;display:inline-block}
-.ins>summary{list-style:none;cursor:pointer}
-.ins>summary::-webkit-details-marker{display:none}
-.ins-menu{position:absolute;right:0;top:26px;z-index:30;display:flex;gap:10px;
-  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px;
-  box-shadow:0 6px 18px rgba(0,0,0,.12)}
-.ins-col{display:flex;flex-direction:column;gap:3px;min-width:80px}
-.lib-form{display:flex;flex-direction:column;gap:6px;min-width:190px}
-.lib-form .keyinput{font-size:12px;padding:5px 8px}
-.ins-col-head{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:2px}
-.ins-item{text-align:left;font-size:12px;border:1px solid var(--line);background:#fff;border-radius:7px;
-  padding:4px 9px;cursor:pointer;color:var(--ink)}
-.ins-item:hover{border-color:var(--accent);background:#FBF3E7}
-.type-menu{position:absolute;right:0;top:26px;z-index:30;display:flex;flex-direction:column;gap:3px;
-  min-width:96px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px;
-  box-shadow:0 6px 18px rgba(0,0,0,.12)}
-.ins-item.cur{border-color:var(--accent);background:#FBF3E7;font-weight:600}   /* the current type */
-/* Copy-to-dialog menu: same drop as the type menu, but names can be long, so cap
-   the width and keep the list scrollable rather than letting it run off-screen. */
-.copy-menu{min-width:140px;max-width:240px;max-height:280px;overflow:auto}
-.copy-menu .ins-item{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-/* one-shot confirmation banner after a cross-dialog copy */
-.flash{position:sticky;bottom:10px;align-self:center;margin:8px auto 0;width:fit-content;
-  background:#2C6B45;color:#fff;font-size:13px;border-radius:8px;padding:7px 14px;
-  box-shadow:0 6px 18px rgba(0,0,0,.18);animation:flashin .15s ease-out}
-@keyframes flashin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
-/* the cell a/b will target (last hovered) */
-#stream .row:hover{box-shadow:inset 2px 0 0 var(--line)}
-/* the selected cell in Jupyter-style command mode (Esc / j / k) */
-#stream .row.selected{box-shadow:inset 3px 0 0 var(--accent);border-radius:10px;
-  background:rgba(44,107,69,.04)}
-.cell-btn.ctx.off{color:#B0784F;border-color:#E3C7AE;background:#FBF3E7}
-.cell-btn.pin.on{color:#2C6B45;border-color:#BFE0CC;background:#E6F2EA}
-.cell-btn.exp.on{color:#4A5BA6;border-color:#C3CBEB;background:#ECEFF9}
-.tok{margin-left:2px;font-variant-numeric:tabular-nums}
-/* cell number badge: a quiet gutter index the user can say "fix cell 3" by, and
-   the same number the AI sees as n="…" in its context. */
-.cell-num{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums;
-  min-width:15px;text-align:right;user-select:none;flex:0 0 auto}
-.row.muted .cell-num{opacity:.5}
-/* drag-to-reorder handle (hover-revealed, like the toolbar) */
-.drag-handle{cursor:grab;color:var(--muted);opacity:0;transition:opacity .12s;
-  user-select:none;font-size:14px;line-height:1;padding:0 3px;margin-left:-6px}
-.row:hover .drag-handle{opacity:.55}
-.drag-handle:hover{opacity:1}
-.drag-handle:active{cursor:grabbing}
-.sortable-ghost{opacity:.35}
-.sortable-chosen{background:#EDEAE1;border-radius:10px}
-/* a cell muted out of the AI's context: dim it, but keep it usable */
-.row.muted .cell-edit,.row.muted .bubble,.row.muted .out,.row.muted .cell-img{opacity:.5}
-.row.muted .tag{opacity:.6}
-/* a pinned cell: a small accent rail on the left */
-.row.pinned{border-left:2px solid var(--accent);margin-left:-12px;padding-left:10px}
-/* rich kernel output: plots, images, dataframes */
-.cell-img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:8px;margin-top:9px;display:block;background:#fff}
-.cell-svg{margin-top:9px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:6px;overflow-x:auto}
-.cell-svg svg{max-width:100%;height:auto;display:block}
-.row.muted .cell-svg{opacity:.5}
-.cell-html table{border-collapse:collapse}
-.cell-html th,.cell-html td{border:1px solid var(--line);padding:4px 9px;text-align:right}
-.cell-html th{background:var(--chip)}
-/* live context meter at the foot of the stream */
-.ctx-meter{margin:10px auto 4px;text-align:center;font-size:12px;color:var(--muted);
-  border-top:1px dashed var(--line);padding-top:8px}
-.answer{margin-top:5px}
-/* An Ask AI cell = question + answer as ONE bordered card, so it's unmistakably a
-   single cell (not two). A thin divider separates the question from the answer. */
-#stream .row.prompt{border:1px solid var(--line);border-radius:14px;background:var(--panel);
-  padding:7px 13px 9px}
-#stream .row.prompt .prompt-view{font-weight:500;color:var(--ink)}     /* the question */
-#stream .row.prompt .answer{margin-top:7px;border-top:1px solid var(--line);padding-top:7px}
-#stream .row.prompt .answer .bubble{background:transparent;border:none;padding:0}  /* card bounds it */
-#stream .row.prompt .answer .who .tag{border:none;padding:0;font-weight:600;color:var(--accent)}
-.md>*:first-child{margin-top:0}.md>*:last-child{margin-bottom:0}
-.md p{margin:.35em 0}.md ul,.md ol{margin:.35em 0;padding-left:1.4em}
-.md h1,.md h2,.md h3{margin:.6em 0 .3em;line-height:1.3}
-.md table{border-collapse:collapse;margin:.5em 0}.md th,.md td{border:1px solid var(--line);padding:4px 9px}
-/* Mermaid: each diagram is bounded by its cell. useMaxWidth:true (mermaid config) makes
-   the svg width:100% + max-width:<natural>px, so a diagram that fits renders at natural
-   size (crisp) and one that would overflow scales down to fit — it never spills past the
-   cell or scrolls sideways. Generation is steered hard top-down (`flowchart TD` — see
-   _DIAGRAM_GUIDANCE) to keep diagrams narrow, so the down-scale rarely bites. Framed as a
-   subtle card so a diagram reads as a deliberate figure. Architectures grow downward, so
-   the reader scrolls down, not sideways.
-   `.md pre.mermaid` (not bare `pre.mermaid`) out-specifies the `.md pre` code-block rule
-   below — otherwise the diagram inherits the tan illustrative-code background. */
-.md pre.mermaid{margin:.7em 0;padding:8px;background:#fff;border:1px solid var(--line);border-radius:10px;
-  text-align:left;line-height:normal;
-  max-width:100%;
-  max-height:85vh;overflow:auto}
-.md pre.mermaid svg{display:block;margin:0 auto}
-/* Non-runnable code inside an answer/note: light background (not the dark code-cell
-   palette), so it's unmistakably illustrative rather than executable. Covers the
-   plain-<pre> fallback when Pygments is unavailable. */
-.md pre{background:var(--md-code-bg);color:var(--ink);border:1px solid var(--line);border-radius:10px;
-  padding:12px 14px;overflow:auto;font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px}
-/* Pygments-highlighted fenced code blocks in markdown (the .highlight div owns the bg) */
-.md .highlight{border:1px solid var(--line);border-radius:10px;overflow:auto;margin:.5em 0;position:relative}
-.md .highlight pre{background:transparent;margin:0;padding:12px 14px}
-/* hover Copy button on code snippets (light theme, to match the light code bg) */
-.copy-btn{position:absolute;top:7px;right:7px;font-size:11px;line-height:1.4;
-  border:1px solid var(--line);background:rgba(250,249,245,.85);color:var(--muted);border-radius:6px;
-  padding:2px 9px;cursor:pointer;opacity:0;transition:opacity .12s}
-.md .highlight:hover .copy-btn,.copy-btn:focus{opacity:1}
-.copy-btn:hover{color:var(--ink);border-color:var(--muted)}
-.md code{font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:.92em}
-.md :not(pre)>code{background:var(--chip);border-radius:5px;padding:1px 5px}
-"""
+CSS = _static_text("css/app.css")
 
 
 # ---- view helpers -----------------------------------------------------------
@@ -781,61 +507,12 @@ def _render_dialog_nodes(node, active):
 
 # Shift/⌘-click to multi-select dialog rows, then bulk-delete. Plain click still
 # opens a dialog (and the full-page nav resets the ephemeral selection).
-SIDEBAR_JS = """
-(function(){
-  if(window.__sidebarSel) return; window.__sidebarSel = true;
-  var sel = new Set(), anchor = null;
-  function links(){ return Array.prototype.slice.call(
-    document.querySelectorAll('.side .conv-row a.conv')); }
-  function nameOf(a){ return decodeURIComponent(
-    (a.getAttribute('href') || '').replace('/open?dialog=', '')); }
-  function paint(){
-    links().forEach(function(a){ a.closest('.conv-row').classList.toggle('sel', sel.has(nameOf(a))); });
-    var bar = document.getElementById('selBar');
-    if(bar){ bar.style.display = sel.size ? 'flex' : 'none';
-             var c = document.getElementById('selCount');
-             if(c) c.textContent = sel.size + ' selected'; }
-  }
-  function deleteDialogs(targets){
-    if(!targets.length) return;
-    if(!confirm('Delete ' + targets.length + ' dialog(s) and all their cells? This cannot be undone.')) return;
-    var f = document.createElement('form'); f.method = 'POST'; f.action = '/dialog/delete-bulk';
-    var i = document.createElement('input'); i.type = 'hidden'; i.name = 'names';
-    i.value = JSON.stringify(targets);
-    f.appendChild(i); document.body.appendChild(f); f.submit();
-  }
-  window.__clearDialogSel = function(){ sel.clear(); anchor = null; paint(); };
-  window.__deleteDialogSel = function(){ deleteDialogs(Array.from(sel)); };
-  document.addEventListener('click', function(e){
-    // a row's ⋯ Delete: delete the whole selection if this row is part of it,
-    // otherwise just this one.
-    var del = e.target.closest && e.target.closest('.conv-del');
-    if(del){
-      e.preventDefault();
-      var name = del.getAttribute('data-dialog');
-      deleteDialogs(sel.size && sel.has(name) ? Array.from(sel) : [name]);
-      return;
-    }
-    var a = e.target.closest && e.target.closest('.side .conv-row a.conv');
-    if(!a || !(e.shiftKey || e.metaKey || e.ctrlKey)) return;   // plain click navigates
-    e.preventDefault();
-    var names = links().map(nameOf), nm = nameOf(a), i = names.indexOf(nm);
-    if(e.shiftKey && anchor !== null){
-      var lo = Math.min(anchor, i), hi = Math.max(anchor, i);
-      for(var k = lo; k <= hi; k++) sel.add(names[k]);
-    } else {
-      if(sel.has(nm)) sel.delete(nm); else sel.add(nm);
-      anchor = i;
-    }
-    paint();
-  });
-})();
-"""
+SIDEBAR_JS = _static_text("js/sidebar.js")
 
 
 def Sidebar():
     backend = STATE["backend"]
-    names = backend.list_dialogs() or [STATE["dialog"]]
+    names = backend.list_dialogs() or [cur("dialog")]
     tree = _dialog_tree(names)
     sel_bar = Div(
         Span("0 selected", id="selCount", cls="sel-count"),
@@ -848,7 +525,7 @@ def Sidebar():
     recent = list(reversed(names))[:5]
     recent_section = (
         [Div("Recent", cls="seclabel"),
-         *[_dialog_leaf(r.rsplit("/", 1)[-1], r, STATE["dialog"]) for r in recent]]
+         *[_dialog_leaf(r.rsplit("/", 1)[-1], r, cur("dialog")) for r in recent]]
         if len(names) > 1 else [])
     return Div(
         Div(Span("S", cls="dot"), "SolveIt Sidekick", cls="brand"),
@@ -856,9 +533,9 @@ def Sidebar():
         *recent_section,
         Div("Dialogs", cls="seclabel", title="Shift/⌘-click to select several, then Delete"),
         sel_bar,
-        *_render_dialog_nodes(tree, STATE["dialog"]),
+        *_render_dialog_nodes(tree, cur("dialog")),
         Div(f"target: {STATE['target_name']}", cls="side-foot"),
-        Script(SIDEBAR_JS),
+        Script(src="/static/js/sidebar.js"),
         cls="side",
     )
 
@@ -934,7 +611,7 @@ def _copy_menu(mid):
     """⧉ dropdown: copy this cell into another dialog (appended at its end). Lists
     every other dialog; hidden entirely when there's nowhere to copy to."""
     backend = STATE["backend"]
-    others = [d for d in (backend.list_dialogs() or []) if d != STATE["dialog"]]
+    others = [d for d in (backend.list_dialogs() or []) if d != cur("dialog")]
     if not others or not hasattr(backend, "copy_cell"):
         return None
     items = [_stream_btn(d, "/cell/copy", cls="ins-item", vals={"id": mid, "target": d})
@@ -1088,11 +765,29 @@ def _output_views(m):
     """Code output + plots/images, or the rendered AI answer for a prompt."""
     out = []
     if m.msg_type == "code":
+        run_id = _pending_run_id(cur("dialog"), m.id)
+        if run_id:
+            # A live exec: a vanilla EventSource (see STREAM_JS) connects to
+            # /exec_stream and replaces this <pre>'s content as stdout arrives, with
+            # a Stop button to interrupt a runaway loop. On done it reloads #stream
+            # so the finished cell (rich plots, normal Run button) renders.
+            url = (f"/exec_stream?dialog={quote(STATE['dialog'])}"
+                   f"&id={m.id}&run_id={quote(run_id)}")
+            stop = Button("■ Stop", type="button", cls="cell-btn del",
+                          title="Interrupt this running cell",
+                          hx_post="/cell/stop", hx_vals=json.dumps({"id": m.id}),
+                          hx_swap="none")
+            out.append(Div(
+                Div(Span(Span(cls="spinner"), "Running…", cls="thinking"), stop, cls="who"),
+                Pre(m.output or "", cls="out", id=f"exec-{m.id}",
+                    **{"data-exec-url": url}),
+                cls="exec-live"))
+            return out
         if m.output:
             out.append(Div(m.output, cls="out"))
         out += [_rich_view(it) for it in m.rich]
     elif m.msg_type == "prompt":
-        pending = STATE.get("pending_stream") == (STATE["dialog"], m.id)
+        pending = STATE.get("pending_stream") == (cur("dialog"), m.id)
         if pending:
             # Live answer: a vanilla EventSource (see STREAM_JS) connects to /stream
             # and replaces this bubble's innerHTML as tokens arrive. We show this
@@ -1198,8 +893,31 @@ def MsgRow(m, num=None):
         primary.append(_stream_btn(
             "Split to code", "/cell/split", vals={"id": m.id},
             title="Extract the answer's code blocks into runnable code cells below"))
+    if m.msg_type == "code":
+        primary += _fade_buttons(m)
     return Div(_head(m, primary, num=num), _rendered_content(m), *_output_views(m),
                cls=_rowcls(m), id=f"cell-{m.id}")
+
+
+def _fade_buttons(m):
+    """Faded-scaffolding (F6) cell-toolbar affordance, mirroring "Split to code".
+
+    A worked code cell gets "Fade to exercise" (→ level-1 exercise below). A cell
+    that is already a faded exercise gets a fade stepper (Show worked / Fill-in /
+    From scratch) plus "Ask AI to check" — all re-run `/cell/fade` (or `/cell/check`)."""
+    if _is_exercise(m.content):
+        lvl = lambda label, n, title: _stream_btn(
+            label, "/cell/fade", cls="cell-btn fade", vals={"id": m.id, "level": n}, title=title)
+        return [
+            lvl("Show worked", 0, "Reveal the full worked solution (level 0)"),
+            lvl("Fill-in", 1, "Blank the load-bearing lines to complete (level 1)"),
+            lvl("From scratch", 2, "Collapse to a goal + stub; write it yourself (level 2)"),
+            _stream_btn("Ask AI to check", "/cell/check", cls="cell-btn", vals={"id": m.id},
+                        title="Ask the AI to compare your attempt to the worked solution and hint"),
+        ]
+    return [_stream_btn(
+        "Fade to exercise", "/cell/fade", cls="cell-btn fade", vals={"id": m.id, "level": 1},
+        title="Turn this worked code into a fill-in-the-blank exercise below")]
 
 
 def _cell_edit(m, num=None):
@@ -1268,86 +986,12 @@ _FOCUS_JS = """
 # addon. Comments at the shallowest indentation of the block; if every non-blank
 # line is already commented, it uncomments instead. Defined once; the cell and
 # composer editors bind it in their extraKeys.
-COMMENT_JS = """
-window.__toggleComment = function(cm){
-  cm.operation(function(){
-    cm.listSelections().forEach(function(sel){
-      var from = Math.min(sel.anchor.line, sel.head.line);
-      var to   = Math.max(sel.anchor.line, sel.head.line);
-      var lines = [];
-      for(var i = from; i <= to; i++){ if(/\\S/.test(cm.getLine(i))) lines.push(i); }
-      if(!lines.length) lines = [from];                 // act on a lone blank line too
-      var commented = lines.every(function(i){ return /^\\s*#/.test(cm.getLine(i)); });
-      var indent = Infinity;
-      lines.forEach(function(i){ indent = Math.min(indent, cm.getLine(i).match(/^\\s*/)[0].length); });
-      if(!isFinite(indent)) indent = 0;
-      lines.forEach(function(i){
-        if(commented){
-          var m = cm.getLine(i).match(/^(\\s*)#( ?)/);  // strip the leading '# ' (or '#')
-          if(m) cm.replaceRange('', {line:i, ch:m[1].length}, {line:i, ch:m[1].length + 1 + m[2].length});
-        } else {
-          cm.replaceRange('# ', {line:i, ch:indent});
-        }
-      });
-    });
-  });
-};
-"""
+COMMENT_JS = _static_text("js/comment.js")
 
 # Ctrl+Space completion: an async CodeMirror hint that asks /complete (which
 # introspects the kernel's live namespace via jedi). Defined once on the page;
 # the cell editor's extraKeys calls it. Best-effort — any failure shows nothing.
-COMPLETE_JS = """
-window.__kernelHint = function(cm, callback){
-  var cur = cm.getCursor(), line = cm.getLine(cur.line);
-  var startCh = cur.ch;                                   // start of the typed identifier
-  while(startCh && /[A-Za-z0-9_]/.test(line.charAt(startCh - 1))) startCh--;
-  var body = 'code=' + encodeURIComponent(cm.getValue()) +
-             '&line=' + (cur.line + 1) + '&col=' + cur.ch;
-  fetch('/complete', {method: 'POST',
-      headers: {'Content-Type': 'application/x-www-form-urlencoded'}, body: body})
-    .then(function(r){ return r.json(); })
-    .then(function(data){
-      var comps = (data && data.completions) || [];
-      if(!comps.length){ callback(null); return; }
-      callback({
-        list: comps.map(function(c){ return {text: c.name, displayText: c.name}; }),
-        from: CodeMirror.Pos(cur.line, startCh),
-        to: CodeMirror.Pos(cur.line, cur.ch)
-      });
-    })
-    .catch(function(){ callback(null); });   // never break typing
-};
-window.__kernelHint.async = true;            // tells CodeMirror it uses a callback
-
-// Open the completion dropdown. Tab (and Enter) accept the highlighted item —
-// the SolveIt convention. completeSingle:false so a lone match never auto-inserts
-// while you're mid-word.
-window.__showCompletions = function(cm){
-  if(!window.__kernelHint) return;
-  cm.showHint({
-    hint: window.__kernelHint,
-    completeSingle: false,
-    extraKeys: { 'Tab': function(cm, handle){ handle.pick(); } }
-  });
-};
-
-// Auto-trigger as you type (SolveIt's "dynamic autocomplete"). On a typed word
-// char or a '.', open the dropdown after a short debounce — unless one is already
-// open (it updates itself). Programmatic edits (e.g. accepting a hint) don't fire
-// inputRead, so this never loops. Debounced to stay light over the H100 tunnel.
-window.__autocompleteOnType = function(cm){
-  cm.on('inputRead', function(cm, change){
-    if(cm.state.completionActive) return;             // already open → it self-updates
-    var ch = change.text && change.text[0];
-    if(!ch || !/[\\w.]/.test(ch)) return;             // only identifier chars and '.'
-    clearTimeout(cm.__hintTimer);
-    cm.__hintTimer = setTimeout(function(){
-      if(!cm.state.completionActive) window.__showCompletions(cm);
-    }, 160);
-  });
-};
-"""
+COMPLETE_JS = _static_text("js/complete.js")
 
 
 STREAM_JS = """
@@ -1500,6 +1144,26 @@ STREAM_JS = """
       es.close(); el.removeAttribute('data-stream-url'); el.__streaming = false;
       // The AI's tools edited cells this turn — refresh #stream so they appear.
       if(e && e.data && e.data.indexOf('reload') >= 0 && window.htmx){
+        window.htmx.ajax('GET', '/stream/refresh', {target:'#stream', swap:'outerHTML'});
+      }
+    });
+    es.onerror = function(){ es.close(); };
+  });
+
+  // Live code execution: connect an EventSource for each running code cell.
+  // 'msg' events carry the accumulated stdout/stderr (a <pre>) as it streams;
+  // 'done' persists server-side and reloads #stream so the finished cell (plots,
+  // normal Run button) renders. Mirrors the answer-streaming loop above.
+  document.querySelectorAll('[data-exec-url]').forEach(function(el){
+    if(el.__execing) return; el.__execing = true;
+    var es = new EventSource(el.getAttribute('data-exec-url'));
+    es.addEventListener('msg', function(e){
+      el.innerHTML = e.data;                           // cumulative output snapshot
+      var s = el.closest('.stream'); if(s) s.scrollTop = s.scrollHeight;
+    });
+    es.addEventListener('done', function(e){
+      es.close(); el.removeAttribute('data-exec-url'); el.__execing = false;
+      if(window.htmx){                                 // re-render the finished cell
         window.htmx.ajax('GET', '/stream/refresh', {target:'#stream', swap:'outerHTML'});
       }
     });
@@ -1765,7 +1429,7 @@ def _ctx_meter_text(msgs, dialog=None):
         bits.append(f"{n_pin} pinned")
     if n_muted:
         bits.append(f"{n_muted} muted")
-    cost = cost_for(dialog if dialog is not None else STATE["dialog"])
+    cost = cost_for(dialog if dialog is not None else cur("dialog"))
     if cost and cost["turns"]:
         bits.append(_cost_label(cost))
     return " · ".join(bits)
@@ -1780,10 +1444,10 @@ def _ctx_meter(msgs):
 
 
 def Stream():
-    msgs = STATE["backend"].messages(STATE["dialog"])
-    editing = STATE.pop("editing", None)            # a just-inserted cell opens in edit mode (one-shot)
-    scroll_to = STATE.pop("scroll_to", None)        # scroll a just-added cell into view (one-shot)
-    flash = STATE.pop("flash", None)                # transient confirmation banner (one-shot)
+    msgs = STATE["backend"].messages(cur("dialog"))
+    editing = pop_cur("editing", None)            # a just-inserted cell opens in edit mode (one-shot)
+    scroll_to = pop_cur("scroll_to", None)        # scroll a just-added cell into view (one-shot)
+    flash = pop_cur("flash", None)                # transient confirmation banner (one-shot)
     if not msgs:
         inner = Div("Start the conversation — write code, ask the AI, or jot a note.",
                     cls="empty")
@@ -1807,175 +1471,16 @@ def Stream():
                          Script("setTimeout(function(){var f=document.getElementById('flash');"
                                 "if(f)f.remove();},2400);"))
     return Div(inner, Script(STREAM_JS), *extra, cls="stream", id="stream",
-               **{"data-dialog": STATE["dialog"]})
+               **{"data-dialog": cur("dialog")})
 
 
-COMPOSER_JS = """
-var composerCM = null;   // CodeMirror instance while the composer is in Code mode
-
-// Drop an immediate "Thinking…" wheel into the stream the instant you send an
-// Ask-AI prompt — before any server round-trip. The htmx response then swaps all
-// of #stream and replaces it: with the streaming answer (Claude Max) or the final
-// answer (blocking API models, which otherwise showed no indicator at all). So a
-// wheel is always visible while you wait, regardless of model or speed.
-function _showPendingSpinner(){
-  var stream = document.getElementById('stream');
-  if(!stream || document.getElementById('pending-spinner')) return;
-  var box = stream.querySelector('.wrap') || stream;
-  var d = document.createElement('div');
-  d.id = 'pending-spinner'; d.className = 'row';
-  d.innerHTML = '<div class="answer"><div class="bubble md"><span class="thinking">' +
-                '<span class="spinner"></span>Thinking…</span></div></div>';
-  box.appendChild(d);
-  stream.scrollTop = stream.scrollHeight;
-}
-// Re-running an existing Ask-AI cell posts to the server and then swaps #stream,
-// but until that lands the stale answer just sits there. If the first streamed
-// token arrives quickly the server-rendered spinner only flashes, so a re-ask
-// reads as "no spinner". Drop a wheel into the cell's answer bubble the instant
-// you click — the same optimistic feedback the composer gets. The #stream swap
-// then renders its own identical spinner, so the handoff is seamless.
-function _showCellSpinner(id){
-  var cell = document.getElementById('cell-' + id);
-  if(!cell) return;
-  var spin = '<span class="thinking"><span class="spinner"></span>Thinking…</span>';
-  var bubble = cell.querySelector('.answer .bubble');
-  if(bubble){ bubble.className = 'bubble md'; bubble.innerHTML = spin; return; }
-  var ans = document.createElement('div');     // never-answered prompt: add a bubble
-  ans.className = 'answer';
-  ans.innerHTML = '<div class="bubble md">' + spin + '</div>';
-  cell.appendChild(ans);
-}
-function _submitComposer(){
-  if(composerCM) composerCM.save();                 // flush editor -> textarea
-  var ta = document.getElementById('composerInput');
-  if(!ta || !ta.value.trim()) return;
-  var isPrompt = (document.getElementById('msgType').value === 'prompt');
-  // requestSubmit() fires the submit event so htmx posts and swaps just #stream
-  // (no full-page reload). htmx serializes the form synchronously, so it's safe
-  // to clear the composer right after.
-  document.getElementById('composerForm').requestSubmit();
-  if(isPrompt) _showPendingSpinner();               // instant feedback until the swap lands
-  ta.value = '';
-  if(composerCM) composerCM.setValue('');
-}
-// A successful /send swaps #stream and so removes the optimistic spinner; but if
-// the request errors (no swap), clear the stray wheel so it can't hang forever.
-if(!window.__pendingSpinnerCleanup){
-  window.__pendingSpinnerCleanup = true;
-  document.addEventListener('htmx:afterRequest', function(){
-    var s = document.getElementById('pending-spinner'); if(s) s.remove();
-  });
-}
-function _initComposerCM(){
-  var ta = document.getElementById('composerInput');
-  if(!ta || composerCM || !window.CodeMirror) return;   // offline: stays a plain textarea
-  composerCM = CodeMirror.fromTextArea(ta, {
-    mode: 'python', theme: 'monokai', lineNumbers: false,
-    viewportMargin: Infinity, indentUnit: 4, lineWrapping: true,
-    placeholder: '# code…  Shift+Enter to run · Enter for newline · Tab switches mode',
-    extraKeys: {
-      'Shift-Enter': _submitComposer, 'Cmd-Enter': _submitComposer, 'Ctrl-Enter': _submitComposer,
-      'Cmd-/': function(){ window.__toggleComment(composerCM); },
-      'Ctrl-/': function(){ window.__toggleComment(composerCM); },
-      'Tab': function(){ cycleMode(1); }, 'Shift-Tab': function(){ cycleMode(-1); }
-    }
-  });
-  composerCM.on('change', function(){ composerCM.save(); });
-  setTimeout(function(){ composerCM.refresh(); composerCM.focus(); }, 0);
-}
-function _destroyComposerCM(){
-  if(!composerCM) return;
-  composerCM.save();
-  composerCM.toTextArea();                            // restore the plain textarea
-  composerCM = null;
-  var ta = document.getElementById('composerInput'); if(ta) ta.focus();
-}
-function setMode(v){
-  document.getElementById('msgType').value = v;
-  document.querySelectorAll('#modeChips .mode').forEach(function(el){
-    el.classList.toggle('sel', el.getAttribute('data-val') === v);
-  });
-  if(v === 'code') _initComposerCM(); else _destroyComposerCM();
-}
-var COMPOSER_MODES = ['prompt','code','note'];   // order matches the chips: Ask AI / Code / Note
-function cycleMode(dir){
-  var i = COMPOSER_MODES.indexOf(document.getElementById('msgType').value);
-  if(i < 0) i = 0;
-  setMode(COMPOSER_MODES[(i + dir + COMPOSER_MODES.length) % COMPOSER_MODES.length]);
-}
-// Shared by the paper-panel toolbar and the dialog-stream selection bubble: drop a
-// quoted passage into the composer as an Ask-AI prompt (switches to prompt mode,
-// which also tears down the Code editor so the textarea holds the quote).
-window.__askComposer = function(text){
-  setMode('prompt');
-  var ta = document.getElementById('composerInput');
-  if(!ta) return;
-  var quote = String(text || '').split('\\n').map(function(l){ return '> ' + l; }).join('\\n');
-  ta.value = quote + '\\n\\n';
-  ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
-  ta.scrollIntoView({block: 'center'});
-};
-(function(){
-  var ta = document.getElementById('composerInput');
-  if(!ta) return;
-  // Plain-textarea keys (Ask AI / Note, and the offline Code fallback).
-  ta.addEventListener('keydown', function(e){
-    if(e.key === 'Tab'){                 // Tab cycles Ask AI -> Code -> Note (Shift+Tab back)
-      e.preventDefault();
-      cycleMode(e.shiftKey ? -1 : 1);
-      return;
-    }
-    if(e.key === 'Enter'){
-      // One notebook convention for every cell type: plain Enter = newline,
-      // Shift/Cmd/Ctrl+Enter = run/send (Ask AI, Code, and Note all match).
-      if(e.shiftKey || e.metaKey || e.ctrlKey){ e.preventDefault(); _submitComposer(); }
-    }
-  });
-  if(document.getElementById('msgType').value === 'code') _initComposerCM();  // sticky Code mode
-  else ta.focus();
-})();
-"""
+COMPOSER_JS = _static_text("js/composer.js")
 
 
 # A floating "Ask AI ↗" bubble over text selected in the dialog stream — the paper
 # panel's selection toolbar, but for the conversation itself. Attaches once at the
 # document level so it survives #stream htmx swaps, and reuses __askComposer.
-STREAM_SEL_JS = """
-(function(){
-  if(window.__streamSel) return; window.__streamSel = true;
-  var bar = null, curText = '';
-  function hide(){ if(bar) bar.style.display = 'none'; }
-  document.addEventListener('mouseup', function(ev){
-    if(bar && ev.target && bar.contains(ev.target)) return;       // a click on the bubble itself
-    var stream = document.getElementById('stream');
-    var sel = window.getSelection();
-    var text = sel ? sel.toString().trim() : '';
-    if(!stream || !text || !sel.anchorNode || !stream.contains(sel.anchorNode)){ hide(); return; }
-    // Don't intrude while editing a cell — CodeMirror / the textarea own their selection UX.
-    var n = sel.anchorNode, el = n && (n.nodeType === 3 ? n.parentElement : n);
-    if(el && el.closest && el.closest('.CodeMirror, .cell-edit')){ hide(); return; }
-    if(!bar){
-      bar = document.createElement('div'); bar.className = 'sel-tools';
-      var b = document.createElement('button');
-      b.className = 'sel-btn import'; b.textContent = 'Ask AI ↗';
-      b.title = 'Drop the selected text into the composer as an Ask-AI question';
-      b.addEventListener('mousedown', function(e){
-        e.preventDefault();                                        // keep the selection alive
-        if(window.__askComposer) window.__askComposer(curText);
-        hide();
-      });
-      bar.appendChild(b);
-      document.body.appendChild(bar);
-    }
-    curText = text;
-    var r = sel.getRangeAt(0).getBoundingClientRect();
-    bar.style.top = (window.scrollY + r.bottom + 6) + 'px';
-    bar.style.left = (window.scrollX + r.left) + 'px';
-    bar.style.display = 'flex';
-  });
-})();
-"""
+STREAM_SEL_JS = _static_text("js/stream_sel.js")
 
 
 def ModelSelect():
@@ -2026,18 +1531,18 @@ def Composer():
         ),
         Div("Connected to ", Strong(STATE["target_name"]),
             " · switch target top-right to move between laptop and H100", cls="hint"),
-        Script(COMPOSER_JS),
+        Script(src="/static/js/composer.js"),
         cls="wrap"), cls="composer"))
 
 
 def TitleEditor():
     """The dialog name, editable in place. Submits on Enter or blur."""
     return Form(
-        Input(name="new", value=STATE["dialog"], cls="title-edit",
+        Input(name="new", value=cur("dialog"), cls="title-edit",
               title="Rename this dialog — press Enter",
               onblur="this.form.submit()",
               onkeydown="if(event.key==='Enter'){event.preventDefault();this.form.submit();}"),
-        Input(type="hidden", name="old", value=STATE["dialog"]),
+        Input(type="hidden", name="old", value=cur("dialog")),
         method="post", action="/rename", cls="title-form",
     )
 
@@ -2063,7 +1568,7 @@ def SettingsPage(saved=False):
             cls="prov-card",
         ))
     return Html(
-        Head(Title("Settings · SolveIt Sidekick"), *app.hdrs, Style(CSS)),
+        Head(Title("Settings · SolveIt Sidekick"), *app.hdrs, Link(rel="stylesheet", href="/static/css/app.css")),
         Body(Div(
             Div(
                 Div(A("←  Back", href="/", cls="back"), Div("Settings", cls="title"),
@@ -2157,7 +1662,7 @@ def LibrariesPage(result=None, saved=False):
         Button("Add library", cls="save-btn", type="submit"),
         method="post", action="/library/add")
     return Html(
-        Head(Title("Libraries · SolveIt Sidekick"), *app.hdrs, Style(CSS)),
+        Head(Title("Libraries · SolveIt Sidekick"), *app.hdrs, Link(rel="stylesheet", href="/static/css/app.css")),
         Body(Div(
             Div(
                 Div(A("←  Back", href="/", cls="back"), Div("Libraries", cls="title"),
@@ -2182,173 +1687,9 @@ def LibrariesPage(result=None, saved=False):
 # Table of contents built from note headings (h1–h6 inside .note-view). Lives in
 # Page() (not #stream), so it persists across htmx swaps; STREAM_JS calls
 # window.buildTOC() on each render to keep it in sync. Toggle state is saved.
-MSGLINK_JS = """
-(function(){
-  function scrollToCell(mid){
-    var el = document.getElementById('cell-'+mid);
-    if(!el) return false;
-    el.scrollIntoView({behavior:'smooth', block:'center'});
-    el.classList.remove('msg-flash'); void el.offsetWidth;   // restart the flash animation
-    el.classList.add('msg-flash');
-    setTimeout(function(){ el.classList.remove('msg-flash'); }, 1600);
-    return true;
-  }
-  window.__scrollToCell = scrollToCell;
-  // A #_msgid link lives inside a note, which is itself click-to-edit (htmx
-  // hx-get on click). Capture the click BEFORE it bubbles to that edit trigger
-  // and stop it there, so following a link never drops the cell into edit mode.
-  // Same-dialog links scroll in place; cross-dialog (.xdlg) links keep their
-  // href so they open the other dialog.
-  document.addEventListener('click', function(e){
-    var a = e.target.closest && e.target.closest('a.msglink');
-    if(!a) return;
-    e.stopPropagation();                       // don't trip the cell's click-to-edit
-    if(a.classList.contains('xdlg')) return;   // let it navigate to the other dialog
-    var mid = a.getAttribute('data-mid');
-    if(mid && document.getElementById('cell-'+mid)){ e.preventDefault(); scrollToCell(mid); }
-  }, true);
-  // Copy a cell's #_msgid anchor — the same string you paste inline to link here.
-  // Brief tooltip feedback so the click lands visibly.
-  window._copyMsgLink = function(btn){
-    var ref = btn.getAttribute('data-anchor');
-    function ok(){ var t = btn.getAttribute('title'); btn.setAttribute('title','Copied '+ref);
-      btn.classList.add('copied');
-      setTimeout(function(){ btn.setAttribute('title', t); btn.classList.remove('copied'); }, 1400); }
-    if(navigator.clipboard && navigator.clipboard.writeText){
-      navigator.clipboard.writeText(ref).then(ok, ok);
-    } else {
-      var ta = document.createElement('textarea'); ta.value = ref; document.body.appendChild(ta);
-      ta.select(); try{ document.execCommand('copy'); }catch(e){} ta.remove(); ok();
-    }
-  };
-  // Honor a #_msgid in the URL on load (e.g. after /open?dialog=…#_id) and on
-  // manual hash edits — but NOT on htmx swaps, which shouldn't yank the view.
-  function honorHash(){
-    var m = (location.hash || '').match(/^#(_[0-9a-f]{6,})$/);
-    if(m) requestAnimationFrame(function(){ scrollToCell(m[1]); });
-  }
-  window.addEventListener('DOMContentLoaded', honorHash);
-  window.addEventListener('hashchange', honorHash);
-  honorHash();
-})();
-"""
+MSGLINK_JS = _static_text("js/msglink.js")
 
-TOC_JS = """
-window.buildTOC = function(){
-  var list = document.getElementById('tocList');
-  if(!list) return;
-  // Scope to ONE #stream via getElementById: during an htmx outerHTML swap the
-  // old #stream lingers briefly, and a '#stream …' selector matches headings
-  // under BOTH, so the TOC would double. getElementById resolves a single node.
-  var stream = document.getElementById('stream');
-  var heads = stream ? stream.querySelectorAll(
-    '.note-view h1,.note-view h2,.note-view h3,' +
-    '.note-view h4,.note-view h5,.note-view h6') : [];
-  list.innerHTML = '';
-  if(!heads.length){
-    var e = document.createElement('div'); e.className = 'toc-empty';
-    e.textContent = 'No note headings yet — add a note with # headings.';
-    list.appendChild(e); return;
-  }
-  heads.forEach(function(h, i){
-    if(!h.id) h.id = 'toc-h-' + i;
-    var a = document.createElement('a');
-    a.className = 'toc-link toc-' + h.tagName.toLowerCase();
-    a.textContent = h.textContent;
-    a.href = '#' + h.id;
-    a.addEventListener('click', function(ev){
-      ev.preventDefault();
-      h.scrollIntoView({behavior: 'smooth', block: 'start'});
-    });
-    list.appendChild(a);
-  });
-};
-// Dim a toggle's icon when its panel is hidden, so what's collapsed is obvious
-// at a glance — and one click on the dimmed icon brings the panel back.
-window.syncToggles = function(){
-  var app = document.querySelector('.app');
-  if(!app) return;
-  function set(id, hidden){
-    var b = document.getElementById(id);
-    if(b) b.classList.toggle('off', hidden);
-  }
-  set('tgl-side', app.classList.contains('no-side'));
-  set('tgl-paper', app.classList.contains('no-paper'));
-  set('tgl-toc', !app.classList.contains('toc-open'));
-};
-// Toggle a layout column class on .app and persist it; syncToggles() updates the
-// matching icon's dimmed state. (TOC uses cls 'toc-open'; dialogs uses 'no-side'.)
-window.toggleCol = function(cls, key){
-  var app = document.querySelector('.app');
-  if(!app) return;
-  var on = app.classList.toggle(cls);
-  try { localStorage.setItem(key, on ? '1' : '0'); } catch(e){}
-  window.syncToggles();
-};
-(function(){
-  var app = document.querySelector('.app');
-  if(!app) return;
-  function restore(key, cls, defOn){
-    var v = null; try { v = localStorage.getItem(key); } catch(e){}
-    if(v === null) v = defOn ? '1' : '0';
-    app.classList.toggle(cls, v === '1');
-  }
-  restore('sidekick_toc', 'toc-open', true);          // TOC default open
-  restore('sidekick_noside', 'no-side', false);       // dialogs default shown
-  restore('sidekick_nopaper', 'no-paper', false);     // paper viewer default shown
-  restore('sidekick_paperhidden', 'paper-collapsed', false);  // paper text default shown
-  window.syncToggles();
-  window.buildTOC();
-})();
-// ---- drag-to-resize columns ------------------------------------------------
-(function(){
-  var app = document.querySelector('.app');
-  if(!app) return;
-  // For each handle: the CSS var it drives, the column it sizes, and the sign of
-  // the drag (side/paper sit left of their handle -> +dx widens; toc sits right
-  // of its handle -> -dx widens). min/max clamp the resulting width in px.
-  var SPEC = {
-    side:  {v:'--side-w',  el:'.side',  sign: 1, min:170, max:520},
-    paper: {v:'--paper-w', el:'.paper', sign: 1, min:220, max:900},
-    toc:   {v:'--toc-w',   el:'.toc',   sign:-1, min:160, max:520}
-  };
-  var KEY = 'sidekick_colw';
-  function load(){ try { return JSON.parse(localStorage.getItem(KEY)||'{}'); } catch(e){ return {}; } }
-  function save(o){ try { localStorage.setItem(KEY, JSON.stringify(o)); } catch(e){} }
-  var saved = load();
-  Object.keys(SPEC).forEach(function(k){
-    if(saved[k]) app.style.setProperty(SPEC[k].v, saved[k] + 'px');
-  });
-  var drag = null;
-  document.addEventListener('mousedown', function(e){
-    var g = e.target.closest && e.target.closest('.gutter');
-    if(!g) return;
-    var s = SPEC[g.getAttribute('data-resize')]; if(!s) return;
-    var col = document.querySelector(s.el); if(!col) return;
-    drag = {s:s, k:g.getAttribute('data-resize'), x:e.clientX,
-            w:col.getBoundingClientRect().width, g:g};
-    g.classList.add('dragging');
-    document.body.classList.add('col-resizing');
-    e.preventDefault();
-  });
-  document.addEventListener('mousemove', function(e){
-    if(!drag) return;
-    var w = drag.w + drag.s.sign * (e.clientX - drag.x);
-    w = Math.max(drag.s.min, Math.min(drag.s.max, w));
-    app.style.setProperty(drag.s.v, w + 'px');
-  });
-  document.addEventListener('mouseup', function(){
-    if(!drag) return;
-    var col = document.querySelector(drag.s.el);
-    var o = load();
-    o[drag.k] = Math.round(col.getBoundingClientRect().width);
-    save(o);
-    drag.g.classList.remove('dragging');
-    document.body.classList.remove('col-resizing');
-    drag = null;
-  });
-})();
-"""
+TOC_JS = _static_text("js/toc.js")
 
 
 def _paper_blocks(p: dict) -> list[str]:
@@ -2509,7 +1850,7 @@ def Page():
         # body content itself.
         # app.hdrs carries everything (htmx + CodeMirror + KaTeX + Sortable),
         # all served locally from /vendor — see _LOCAL_HDRS. Fully offline.
-        Head(Title("SolveIt Sidekick"), *app.hdrs, Style(CSS)),
+        Head(Title("SolveIt Sidekick"), *app.hdrs, Link(rel="stylesheet", href="/static/css/app.css")),
         Body(Div(
             # global top bar — above all columns, so its toggles stay reachable
             # even when the dialogs panel is hidden.
@@ -2552,6 +1893,14 @@ def Page():
                                   title="Generate retrieval-practice questions from this dialog"),
                                 cls="export-menu"),
                             cls="export"),
+                    Button("▶▶", cls="gear", type="button",
+                           title="Run all code cells in this dialog, top to bottom",
+                           hx_post="/cell/run-all", hx_target="#stream", hx_swap="outerHTML"),
+                    Button("⟳", cls="gear", type="button",
+                           title="Restart the kernel — clear all variables for this dialog",
+                           hx_post="/kernel/restart", hx_target="#stream", hx_swap="outerHTML",
+                           **{"hx-confirm": "Restart the kernel? This clears all variables "
+                                            "defined in this dialog."}),
                     A("📦 Libraries", href="/libraries", cls="gear",
                       title="Build Python packages from tagged cells",
                       style="font-size:13px;font-weight:500;white-space:nowrap"),
@@ -2571,74 +1920,15 @@ def Page():
                     cls="toc", id="toc"),
                 cls="cols"),
             cls="app" + (" paper-open" if STATE.get("paper") else ""),
-        ), Script(TOC_JS), Script(MSGLINK_JS)),
+        ), Script(src="/static/js/toc.js"), Script(src="/static/js/msglink.js")),
     )
 
 
 # ---- export (.ipynb / .md) --------------------------------------------------
-def _lines(s: str) -> list:
-    """nbformat wants source/text as a list of lines (keeping newlines)."""
-    return (s or "").splitlines(keepends=True)
-
-
-def _code_outputs(m) -> list:
-    outs = []
-    if m.output:
-        outs.append({"output_type": "stream", "name": "stdout", "text": _lines(m.output)})
-    for item in m.rich:
-        t, data = item.get("type", ""), item.get("data", "")
-        if t in ("image/png", "image/jpeg"):
-            outs.append({"output_type": "display_data", "data": {t: data}, "metadata": {}})
-        elif t == "text/html":
-            outs.append({"output_type": "display_data",
-                         "data": {"text/html": _lines(data)}, "metadata": {}})
-    return outs
-
-
-def _prompt_md(m) -> str:
-    md = f"**Prompt:** {m.content}"
-    if m.output:
-        md += f"\n\n**{m.model or 'AI'}:**\n\n{m.output}"
-    return md
-
-
-def to_ipynb(msgs) -> dict:
-    """Export cells to a Jupyter notebook: code→code cells (with outputs/plots),
-    notes→markdown, prompts→markdown (question + AI answer)."""
-    cells = []
-    for m in msgs:
-        cid = (m.id or "").lstrip("_") or "cell"      # nbformat cell id (no leading _)
-        if m.msg_type == "code":
-            cells.append({"id": cid, "cell_type": "code", "metadata": {}, "execution_count": None,
-                          "source": _lines(m.content), "outputs": _code_outputs(m)})
-        elif m.msg_type == "note":
-            cells.append({"id": cid, "cell_type": "markdown", "metadata": {},
-                          "source": _lines(m.content)})
-        else:
-            cells.append({"id": cid, "cell_type": "markdown", "metadata": {},
-                          "source": _lines(_prompt_md(m))})
-    return {"cells": cells, "nbformat": 4, "nbformat_minor": 5,
-            "metadata": {"kernelspec": {"name": "python3", "display_name": "Python 3",
-                                        "language": "python"},
-                         "language_info": {"name": "python"}}}
-
-
-def to_markdown(msgs) -> str:
-    """Export cells to a single Markdown document."""
-    out = []
-    for m in msgs:
-        if m.msg_type == "code":
-            out.append(f"```python\n{m.content}\n```")
-            if m.output:
-                out.append(f"```\n{m.output}\n```")
-            for item in m.rich:
-                if item.get("type", "").startswith("image/"):
-                    out.append(f"![output](data:{item['type']};base64,{item['data']})")
-        elif m.msg_type == "note":
-            out.append(m.content)
-        else:
-            out.append(_prompt_md(m))
-    return "\n\n".join(out) + "\n"
+# The pure notebook/markdown serializers live in sidekick.export_nb (no app
+# state). Re-exported here so existing references (incl. tests using app.to_ipynb
+# / app.to_markdown) keep resolving.
+from .export_nb import to_ipynb, to_markdown  # noqa: E402,F401
 
 
 # ---- routes -----------------------------------------------------------------
@@ -2661,9 +1951,9 @@ _LOCAL_HDRS = (
     Script(src="/vendor/python.min.js"),
     Script(src="/vendor/placeholder.min.js"),
     Script(src="/vendor/show-hint.min.js"),     # Ctrl+Space completion dropdown
-    Script(COMMENT_JS),                           # defines window.__toggleComment (Cmd/Ctrl+/)
-    Script(COMPLETE_JS),                          # defines window.__kernelHint
-    Script(STREAM_SEL_JS),                        # Ask-AI bubble over dialog-stream selections
+    Script(src="/static/js/comment.js"),                           # defines window.__toggleComment (Cmd/Ctrl+/)
+    Script(src="/static/js/complete.js"),                          # defines window.__kernelHint
+    Script(src="/static/js/stream_sel.js"),                        # Ask-AI bubble over dialog-stream selections
     Link(rel="stylesheet", href="/vendor/katex.min.css"),
     Script(src="/vendor/katex.min.js"),
     Script(src="/vendor/auto-render.min.js"),
@@ -2736,7 +2026,60 @@ class _LocalGuard:
         await PlainTextResponse(f"forbidden: {why}", status_code=403)(scope, receive, send)
 
 
+class _SessionScope:
+    """Pure-ASGI middleware that gives every browser session its own per-tab UI
+    state. Reads the `sk_sid` cookie (minting one on the response when absent),
+    and binds it to the _CUR_SID ContextVar for the duration of the request so
+    cur/set_cur/pop_cur — used deep inside the render helpers — resolve to THIS
+    session's overlay without every handler having to thread a session through.
+
+    The sid is an opaque random key into the in-process SESSIONS dict; it carries
+    no authority (the app is already loopback- and same-origin-guarded), it only
+    selects which tab's dialog/transients you see. Non-browser / cookie-less
+    callers (the MCP subprocess, tests calling handlers directly) never get a sid
+    → cur/set_cur fall back to the shared global STATE, exactly as before."""
+
+    _COOKIE = "sk_sid"
+
+    def __init__(self, app):
+        self.app = app
+
+    def _read_sid(self, scope) -> str | None:
+        for k, v in scope.get("headers", []):
+            if k == b"cookie":
+                for part in v.decode("latin-1").split(";"):
+                    name, _, val = part.strip().partition("=")
+                    if name == self._COOKIE and val:
+                        return val
+        return None
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        sid = self._read_sid(scope)
+        minted = sid is None
+        if minted:
+            sid = secrets.token_urlsafe(16)
+        token = _CUR_SID.set(sid)
+
+        async def _send(message):
+            if minted and message["type"] == "http.response.start":
+                message = dict(message)
+                headers = list(message.get("headers", []))
+                cookie = (f"{self._COOKIE}={sid}; Path=/; HttpOnly; SameSite=Lax")
+                headers.append((b"set-cookie", cookie.encode("latin-1")))
+                message["headers"] = headers
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        finally:
+            _CUR_SID.reset(token)
+
+
 app.add_middleware(_LocalGuard)
+app.add_middleware(_SessionScope)
 
 
 @app.on_event("startup")
@@ -2752,6 +2095,16 @@ def vendor(fname: str):
     from starlette.responses import FileResponse, PlainTextResponse
     p = (_VENDOR_DIR / fname).resolve()
     if p.is_relative_to(_VENDOR_DIR.resolve()) and p.is_file():
+        return FileResponse(p)
+    return PlainTextResponse("not found", status_code=404)
+
+
+@rt("/static/{fname:path}")
+def static(fname: str):
+    """Serve a bundled JS/CSS asset from sidekick/static (path-traversal guarded)."""
+    from starlette.responses import FileResponse, PlainTextResponse
+    p = (_STATIC_DIR / fname).resolve()
+    if p.is_relative_to(_STATIC_DIR.resolve()) and p.is_file():
         return FileResponse(p)
     return PlainTextResponse("not found", status_code=404)
 
@@ -2837,14 +2190,14 @@ def library_use(name: str = ""):
 def cell_export_to(id: str, lib: str = "", module: str = "core"):
     """Tag a code cell into `<lib>:<module>` (the per-cell library picker)."""
     backend = STATE["backend"]
-    m = _msg_by_id(backend, STATE["dialog"], id)
+    m = _msg_by_id(backend, cur("dialog"), id)
     if m is not None and m.msg_type == "code" and lib.strip():
         target = f"{lib.strip()}:{module.strip() or 'core'}"
         new = export.set_export_target(m.content, target)
         if isinstance(backend, _InMemoryBackend):
             m.content = new
         elif hasattr(backend, "update"):
-            backend.update(STATE["dialog"], id, new)
+            backend.update(cur("dialog"), id, new)
     return Stream()
 
 
@@ -2874,7 +2227,7 @@ def new_dialog():
     while f"untitled/dialog-{n}" in existing:
         n += 1
     _set_dialog(f"untitled/dialog-{n}")
-    STATE["backend"].messages(STATE["dialog"])  # touch -> create
+    STATE["backend"].messages(cur("dialog"))  # touch -> create
     return Page()
 
 
@@ -2891,10 +2244,10 @@ def _delete_dialogs(targets: list[str]):
             claude_cli.drop(d)
         except Exception:  # noqa: BLE001 — eviction is best-effort cleanup
             _dbg(f"drop({d!r}) failed during delete")
-    if STATE["dialog"] in targets:
+    if cur("dialog") in targets:
         remaining = backend.list_dialogs()
         _set_dialog(remaining[0] if remaining else "demo/welcome")
-        backend.messages(STATE["dialog"])       # touch -> ensure it exists
+        backend.messages(cur("dialog"))       # touch -> ensure it exists
 
 
 @rt("/dialog/delete", methods=["post"])
@@ -2918,7 +2271,7 @@ def dialog_duplicate(dialog: str):
     for m in list(backend.messages(dialog)):     # snapshot: copy preserves order
         backend.copy_cell(dialog, m.id, new)
     backend.messages(new)                        # touch -> exists even if source was empty
-    STATE["dialog"] = new
+    set_cur("dialog", new)
     return Page()
 
 
@@ -2948,14 +2301,14 @@ def send(content: str, msg_type: str = "prompt", model: str = None,
         backend = STATE["backend"]
         use_model = STATE["model"] if msg_type == "prompt" else None
         use_mode = STATE["ai_mode"] if msg_type == "prompt" else None
-        m = backend.add(STATE["dialog"], content, msg_type, model=use_model, ai_mode=use_mode)
-        STATE["scroll_to"] = m.id            # render scrolls to the new cell
+        m = backend.add(cur("dialog"), content, msg_type, model=use_model, ai_mode=use_mode)
+        set_cur("scroll_to", m.id)           # render scrolls to the new cell
         if msg_type == "prompt" and _can_stream(backend, use_model):
             # Defer the AI call: the page renders an SSE-wired answer that streams
             # tokens in (the browser opens /stream), instead of blocking here.
-            _set_pending_stream(STATE["dialog"], m.id)
+            _set_pending_stream(cur("dialog"), m.id)
         elif msg_type in ("code", "prompt"):
-            backend.exec(STATE["dialog"], m.id)
+            backend.exec(cur("dialog"), m.id)
     # The composer posts via htmx → swap just #stream (no full-page reload, so the
     # answer starts streaming sooner). A no-JS submit gets the whole page.
     return Stream() if (htmx and htmx.request) else Page()
@@ -2998,16 +2351,18 @@ def cell_run(id: str, content: str = ""):
     """Save a cell's edited source, then (re)execute it. Returns just the stream."""
     backend = STATE["backend"]
     if hasattr(backend, "update"):
-        backend.update(STATE["dialog"], id, content)
-    m = _msg_by_id(backend, STATE["dialog"], id)
+        backend.update(cur("dialog"), id, content)
+    m = _msg_by_id(backend, cur("dialog"), id)
     if m is not None and m.msg_type == "prompt" and _can_stream(backend, m.model):
-        _set_pending_stream(STATE["dialog"], id)          # re-ask, streamed live
+        _set_pending_stream(cur("dialog"), id)          # re-ask, streamed live
         # The #stream swap resets the scroll container to the top, so bring the
         # re-run cell (and its "Thinking…" spinner) back into view — otherwise a
         # mid-notebook re-ask looks frozen because the spinner is below the fold.
-        STATE["scroll_to"] = id
+        set_cur("scroll_to", id)
+    elif m is not None and m.msg_type == "code" and _exec_streams(backend):
+        _start_streamed_exec(backend, cur("dialog"), id)
     elif m is not None and m.msg_type in ("code", "prompt"):
-        backend.exec(STATE["dialog"], id)
+        backend.exec(cur("dialog"), id)
     return Stream()
 
 
@@ -3053,6 +2408,81 @@ def stream_answer(dialog: str, id: str):
         yield sse_message(Div("reload" if edited else ""), event="done")
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@rt("/exec_stream")
+def exec_stream(dialog: str, id: str, run_id: str):
+    """Server-Sent-Events: stream a code cell's execution output as it runs.
+
+    The browser's EventSource (see STREAM_JS) connects here for a code cell whose
+    run is pending. We poll the kernel's exec_poll ~4x/sec, emit the accumulated
+    stdout/stderr as `msg` events, and — when the run finishes — persist the final
+    output + rich outputs on the cell and emit a `done` event carrying 'reload' so
+    the client refreshes #stream (rendering plots and the normal Run button)."""
+    import time
+    backend = STATE["backend"]
+    m = _msg_by_id(backend, dialog, id)
+
+    def gen():
+        if m is None or not hasattr(backend, "exec_poll"):
+            _clear_pending_run(dialog, id)
+            yield sse_message(Div("reload"), event="done")
+            return
+        last = None
+        while True:
+            snap = backend.exec_poll(dialog, run_id)
+            out = snap.get("output", "")
+            if out != last:                              # push only when it changed
+                yield sse_message(Pre(out, cls="out"), event="msg")
+                last = out
+            if snap.get("done"):
+                m.output = out
+                m.rich = snap.get("rich", []) or []
+                if hasattr(backend, "_save"):
+                    backend._save()                      # flush to disk
+                _clear_pending_run(dialog, id)
+                # 'reload' → the client refreshes #stream so the finished cell
+                # (rich plots, restored Run button) renders in its resting state.
+                yield sse_message(Div("reload"), event="done")
+                return
+            time.sleep(0.25)                             # ~4 polls/sec
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@rt("/cell/stop", methods=["post"])
+def cell_stop(id: str):
+    """Interrupt a running code cell: raise KeyboardInterrupt in the kernel worker.
+    The cell's live EventSource then sees the run finish and reloads #stream."""
+    backend = STATE["backend"]
+    run_id = _pending_run_id(cur("dialog"), id)
+    if run_id and hasattr(backend, "exec_stop"):
+        backend.exec_stop(cur("dialog"), run_id)
+    return Div("", id=f"stop-{id}")                      # hx-swap="none": nothing to render
+
+
+@rt("/kernel/restart", methods=["post"])
+def kernel_restart():
+    """Restart the kernel for the current dialog: drop its server-side namespace via
+    the kernel's /reset endpoint, so the next run starts from a clean slate."""
+    backend = STATE["backend"]
+    dialog = cur("dialog")
+    if hasattr(backend, "reset"):
+        backend.reset(dialog)
+    set_cur("flash", "Kernel restarted — variables cleared.")
+    return Stream()
+
+
+@rt("/cell/run-all", methods=["post"])
+def cell_run_all():
+    """Run every code cell in the current dialog, top to bottom, sequentially —
+    reusing the blocking run path (a clean re-execution of the whole notebook)."""
+    backend = STATE["backend"]
+    dialog = cur("dialog")
+    for m in list(backend.messages(dialog)):
+        if m.msg_type == "code":
+            backend.exec(dialog, m.id)
+    return Stream()
 
 
 # ---- internal API for the AI's cell-editing MCP tools (server/mcp_cells) -----
@@ -3157,7 +2587,7 @@ def complete(code: str = "", line: int = 1, col: int = 0):
     comps = []
     if hasattr(backend, "complete"):
         try:
-            comps = backend.complete(STATE["dialog"], code, int(line), int(col))
+            comps = backend.complete(cur("dialog"), code, int(line), int(col))
         except Exception as e:  # noqa: BLE001
             _dbg(f"kernel completion failed: {e}")
             comps = []
@@ -3176,14 +2606,14 @@ def cell_save(id: str, content: str = ""):
     """Save a cell's edited source without executing (used by note cells)."""
     backend = STATE["backend"]
     if hasattr(backend, "update"):
-        backend.update(STATE["dialog"], id, content)
+        backend.update(cur("dialog"), id, content)
     return Stream()
 
 
 @rt("/cell/answer/edit")
 def cell_answer_edit(id: str):
     """Swap a prompt's AI answer into edit mode (textarea over its output)."""
-    bk, d = STATE["backend"], STATE["dialog"]
+    bk, d = STATE["backend"], cur("dialog")
     m = _msg_by_id(bk, d, id)
     if m is None or m.msg_type != "prompt" or not _can_edit_answer():
         return Stream()
@@ -3193,7 +2623,7 @@ def cell_answer_edit(id: str):
 @rt("/cell/answer/view")
 def cell_answer_view(id: str):
     """Swap a prompt's AI answer back to its rendered view — used by Cancel."""
-    bk, d = STATE["backend"], STATE["dialog"]
+    bk, d = STATE["backend"], cur("dialog")
     m = _msg_by_id(bk, d, id)
     return _answer_view(m) if m is not None and m.msg_type == "prompt" else Stream()
 
@@ -3202,7 +2632,7 @@ def cell_answer_view(id: str):
 def cell_answer_save(id: str, output: str = ""):
     """Persist an edited AI answer in place (no re-ask), then render it read-only.
     Only prompt cells have an editable answer, so other types are left untouched."""
-    bk, d = STATE["backend"], STATE["dialog"]
+    bk, d = STATE["backend"], cur("dialog")
     m = _msg_by_id(bk, d, id)
     if m is None or m.msg_type != "prompt":
         return Stream()
@@ -3215,7 +2645,7 @@ def cell_answer_save(id: str, output: str = ""):
 def cell_delete(id: str):
     backend = STATE["backend"]
     if hasattr(backend, "delete"):
-        backend.delete(STATE["dialog"], id)
+        backend.delete(cur("dialog"), id)
     return Stream()
 
 
@@ -3224,7 +2654,7 @@ def cell_type(id: str, msg_type: str = "code"):
     """Convert a cell to another type in place (y=code, m=note, i=prompt)."""
     backend = STATE["backend"]
     if hasattr(backend, "set_type"):
-        backend.set_type(STATE["dialog"], id, msg_type)
+        backend.set_type(cur("dialog"), id, msg_type)
     return Stream()
 
 
@@ -3233,7 +2663,7 @@ def cell_undo():
     """Restore the last deleted cell in this dialog (Jupyter's 'z')."""
     backend = STATE["backend"]
     if hasattr(backend, "undo"):
-        backend.undo(STATE["dialog"])
+        backend.undo(cur("dialog"))
     return Stream()
 
 
@@ -3242,7 +2672,7 @@ def cell_mute(id: str):
     """Toggle whether this cell is included in the AI's notebook context."""
     backend = STATE["backend"]
     if hasattr(backend, "set_muted"):
-        backend.set_muted(STATE["dialog"], id)
+        backend.set_muted(cur("dialog"), id)
     return Stream()
 
 
@@ -3251,7 +2681,7 @@ def cell_pin(id: str):
     """Toggle whether this cell is pinned into context (survives trimming)."""
     backend = STATE["backend"]
     if hasattr(backend, "set_pinned"):
-        backend.set_pinned(STATE["dialog"], id)
+        backend.set_pinned(cur("dialog"), id)
     return Stream()
 
 
@@ -3259,20 +2689,20 @@ def cell_pin(id: str):
 def cell_export(id: str):
     """Toggle this code cell's `#| export` directive (whether it's tangled into the package)."""
     backend = STATE["backend"]
-    m = _msg_by_id(backend, STATE["dialog"], id)
+    m = _msg_by_id(backend, cur("dialog"), id)
     if m is not None and m.msg_type == "code":
         new = export.toggle_export(m.content)
         if isinstance(backend, _InMemoryBackend):
             m.content = new                  # a directive is a no-op comment — keep the cell's output
         elif hasattr(backend, "update"):
-            backend.update(STATE["dialog"], id, new)
+            backend.update(cur("dialog"), id, new)
     return Stream()
 
 
 @rt("/export/package")
 def export_package():
     """Tangle the current dialog's `#| export` cells into a downloadable package zip."""
-    dialog = STATE["dialog"]
+    dialog = cur("dialog")
     msgs = STATE["backend"].messages(dialog)
     pkg = export.slug(dialog)
     files = export.dialog_to_package(msgs, dialog, dialog_name=dialog)
@@ -3283,7 +2713,7 @@ def export_package():
 @rt("/cell/edit")
 def cell_edit(id: str):
     """Swap a single cell into edit mode (raw textarea)."""
-    bk, d = STATE["backend"], STATE["dialog"]
+    bk, d = STATE["backend"], cur("dialog")
     m = _msg_by_id(bk, d, id)
     return _cell_edit(m, num=_cell_number(bk, d, id)) if m else Stream()
 
@@ -3291,7 +2721,7 @@ def cell_edit(id: str):
 @rt("/cell/view")
 def cell_view(id: str):
     """Swap a single cell back to its rendered (read-only) view — used by Cancel."""
-    bk, d = STATE["backend"], STATE["dialog"]
+    bk, d = STATE["backend"], cur("dialog")
     m = _msg_by_id(bk, d, id)
     return MsgRow(m, num=_cell_number(bk, d, id)) if m else Stream()
 
@@ -3300,16 +2730,18 @@ def cell_view(id: str):
 def cell_exec(id: str):
     """Re-run a cell's stored source without editing (the rendered-view Run/Ask)."""
     backend = STATE["backend"]
-    m = _msg_by_id(backend, STATE["dialog"], id)
+    m = _msg_by_id(backend, cur("dialog"), id)
     if m is not None and m.msg_type == "prompt" and _can_stream(backend, m.model):
         m.output = ""                                     # clear stale answer to re-stream
-        _set_pending_stream(STATE["dialog"], id)          # re-ask, streamed live
+        _set_pending_stream(cur("dialog"), id)          # re-ask, streamed live
         # The #stream swap resets the scroll container to the top, so a mid-notebook
         # re-run looks frozen — the "Thinking…" spinner is below the fold. Bring the
         # re-run cell back into view (matches /cell/run).
-        STATE["scroll_to"] = id
+        set_cur("scroll_to", id)
+    elif m is not None and m.msg_type == "code" and _exec_streams(backend):
+        _start_streamed_exec(backend, cur("dialog"), id)
     elif m is not None:
-        backend.exec(STATE["dialog"], id)
+        backend.exec(cur("dialog"), id)
     return Stream()
 
 
@@ -3320,9 +2752,9 @@ def cell_insert(id: str, msg_type: str = "code", where: str = "below"):
     if msg_type not in ("code", "note", "prompt"):
         msg_type = "code"
     if hasattr(backend, "insert"):
-        m = backend.insert(STATE["dialog"], "", msg_type, anchor_id=id,
+        m = backend.insert(cur("dialog"), "", msg_type, anchor_id=id,
                            above=(where == "above"))
-        STATE["editing"] = m.id
+        set_cur("editing", m.id)
     return Stream()
 
 
@@ -3332,9 +2764,9 @@ def cell_copy(id: str, target: str = ""):
     dialog — the stream re-renders unchanged but for a one-shot flash confirming where
     the copy landed."""
     backend = STATE["backend"]
-    if target and target != STATE["dialog"] and hasattr(backend, "copy_cell"):
-        m = backend.copy_cell(STATE["dialog"], id, target)
-        STATE["flash"] = f"Copied cell to “{target}”" if m else "Couldn't copy that cell."
+    if target and target != cur("dialog") and hasattr(backend, "copy_cell"):
+        m = backend.copy_cell(cur("dialog"), id, target)
+        set_cur("flash", f"Copied cell to “{target}”" if m else "Couldn't copy that cell.")
     return Stream()
 
 
@@ -3344,20 +2776,119 @@ def cell_split(id: str):
     answer and insert them as runnable code cells just below it, in order. The
     cells aren't auto-run — the user still runs each one (small-steps contract)."""
     backend = STATE["backend"]
-    m = _msg_by_id(backend, STATE["dialog"], id)
+    m = _msg_by_id(backend, cur("dialog"), id)
     if m is not None and m.msg_type == "prompt" and hasattr(backend, "insert"):
         anchor, last = id, None
         for lang, code in _answer_code_blocks(m.output):
             # mermaid isn't kernel code — land it in a note, which renders the fence
             # as a diagram; everything else becomes a runnable code cell.
             if lang == "mermaid":
-                last = backend.insert(STATE["dialog"], f"```mermaid\n{code}\n```",
+                last = backend.insert(cur("dialog"), f"```mermaid\n{code}\n```",
                                       "note", anchor_id=anchor)
             else:
-                last = backend.insert(STATE["dialog"], code, "code", anchor_id=anchor)
+                last = backend.insert(cur("dialog"), code, "code", anchor_id=anchor)
             anchor = last.id
         if last is not None:
-            STATE["scroll_to"] = last.id
+            set_cur("scroll_to", last.id)
+    return Stream()
+
+
+# ── Faded scaffolding (F6) ───────────────────────────────────────────────────
+# A "faded exercise" is just an ordinary CODE cell (no new cell type) whose first
+# line is this marker comment — that both tells the learner what to do and lets
+# us detect the cell so re-fading updates it in place instead of stacking copies.
+_EXERCISE_HEADER = "# ✏️ Exercise — fill in the ___ blanks (faded from the worked cell above)"
+
+
+def _exercise_content(faded: str) -> str:
+    """Wrap faded code as an exercise cell (marker header + the faded body)."""
+    return f"{_EXERCISE_HEADER}\n{faded}"
+
+
+def _is_exercise(content: str) -> bool:
+    return (content or "").lstrip().startswith(_EXERCISE_HEADER)
+
+
+def _strip_exercise_marker(content: str) -> str:
+    """The learner's attempt without the marker header line."""
+    lines = (content or "").splitlines()
+    if lines and lines[0].lstrip().startswith(_EXERCISE_HEADER):
+        lines = lines[1:]
+    return "\n".join(lines)
+
+
+def _fade_source(msgs, idx: int):
+    """The worked code cell an exercise at position `idx` was faded from: the
+    nearest preceding code cell that is not itself an exercise."""
+    for j in range(idx - 1, -1, -1):
+        s = msgs[j]
+        if s.msg_type == "code" and not _is_exercise(s.content):
+            return s
+    return None
+
+
+@rt("/cell/fade", methods=["post"])
+def cell_fade(id: str, level: int = 1):
+    """Fade a worked code cell into a graded exercise — a cell TRANSFORM in the
+    same spirit as "Split to code" (`/cell/split`).
+
+    From a worked (non-exercise) code cell it inserts ONE derived exercise cell
+    below at `level` (reusing the same `backend.insert` split uses); if an
+    exercise already sits directly below, it re-fades that in place. Called on an
+    existing exercise cell it re-fades in place from its worked source above —
+    so `level` 0/1/2 = "show worked answer" / "fill-in" / "from scratch"."""
+    backend = STATE["backend"]
+    if not hasattr(backend, "insert"):
+        return Stream()
+    msgs = backend.messages(cur("dialog"))
+    idx = next((i for i, m in enumerate(msgs) if m.id == id), None)
+    if idx is None or msgs[idx].msg_type != "code":
+        return Stream()
+    m = msgs[idx]
+
+    if _is_exercise(m.content):
+        src = _fade_source(msgs, idx)
+        if src is None:
+            return Stream()
+        content = _exercise_content(scaffold.fade_code(src.content, level))
+        if hasattr(backend, "update"):
+            backend.update(cur("dialog"), m.id, content)
+        set_cur("scroll_to", m.id)
+        return Stream()
+
+    content = _exercise_content(scaffold.fade_code(m.content, level))
+    nxt = msgs[idx + 1] if idx + 1 < len(msgs) else None
+    if nxt is not None and nxt.msg_type == "code" and _is_exercise(nxt.content) \
+            and hasattr(backend, "update"):
+        backend.update(cur("dialog"), nxt.id, content)
+        set_cur("scroll_to", nxt.id)
+    else:
+        new = backend.insert(cur("dialog"), content, "code", anchor_id=id)
+        set_cur("scroll_to", new.id)
+    return Stream()
+
+
+@rt("/cell/check", methods=["post"])
+def cell_check(id: str):
+    """AI-check step for a faded exercise. This does NOT add any AI wiring: it
+    inserts an ordinary prompt cell pre-filled with `scaffold.check_prompt(...)`
+    below the exercise, then drops the learner into it so they hit the existing
+    "Ask" button — the answer streams through the normal `/cell/run` prompt path
+    with full dialog context."""
+    backend = STATE["backend"]
+    if not hasattr(backend, "insert"):
+        return Stream()
+    msgs = backend.messages(cur("dialog"))
+    idx = next((i for i, m in enumerate(msgs) if m.id == id), None)
+    if idx is None:
+        return Stream()
+    src = _fade_source(msgs, idx)
+    original = src.content if src is not None else ""
+    attempt = _strip_exercise_marker(msgs[idx].content)
+    prompt = scaffold.check_prompt(original, attempt)
+    m = backend.insert(cur("dialog"), prompt, "prompt", anchor_id=id)
+    set_cur("editing", m.id)         # let the learner review, then click Ask
+    set_cur("scroll_to", m.id)
     return Stream()
 
 
@@ -3368,7 +2899,7 @@ def cell_move(ids: str = ""):
     backend = STATE["backend"]
     order = [i for i in ids.split(",") if i]
     if order and hasattr(backend, "reorder"):
-        backend.reorder(STATE["dialog"], order)
+        backend.reorder(cur("dialog"), order)
     return ""
 
 
@@ -3380,15 +2911,15 @@ def _download(body: str, fname: str, media: str):
 
 @rt("/export/ipynb")
 def export_ipynb():
-    msgs = STATE["backend"].messages(STATE["dialog"])
-    fname = STATE["dialog"].replace("/", "-") + ".ipynb"
+    msgs = STATE["backend"].messages(cur("dialog"))
+    fname = cur("dialog").replace("/", "-") + ".ipynb"
     return _download(json.dumps(to_ipynb(msgs), indent=1), fname, "application/x-ipynb+json")
 
 
 @rt("/export/md")
 def export_md():
-    msgs = STATE["backend"].messages(STATE["dialog"])
-    fname = STATE["dialog"].replace("/", "-") + ".md"
+    msgs = STATE["backend"].messages(cur("dialog"))
+    fname = cur("dialog").replace("/", "-") + ".md"
     return _download(to_markdown(msgs), fname, "text/markdown; charset=utf-8")
 
 
@@ -3405,11 +2936,11 @@ def publish_blog():
     from datetime import date
     from starlette.responses import RedirectResponse
     from . import blog
-    dialog = STATE["dialog"]
+    dialog = cur("dialog")
     result = blog.publish_dialog(STATE["backend"], dialog, blog.default_blog_dir(),
                                  title="Sidekick Blog", date=date.today().isoformat())
     if not result["render_ok"]:
-        STATE["flash"] = f"Post written to {blog.default_blog_dir()} — {result['render_detail']}"
+        set_cur("flash", f"Post written to {blog.default_blog_dir()} — {result['render_detail']}")
         return RedirectResponse("/", status_code=303)
     return RedirectResponse(f"/blog/posts/{result['slug']}.html", status_code=303)
 
@@ -3429,7 +2960,7 @@ def recall_quiz(n: int = 5):
     from starlette.responses import RedirectResponse
     from . import recall
     backend = STATE["backend"]
-    dialog = STATE["dialog"]
+    dialog = cur("dialog")
     prompt = recall.build_quiz_prompt(backend.messages(dialog), n=n)
     # A distinct session key ("recall:<dialog>") so quizzing never disturbs the
     # dialog's own resumable CLI session or its running cost tally.
@@ -3439,7 +2970,7 @@ def recall_quiz(n: int = 5):
                                 "then Ask AI to check.", "note")
     for q in questions:
         backend.add(dialog, q, "prompt")
-    STATE["scroll_to"] = intro.id            # bring the fresh quiz into view
+    set_cur("scroll_to", intro.id)           # bring the fresh quiz into view
     return RedirectResponse("/", status_code=303)
 
 
@@ -3597,7 +3128,7 @@ def _append_passage(p: dict, text: str):
     backend.add(dialog, text, "note")            # the passage to read…
     code = backend.add(dialog, "", "code")       # …and a cell to reimplement it
     _set_dialog(dialog)
-    STATE["editing"] = code.id                   # open the code cell, focused & in view
+    set_cur("editing", code.id)                  # open the code cell, focused & in view
 
 
 @rt("/paper/step", methods=["post"])

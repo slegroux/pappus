@@ -354,6 +354,28 @@ class _InMemoryBackend:
                                  + [m for m in lst if m.id not in listed])
         self._save()
 
+    # ---- trivial synchronous stand-in for the async exec protocol -----------
+    # The real kernel (HttpKernelBackend) streams a run over exec_start/poll/stop.
+    # An in-process backend has no long-running worker to stream, so it runs the
+    # cell synchronously in exec_start and reports it already done on the first
+    # poll — the app's streaming path then works unchanged (one poll, then done)
+    # without a live kernel. HttpKernelBackend overrides all three with real HTTP.
+    def exec_start(self, dialog: str, msg_id: str) -> str:
+        m = self.exec(dialog, msg_id)     # run now (mock output or subclass exec)
+        run_id = "_run_" + uuid.uuid4().hex[:8]
+        runs = self.__dict__.setdefault("_runs", {})
+        runs[run_id] = {"output": m.output, "rich": list(getattr(m, "rich", []) or []),
+                        "done": True, "error": None, "interrupted": False}
+        return run_id
+
+    def exec_poll(self, dialog: str, run_id: str) -> dict:
+        runs = self.__dict__.get("_runs", {})
+        return runs.get(run_id, {"output": "", "rich": [], "done": True,
+                                 "error": None, "interrupted": False})
+
+    def exec_stop(self, dialog: str, run_id: str) -> dict:
+        return {"ok": True, "done": True}   # already completed synchronously
+
     def copy_cell(self, src_dialog: str, msg_id: str, dst_dialog: str) -> Msg | None:
         """Copy a single cell into another dialog, appended at the end. The clone
         gets a fresh id (and its own `rich` list) so the two dialogs stay fully
@@ -483,6 +505,45 @@ class HttpKernelBackend(_InMemoryBackend):
         with self._req.urlopen(req, timeout=t) as r:
             return json.loads(r.read().decode())
 
+    def _get(self, path: str, timeout: float | None = None) -> dict:
+        import json
+        req = self._req.Request(self.base + path,
+                                headers={"Cookie": f"_solveit={self.target.token}"})
+        t = timeout if timeout is not None else 30
+        with self._req.urlopen(req, timeout=t) as r:
+            return json.loads(r.read().decode())
+
+    # ---- streaming / interruptible code execution ---------------------------
+    # exec_start kicks off an async run on the kernel and returns immediately with a
+    # run_id; the app then polls exec_poll a few times a second (over SSE) to stream
+    # partial stdout into the cell, and can exec_stop to interrupt a runaway loop.
+    # All three degrade gracefully (like exec/complete) so a dead kernel never
+    # blows up the caller — the UI just falls back to a readable error.
+    def exec_start(self, dialog: str, msg_id: str) -> str | None:
+        m = self._find(dialog, msg_id)
+        code = m.content if m is not None else ""
+        try:
+            r = self._post("/exec_start", {"dialog": dialog, "code": code})
+            return r.get("run_id")
+        except (urllib.error.URLError, TimeoutError, OSError):
+            return None
+
+    def exec_poll(self, dialog: str, run_id: str) -> dict:
+        from urllib.parse import quote
+        try:
+            return self._get(f"/exec_poll?dialog={quote(dialog)}&run_id={quote(run_id)}")
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            # A poll failure ends the stream with a readable error rather than
+            # hanging the SSE generator forever.
+            return {"output": f"[kernel error: {e}]", "done": True, "rich": [],
+                    "error": str(e), "interrupted": False}
+
+    def exec_stop(self, dialog: str, run_id: str) -> dict:
+        try:
+            return self._post("/exec_stop", {"dialog": dialog, "run_id": run_id})
+        except (urllib.error.URLError, TimeoutError, OSError) as e:
+            return {"ok": False, "error": str(e)}
+
     def exec(self, dialog: str, msg_id: str) -> Msg:
         m = self._find(dialog, msg_id)
         if m is None:
@@ -510,6 +571,16 @@ class HttpKernelBackend(_InMemoryBackend):
             m.output = r["output"]
         self._save()                         # persist the new output/plots
         return m
+
+    def reset(self, dialog: str) -> bool:
+        """Restart the kernel for `dialog`: drop its server-side namespace via the
+        kernel's /reset endpoint so the next run starts clean. Best-effort — a dead
+        kernel just yields False rather than blowing up the caller."""
+        try:
+            r = self._post("/reset", {"dialog": dialog})
+            return bool(r.get("ok"))
+        except Exception:  # noqa: BLE001 — never break the UI over a restart
+            return False
 
     def add_syspath(self, path: str) -> bool:
         """Put `path` on the kernel's sys.path so a built library there becomes
