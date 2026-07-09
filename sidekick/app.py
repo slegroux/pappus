@@ -19,10 +19,20 @@ from fasthtml.common import *
 from starlette.datastructures import UploadFile
 
 from .targets import get_target, list_targets, list_models, default_model
-from .client import connect, build_context, est_tokens, _InMemoryBackend
-from .claude_cli import stream as stream_claude, cost_for, CLI_MODELS, AI_MODES, DEFAULT_MODE
+from .client import connect, build_context, est_tokens, _InMemoryBackend, MockBackend
+from .claude_cli import (stream as stream_claude, call as call_claude,
+                         cost_for, CLI_MODELS, AI_MODES, DEFAULT_MODE)
 from . import secrets_store, export, libraries, nbdev_export
 from . import paper as paperlib
+
+
+def _dbg(msg):
+    """Log to stderr only when SIDEKICK_DEBUG is truthy, so the broad
+    `except ... # noqa: BLE001` handlers that silently degrade become
+    diagnosable without changing default (flag-unset) behavior."""
+    if os.environ.get("SIDEKICK_DEBUG"):
+        import sys
+        print(f"[sidekick] {msg}", file=sys.stderr)
 
 
 # ---- code highlighting (server-side; works offline, no CDN) -----------------
@@ -77,7 +87,9 @@ try:
         fence (``` with no language) is treated as plain text rather than Python —
         it's usually ASCII art or console output, not code to tokenise."""
         return _highlight(src, lang or "text", _pyg_fmt_light)
-except Exception:  # noqa: BLE001 — degrade to a plain code block if pygments is missing
+except Exception as e:  # noqa: BLE001 — degrade to a plain code block if pygments is missing
+    _dbg(f"pygments unavailable; plain code blocks: {e}")
+
     def _highlight(src: str, lang: str = "", fmt=None) -> str | None:
         return None
 
@@ -113,7 +125,8 @@ try:
     # emitting \(…\) (inline) and $$…$$ (block) for KaTeX to render client-side.
     _md = mistune.create_markdown(renderer=_MdRenderer(escape=True),
                                   plugins=["strikethrough", "table", "math"])
-except Exception:  # noqa: BLE001 — degrade to plain text if mistune is missing
+except Exception as e:  # noqa: BLE001 — degrade to plain text if mistune is missing
+    _dbg(f"mistune unavailable; plain-text markdown: {e}")
     _md = None
 
 
@@ -239,7 +252,25 @@ def use_target(name: str):
         STATE["dialog"] = backend.list_dialogs()[0] if backend.list_dialogs() else "demo/welcome"
 
 
-use_target(_initial_target())
+def _ensure_target() -> None:
+    """Resolve the configured target for real (config read + network probe),
+    once. Deferred out of import so `import sidekick.app` does no network I/O and
+    doesn't require targets.yaml; run on app startup (see the startup hook below)."""
+    if STATE.get("_target_ready"):
+        return
+    STATE["_target_ready"] = True
+    use_target(_initial_target())
+
+
+# Import-time default: a working in-memory backend so the module imports with no
+# network call and no targets.yaml. The real target is resolved on startup (or by
+# the first server request) via _ensure_target(); until then this mock keeps the
+# UI and the (non-served) test suite functional.
+STATE["backend"] = MockBackend()
+try:
+    STATE["target_name"] = _initial_target()   # config-only (no network); best-effort
+except Exception:  # noqa: BLE001 — no config yet; resolved for real on startup
+    _dbg("initial target unresolved at import; deferring to startup")
 
 # ---- styling: Claude desktop look ------------------------------------------
 CSS = """
@@ -674,7 +705,11 @@ def _dialog_leaf(label, full, active):
           cls=f"conv{' active' if full == active else ''}"),
         Details(
             Summary("⋯", cls="conv-dots", title="Dialog actions"),
-            Div(Button("🗑  Delete", type="button", cls="conv-del", **{"data-dialog": full}),
+            Div(Form(Input(type="hidden", name="dialog", value=full),
+                     Button("⧉  Duplicate", type="submit", cls="conv-dup",
+                            title="Copy all cells into a new '<name> copy' dialog"),
+                     method="post", action="/dialog/duplicate", style="margin:0"),
+                Button("🗑  Delete", type="button", cls="conv-del", **{"data-dialog": full}),
                 cls="conv-menu"),
             cls="conv-actions"),
         cls="conv-row")
@@ -760,9 +795,18 @@ def Sidebar():
         Button("🗑 Delete", type="button", cls="sel-del", onclick="window.__deleteDialogSel()"),
         Button("Clear", type="button", cls="sel-clear", onclick="window.__clearDialogSel()"),
         id="selBar", cls="sel-bar", style="display:none")
+    # A small "Recent" section on top of the (alphabetical) tree: the most
+    # recently created/touched dialogs first, so active work stays one click away.
+    # list_dialogs() is in store order (newest appended last) → reverse it.
+    recent = list(reversed(names))[:5]
+    recent_section = (
+        [Div("Recent", cls="seclabel"),
+         *[_dialog_leaf(r.rsplit("/", 1)[-1], r, STATE["dialog"]) for r in recent]]
+        if len(names) > 1 else [])
     return Div(
         Div(Span("S", cls="dot"), "SolveIt Sidekick", cls="brand"),
         A("✎  New dialog", href="/new", cls="newbtn"),
+        *recent_section,
         Div("Dialogs", cls="seclabel", title="Shift/⌘-click to select several, then Delete"),
         sel_bar,
         *_render_dialog_nodes(tree, STATE["dialog"]),
@@ -922,8 +966,8 @@ def _model_label(mid: str | None, default: str = "Claude (Max)") -> str:
         for m in list_models():
             if m["id"] == mid:
                 return m["label"]
-    except Exception:  # noqa: BLE001 — config issue: show the id rather than crash
-        pass
+    except Exception as e:  # noqa: BLE001 — config issue: show the id rather than crash
+        _dbg(f"_model_label({mid!r}) fell back to raw id: {e}")
     return mid
 
 
@@ -938,6 +982,9 @@ def _rich_view(item):
         return Div(NotStr(data), cls="cell-svg")
     if t == "text/html":
         return Div(NotStr(data), cls="cell-html")
+    if t == "audio/wav":
+        # Kernel-emitted audio (e.g. IPython.display.Audio) — an inline player.
+        return Audio(controls=True, src=f"data:audio/wav;base64,{data}", cls="cell-audio")
     return Div(data, cls="out")
 
 
@@ -2019,6 +2066,9 @@ def _lib_result_banner(result):
 def LibrariesPage(result=None, saved=False):
     backend = STATE["backend"]
     has_kernel = hasattr(backend, "add_syspath")
+    # The remote SolveIt LiveBackend can't enumerate dialogs (list_dialogs() -> []),
+    # so a cross-dialog build would silently show nothing tagged. Flag it instead.
+    live_cliff = (getattr(backend, "live", False) and not backend.list_dialogs())
     cards = []
     for lib in libraries.load():
         mods = nbdev_export.gather(backend, lib["name"])
@@ -2066,6 +2116,9 @@ def LibrariesPage(result=None, saved=False):
                 Div(A("←  Back", href="/", cls="back"), Div("Libraries", cls="title"),
                     cls="settings-top"),
                 (Div("✓ Saved.", cls="saved") if saved else ""),
+                (Div("⚠ Cross-dialog build needs the local kernel backend (the live "
+                     "SolveIt backend can't enumerate dialogs yet).", cls="banner")
+                 if live_cliff else ""),
                 _lib_result_banner(result),
                 Div("Build a Python library from cells tagged across your dialogs. Sidekick "
                     "projects them into an nbdev project; nbdev builds the package. See the "
@@ -2448,6 +2501,8 @@ def Page():
                                 A("Python package (.zip)", href="/export/package"),
                                 A("Publish to blog", href="/publish/blog", target="_blank",
                                   title="Build this dialog into your Quarto blog and open it"),
+                                A("Recall / Quiz me", href="/recall",
+                                  title="Generate retrieval-practice questions from this dialog"),
                                 cls="export-menu"),
                             cls="export"),
                     A("📦 Libraries", href="/libraries", cls="gear",
@@ -2575,12 +2630,81 @@ app, rt = fast_app(pico=False, default_hdrs=False, hdrs=_LOCAL_HDRS)
 app.routes[:] = [r for r in app.routes if getattr(r, "path", "") != "/{fname:path}.{ext:static}"]
 
 
+# ---- localhost-only defense (Host/Origin) ----------------------------------
+# The app executes code on the box it runs on; without this a malicious web page
+# could drive its POST routes (/send, /cell/run, /cell/exec) cross-origin. We
+# gate on Host (must be loopback) and, for POSTs, same-origin. "testserver" is
+# allowed so the Starlette TestClient (its default Host) keeps working.
+_ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "testserver"})
+
+
+def _host_only(raw: str) -> str:
+    """The host part of a Host header, port stripped (handles IPv6 brackets)."""
+    raw = (raw or "").strip()
+    if raw.startswith("["):                      # [::1] or [::1]:8000
+        return raw[1:raw.index("]")] if "]" in raw else raw
+    if raw.count(":") == 1:                       # host:port
+        return raw.rsplit(":", 1)[0]
+    return raw                                     # bare host, or bare IPv6 (no port)
+
+
+class _LocalGuard:
+    """Pure-ASGI middleware (kept pure so it never buffers the /stream SSE
+    response the way BaseHTTPMiddleware can)."""
+
+    def __init__(self, app):
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        headers = {k.decode("latin-1").lower(): v.decode("latin-1")
+                   for k, v in scope.get("headers", [])}
+        host_hdr = headers.get("host", "")
+        if _host_only(host_hdr) not in _ALLOWED_HOSTS:
+            await self._forbid(scope, receive, send, "host not allowed")
+            return
+        # Sec-Fetch-Site is set by browsers and cannot be spoofed from JS, so it
+        # catches cross-site requests the Origin check misses (absent Origin on a
+        # POST, and state-changing GET routes like /new or /publish/blog). Non-
+        # browser clients omit it entirely → treated as trusted (on a loopback
+        # bind that means local processes, which already have full access).
+        sfs = headers.get("sec-fetch-site")
+        if sfs and sfs not in ("same-origin", "none"):
+            await self._forbid(scope, receive, send, f"cross-site request ({sfs})")
+            return
+        if scope["method"] == "POST":
+            origin = headers.get("origin")
+            if origin:
+                from urllib.parse import urlparse
+                if urlparse(origin).netloc != host_hdr:   # cross-origin POST
+                    await self._forbid(scope, receive, send, "cross-origin POST")
+                    return
+        await self.app(scope, receive, send)
+
+    async def _forbid(self, scope, receive, send, why):
+        from starlette.responses import PlainTextResponse
+        _dbg(f"blocked request: {why}")
+        await PlainTextResponse(f"forbidden: {why}", status_code=403)(scope, receive, send)
+
+
+app.add_middleware(_LocalGuard)
+
+
+@app.on_event("startup")
+def _resolve_target_on_startup():
+    """Resolve the configured target (config + network probe) when the server
+    actually starts, so import stays side-effect-free (S8)."""
+    _ensure_target()
+
+
 @rt("/vendor/{fname:path}")
 def vendor(fname: str):
     """Serve a vendored front-end asset (with a path-traversal guard)."""
     from starlette.responses import FileResponse, PlainTextResponse
     p = (_VENDOR_DIR / fname).resolve()
-    if str(p).startswith(str(_VENDOR_DIR.resolve())) and p.is_file():
+    if p.is_relative_to(_VENDOR_DIR.resolve()) and p.is_file():
         return FileResponse(p)
     return PlainTextResponse("not found", status_code=404)
 
@@ -2714,6 +2838,12 @@ def _delete_dialogs(targets: list[str]):
     if hasattr(backend, "delete_dialog"):
         for d in targets:
             backend.delete_dialog(d)
+    for d in targets:                              # evict any lingering CLI session/cost
+        try:
+            from . import claude_cli
+            claude_cli.drop(d)
+        except Exception:  # noqa: BLE001 — eviction is best-effort cleanup
+            _dbg(f"drop({d!r}) failed during delete")
     if STATE["dialog"] in targets:
         remaining = backend.list_dialogs()
         STATE["dialog"] = remaining[0] if remaining else "demo/welcome"
@@ -2724,6 +2854,24 @@ def _delete_dialogs(targets: list[str]):
 def dialog_delete(dialog: str):
     """Delete one dialog (the row's ⋯ menu)."""
     _delete_dialogs([dialog])
+    return Page()
+
+
+@rt("/dialog/duplicate", methods=["post"])
+def dialog_duplicate(dialog: str):
+    """Copy an entire dialog's cells into a fresh '<name> copy' dialog, then open
+    it. Reuses the per-cell copy so each clone gets its own id/rich list."""
+    backend = STATE["backend"]
+    if not hasattr(backend, "copy_cell"):
+        return Page()
+    existing = set(backend.list_dialogs())
+    new = f"{dialog} copy"
+    while new in existing:                       # avoid clobbering an earlier copy
+        new += " copy"
+    for m in list(backend.messages(dialog)):     # snapshot: copy preserves order
+        backend.copy_cell(dialog, m.id, new)
+    backend.messages(new)                        # touch -> exists even if source was empty
+    STATE["dialog"] = new
     return Page()
 
 
@@ -2944,7 +3092,8 @@ def complete(code: str = "", line: int = 1, col: int = 0):
     if hasattr(backend, "complete"):
         try:
             comps = backend.complete(STATE["dialog"], code, int(line), int(col))
-        except Exception:  # noqa: BLE001
+        except Exception as e:  # noqa: BLE001
+            _dbg(f"kernel completion failed: {e}")
             comps = []
     return _json({"completions": comps})
 
@@ -3199,6 +3348,35 @@ def publish_blog():
     return RedirectResponse(f"/blog/posts/{export.slug(dialog)}.html", status_code=303)
 
 
+@rt("/recall")
+def recall_quiz(n: int = 5):
+    """Quiz the current dialog: ask the AI for `n` recall questions from its cells
+    and drop them in as unanswered prompt cells for retrieval practice.
+
+    A dialog is a literate record of what you worked through; recall is the
+    projection that hides it and asks you to reconstruct it (the testing effect).
+    Each question lands as a `prompt` cell so you can answer from memory and then
+    Ask AI to check. Smallest working path: reuse `recall.build_quiz_prompt` +
+    `parse_questions` (pure) around the existing `call` AI seam, then `backend.add`
+    the cells the same way `/send` does. Returns to the dialog with the quiz
+    appended."""
+    from starlette.responses import RedirectResponse
+    from . import recall
+    backend = STATE["backend"]
+    dialog = STATE["dialog"]
+    prompt = recall.build_quiz_prompt(backend.messages(dialog), n=n)
+    # A distinct session key ("recall:<dialog>") so quizzing never disturbs the
+    # dialog's own resumable CLI session or its running cost tally.
+    ai_text = call_claude(f"recall:{dialog}", prompt, context="", model=STATE["model"])
+    questions = recall.parse_questions(ai_text)
+    intro = backend.add(dialog, "## Recall quiz\n\nTry to answer each from memory, "
+                                "then Ask AI to check.", "note")
+    for q in questions:
+        backend.add(dialog, q, "prompt")
+    STATE["scroll_to"] = intro.id            # bring the fresh quiz into view
+    return RedirectResponse("/", status_code=303)
+
+
 @rt("/blog/{path:path}")
 def blog_site(path: str):
     """Serve the rendered blog (its `_site/`), with a path-traversal guard —
@@ -3209,7 +3387,7 @@ def blog_site(path: str):
     p = (site / (path or "index.html")).resolve()
     if p.is_dir():
         p = p / "index.html"
-    if str(p).startswith(str(site.resolve())) and p.is_file():
+    if p.resolve().is_relative_to(site.resolve()) and p.is_file():
         return FileResponse(p)
     return PlainTextResponse("not found", status_code=404)
 
@@ -3225,6 +3403,7 @@ def _convert_paper_async(path: str, name: str | None = None):
             md, engine = paperlib.convert(path)
             STATE["paper"] = {"name": name, "status": "ready", "md": md, "engine": engine}
         except Exception as e:  # noqa: BLE001 — surface conversion failures in the panel
+            _dbg(f"paper convert failed for {path!r}: {e}")
             STATE["paper"] = {"name": name, "status": "ready", "md": f"Could not open: {e}",
                               "engine": "error"}
 
@@ -3261,6 +3440,7 @@ def _convert_url_async(url: str, name: str):
                 STATE["paper"] = {"name": name, "status": "ready", "engine": "error",
                                   "md": f"**Couldn't extract anything from** `{url}`"}
         except Exception as e:  # noqa: BLE001 — surface fetch/extract failures in the panel
+            _dbg(f"url convert failed for {url!r}: {e}")
             STATE["paper"] = {"name": name, "status": "ready", "engine": "error",
                               "md": f"Could not open `{url}`:\n\n```\n{e}\n```"}
 

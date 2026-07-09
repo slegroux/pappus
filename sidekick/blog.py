@@ -23,7 +23,47 @@ from __future__ import annotations
 
 import json
 
+import nh3
+
 from .export import _directives, slug
+
+
+# Rich HTML/SVG cell outputs are the user's own kernel output, but a *published*
+# post is shared, so we sanitize it on the way out (nh3 strips <script>, event
+# handlers, javascript: URLs, …). The live in-app view is left unsanitized on
+# purpose — that's the single-user's own interactive output. nh3's defaults are
+# widened to keep typical DataFrame tables and SVG/matplotlib plots intact.
+_HTML_TAGS = nh3.ALLOWED_TAGS | {
+    "table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption", "colgroup", "col",
+    "div", "span", "pre", "figure", "figcaption", "details", "summary", "img",
+    "svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline", "polygon",
+    "text", "tspan", "defs", "marker", "use", "symbol", "clippath", "lineargradient",
+    "radialgradient", "stop", "pattern", "title",
+}
+_SVG_GEOM = {
+    "d", "fill", "stroke", "stroke-width", "stroke-dasharray", "stroke-linecap",
+    "stroke-linejoin", "opacity", "fill-opacity", "stroke-opacity", "transform",
+    "points", "x", "y", "x1", "y1", "x2", "y2", "cx", "cy", "r", "rx", "ry",
+    "width", "height", "viewbox", "preserveaspectratio", "xmlns", "xmlns:xlink",
+    "offset", "stop-color", "stop-opacity", "gradientunits", "gradienttransform",
+    "text-anchor", "font-size", "font-family", "font-weight", "dominant-baseline",
+}
+_HTML_ATTRS = {
+    "*": {"class", "id", "style", "title", "colspan", "rowspan", "scope", "align"},
+    "img": {"src", "alt", "width", "height"},
+    "a": {"href", "title"},
+}
+for _t in _HTML_TAGS:
+    if _t in ("svg", "g", "path", "rect", "circle", "ellipse", "line", "polyline",
+              "polygon", "text", "tspan", "defs", "marker", "use", "symbol",
+              "clippath", "lineargradient", "radialgradient", "stop", "pattern"):
+        _HTML_ATTRS[_t] = _SVG_GEOM | {"class", "id", "style", "transform"}
+
+
+def _sanitize(html: str) -> str:
+    """Allowlist-clean rich HTML/SVG for the published post (drops scripts,
+    event handlers, and dangerous URLs while keeping tables/plots)."""
+    return nh3.clean(html or "", tags=_HTML_TAGS, attributes=_HTML_ATTRS)
 
 
 # ---- cell → nbformat mapping ------------------------------------------------
@@ -57,6 +97,14 @@ def _outputs(output: str, rich: list, execution_count: int) -> list[dict]:
         mime, data = r.get("type"), r.get("data")
         if not mime or data is None:
             continue
+        if mime == "audio/wav":
+            # Kernel audio → an HTML5 player in the post (self-built, trusted).
+            html = f'<audio controls src="data:audio/wav;base64,{data}"></audio>'
+            nodes.append({"output_type": "display_data",
+                          "data": {"text/html": html}, "metadata": {}})
+            continue
+        if mime in ("text/html", "image/svg+xml"):
+            data = _sanitize(data)               # publish-path only (see _sanitize)
         nodes.append({"output_type": "display_data",
                       "data": {mime: data}, "metadata": {}})
     return nodes
