@@ -20,7 +20,8 @@ from fasthtml.common import *
 from starlette.datastructures import UploadFile
 
 from .targets import get_target, list_targets, list_models, default_model
-from .client import connect, build_context, est_tokens, _InMemoryBackend, MockBackend
+from .client import (connect, build_context, est_tokens, _InMemoryBackend, MockBackend,
+                     HttpKernelBackend)
 from .claude_cli import (stream as stream_claude, call as call_claude,
                          cost_for, CLI_MODELS, AI_MODES, DEFAULT_MODE)
 from . import secrets_store, export, libraries, nbdev_export
@@ -216,6 +217,7 @@ STATE = {
     "ai_mode": DEFAULT_MODE,   # AI persona for Ask AI: learning/concise/standard
     "msg_type": "prompt",
     "pending_stream": None,   # (dialog, msg_id) whose answer is being streamed live
+    "pending_run": {},        # {(dialog, msg_id): run_id} code cells whose exec is streaming
     "paper": None,            # {name, status, md, engine} for the reading panel
     "editing": None,          # cell id to render in edit mode once (just-inserted cell)
     "scroll_to": None,        # cell id to scroll into view once (e.g. after a composer send)
@@ -262,6 +264,40 @@ def _clear_pending_stream(dialog: str, mid: str) -> None:
     with _STATE_LOCK:
         if STATE.get("pending_stream") == (dialog, mid):
             STATE["pending_stream"] = None
+
+
+def _set_pending_run(dialog: str, mid: str, run_id: str) -> None:
+    with _STATE_LOCK:
+        STATE["pending_run"][(dialog, mid)] = run_id
+
+
+def _pending_run_id(dialog: str, mid: str) -> str | None:
+    with _STATE_LOCK:
+        return STATE["pending_run"].get((dialog, mid))
+
+
+def _clear_pending_run(dialog: str, mid: str) -> None:
+    with _STATE_LOCK:
+        STATE["pending_run"].pop((dialog, mid), None)
+
+
+def _exec_streams(backend) -> bool:
+    """Stream a code cell's execution (exec_start → poll → done) only for the real
+    kernel backend. The in-process mock runs synchronously, so it keeps the plain
+    blocking path (its exec_start would just complete in one poll anyway)."""
+    return isinstance(backend, HttpKernelBackend) and hasattr(backend, "exec_start")
+
+
+def _start_streamed_exec(backend, dialog: str, mid: str) -> None:
+    """Kick off an async run on the kernel and mark the cell pending so it renders
+    the live-exec view (SSE-wired). If the kernel is unreachable (run_id is None),
+    fall back to the blocking exec path so the cell still shows a readable error."""
+    run_id = backend.exec_start(dialog, mid)
+    if run_id:
+        _set_pending_run(dialog, mid, run_id)
+        STATE["scroll_to"] = mid
+    else:
+        backend.exec(dialog, mid)             # kernel down → sync degrade
 
 
 def _set_dialog(name: str) -> None:
@@ -1088,6 +1124,24 @@ def _output_views(m):
     """Code output + plots/images, or the rendered AI answer for a prompt."""
     out = []
     if m.msg_type == "code":
+        run_id = _pending_run_id(STATE["dialog"], m.id)
+        if run_id:
+            # A live exec: a vanilla EventSource (see STREAM_JS) connects to
+            # /exec_stream and replaces this <pre>'s content as stdout arrives, with
+            # a Stop button to interrupt a runaway loop. On done it reloads #stream
+            # so the finished cell (rich plots, normal Run button) renders.
+            url = (f"/exec_stream?dialog={quote(STATE['dialog'])}"
+                   f"&id={m.id}&run_id={quote(run_id)}")
+            stop = Button("■ Stop", type="button", cls="cell-btn del",
+                          title="Interrupt this running cell",
+                          hx_post="/cell/stop", hx_vals=json.dumps({"id": m.id}),
+                          hx_swap="none")
+            out.append(Div(
+                Div(Span(Span(cls="spinner"), "Running…", cls="thinking"), stop, cls="who"),
+                Pre(m.output or "", cls="out", id=f"exec-{m.id}",
+                    **{"data-exec-url": url}),
+                cls="exec-live"))
+            return out
         if m.output:
             out.append(Div(m.output, cls="out"))
         out += [_rich_view(it) for it in m.rich]
@@ -1500,6 +1554,26 @@ STREAM_JS = """
       es.close(); el.removeAttribute('data-stream-url'); el.__streaming = false;
       // The AI's tools edited cells this turn — refresh #stream so they appear.
       if(e && e.data && e.data.indexOf('reload') >= 0 && window.htmx){
+        window.htmx.ajax('GET', '/stream/refresh', {target:'#stream', swap:'outerHTML'});
+      }
+    });
+    es.onerror = function(){ es.close(); };
+  });
+
+  // Live code execution: connect an EventSource for each running code cell.
+  // 'msg' events carry the accumulated stdout/stderr (a <pre>) as it streams;
+  // 'done' persists server-side and reloads #stream so the finished cell (plots,
+  // normal Run button) renders. Mirrors the answer-streaming loop above.
+  document.querySelectorAll('[data-exec-url]').forEach(function(el){
+    if(el.__execing) return; el.__execing = true;
+    var es = new EventSource(el.getAttribute('data-exec-url'));
+    es.addEventListener('msg', function(e){
+      el.innerHTML = e.data;                           // cumulative output snapshot
+      var s = el.closest('.stream'); if(s) s.scrollTop = s.scrollHeight;
+    });
+    es.addEventListener('done', function(e){
+      es.close(); el.removeAttribute('data-exec-url'); el.__execing = false;
+      if(window.htmx){                                 // re-render the finished cell
         window.htmx.ajax('GET', '/stream/refresh', {target:'#stream', swap:'outerHTML'});
       }
     });
@@ -2552,6 +2626,14 @@ def Page():
                                   title="Generate retrieval-practice questions from this dialog"),
                                 cls="export-menu"),
                             cls="export"),
+                    Button("▶▶", cls="gear", type="button",
+                           title="Run all code cells in this dialog, top to bottom",
+                           hx_post="/cell/run-all", hx_target="#stream", hx_swap="outerHTML"),
+                    Button("⟳", cls="gear", type="button",
+                           title="Restart the kernel — clear all variables for this dialog",
+                           hx_post="/kernel/restart", hx_target="#stream", hx_swap="outerHTML",
+                           **{"hx-confirm": "Restart the kernel? This clears all variables "
+                                            "defined in this dialog."}),
                     A("📦 Libraries", href="/libraries", cls="gear",
                       title="Build Python packages from tagged cells",
                       style="font-size:13px;font-weight:500;white-space:nowrap"),
@@ -3006,6 +3088,8 @@ def cell_run(id: str, content: str = ""):
         # re-run cell (and its "Thinking…" spinner) back into view — otherwise a
         # mid-notebook re-ask looks frozen because the spinner is below the fold.
         STATE["scroll_to"] = id
+    elif m is not None and m.msg_type == "code" and _exec_streams(backend):
+        _start_streamed_exec(backend, STATE["dialog"], id)
     elif m is not None and m.msg_type in ("code", "prompt"):
         backend.exec(STATE["dialog"], id)
     return Stream()
@@ -3053,6 +3137,81 @@ def stream_answer(dialog: str, id: str):
         yield sse_message(Div("reload" if edited else ""), event="done")
 
     return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@rt("/exec_stream")
+def exec_stream(dialog: str, id: str, run_id: str):
+    """Server-Sent-Events: stream a code cell's execution output as it runs.
+
+    The browser's EventSource (see STREAM_JS) connects here for a code cell whose
+    run is pending. We poll the kernel's exec_poll ~4x/sec, emit the accumulated
+    stdout/stderr as `msg` events, and — when the run finishes — persist the final
+    output + rich outputs on the cell and emit a `done` event carrying 'reload' so
+    the client refreshes #stream (rendering plots and the normal Run button)."""
+    import time
+    backend = STATE["backend"]
+    m = _msg_by_id(backend, dialog, id)
+
+    def gen():
+        if m is None or not hasattr(backend, "exec_poll"):
+            _clear_pending_run(dialog, id)
+            yield sse_message(Div("reload"), event="done")
+            return
+        last = None
+        while True:
+            snap = backend.exec_poll(dialog, run_id)
+            out = snap.get("output", "")
+            if out != last:                              # push only when it changed
+                yield sse_message(Pre(out, cls="out"), event="msg")
+                last = out
+            if snap.get("done"):
+                m.output = out
+                m.rich = snap.get("rich", []) or []
+                if hasattr(backend, "_save"):
+                    backend._save()                      # flush to disk
+                _clear_pending_run(dialog, id)
+                # 'reload' → the client refreshes #stream so the finished cell
+                # (rich plots, restored Run button) renders in its resting state.
+                yield sse_message(Div("reload"), event="done")
+                return
+            time.sleep(0.25)                             # ~4 polls/sec
+
+    return StreamingResponse(gen(), media_type="text/event-stream")
+
+
+@rt("/cell/stop", methods=["post"])
+def cell_stop(id: str):
+    """Interrupt a running code cell: raise KeyboardInterrupt in the kernel worker.
+    The cell's live EventSource then sees the run finish and reloads #stream."""
+    backend = STATE["backend"]
+    run_id = _pending_run_id(STATE["dialog"], id)
+    if run_id and hasattr(backend, "exec_stop"):
+        backend.exec_stop(STATE["dialog"], run_id)
+    return Div("", id=f"stop-{id}")                      # hx-swap="none": nothing to render
+
+
+@rt("/kernel/restart", methods=["post"])
+def kernel_restart():
+    """Restart the kernel for the current dialog: drop its server-side namespace via
+    the kernel's /reset endpoint, so the next run starts from a clean slate."""
+    backend = STATE["backend"]
+    dialog = STATE["dialog"]
+    if hasattr(backend, "reset"):
+        backend.reset(dialog)
+    STATE["flash"] = "Kernel restarted — variables cleared."
+    return Stream()
+
+
+@rt("/cell/run-all", methods=["post"])
+def cell_run_all():
+    """Run every code cell in the current dialog, top to bottom, sequentially —
+    reusing the blocking run path (a clean re-execution of the whole notebook)."""
+    backend = STATE["backend"]
+    dialog = STATE["dialog"]
+    for m in list(backend.messages(dialog)):
+        if m.msg_type == "code":
+            backend.exec(dialog, m.id)
+    return Stream()
 
 
 # ---- internal API for the AI's cell-editing MCP tools (server/mcp_cells) -----
@@ -3308,6 +3467,8 @@ def cell_exec(id: str):
         # re-run looks frozen — the "Thinking…" spinner is below the fold. Bring the
         # re-run cell back into view (matches /cell/run).
         STATE["scroll_to"] = id
+    elif m is not None and m.msg_type == "code" and _exec_streams(backend):
+        _start_streamed_exec(backend, STATE["dialog"], id)
     elif m is not None:
         backend.exec(STATE["dialog"], id)
     return Stream()

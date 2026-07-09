@@ -14,6 +14,9 @@ Endpoints (simple JSON):
     GET  /test_route            -> "here"          (what doctor/solveit_client probe)
     GET  /health                -> {ok, dialogs}
     POST /exec     {dialog,code}                    -> {output, rich}
+    POST /exec_start {dialog,code}                  -> {run_id}          (async)
+    GET  /exec_poll?dialog=&run_id=                 -> {output,done,rich,error,interrupted}
+    POST /exec_stop  {dialog,run_id}                -> {ok, done}        (KeyboardInterrupt)
     POST /complete {dialog,code,line,col}           -> {completions}
     POST /prompt   {dialog,content,model,context}   -> {output, model}
     POST /eval     {dialog,content}                 -> {content, warnings}
@@ -27,6 +30,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+import ctypes
 import hmac
 import io
 import json
@@ -230,49 +234,195 @@ def complete_code(dialog: str, code: str, line: int, col: int) -> list:
     return out
 
 
+def _split_last_expr(code: str, tree: ast.Module):
+    """A trailing ';' suppresses the last expression's value, Jupyter-style. The
+    statement still runs (side effects, plots) — only its repr is hidden. Returns
+    the last-expression AST to eval for its repr, or None. Mutates `tree` (pops the
+    trailing Expr) so the exec body no longer double-evaluates it."""
+    suppress = code.rstrip().endswith(";")
+    if not suppress and tree.body and isinstance(tree.body[-1], ast.Expr):
+        return ast.Expression(tree.body.pop().value)
+    return None
+
+
+def _execute(dialog: str, code: str, buf: io.StringIO, rich_out: list) -> str | None:
+    """Core execution shared by the sync (`run_code`) and async (`exec_start`)
+    paths. Parses `code`, execs it into the dialog namespace, evals a trailing
+    expression for its repr, and captures matplotlib figures — writing text output
+    incrementally into `buf` (so a poller can see partial output) and rich outputs
+    into `rich_out`.
+
+    MUST be called while holding `_dialog_locks(dialog)`. Returns an error string
+    (or None on success). A KeyboardInterrupt (the async /exec_stop path) is NOT
+    caught here — it propagates to the caller so the async worker can mark the run
+    interrupted; this matches the original run_code, which never caught it either.
+    """
+    try:
+        tree = ast.parse(code, mode="exec")
+    except SyntaxError as e:
+        buf.write(f"SyntaxError: {e}")
+        return f"SyntaxError: {e}"
+    last_expr = _split_last_expr(code, tree)
+    ns = _ns(dialog)
+    err = None
+    try:
+        with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf), \
+                warnings.catch_warnings():
+            # plt.show() is a no-op under the headless Agg backend, but matplotlib
+            # still warns "FigureCanvasAgg is non-interactive…" to stderr — pure
+            # noise here, since _capture_figs() renders the figure inline anyway.
+            warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
+            exec(compile(tree, "<dialog>", "exec"), ns)
+            if last_expr is not None:
+                val = eval(compile(last_expr, "<dialog>", "eval"), ns)
+                if val is not None:
+                    r = _rich_repr(val)
+                    if r:
+                        rich_out.append(r)
+                    else:
+                        print(repr(val), file=buf)
+    except Exception as e:  # noqa: BLE001 — surface kernel errors as output
+        print(f"{type(e).__name__}: {e}", file=buf)
+        _dbg(f"_execute: exec/eval raised: {type(e).__name__}: {e}")
+        err = f"{type(e).__name__}: {e}"
+    rich_out[:0] = _capture_figs()         # plots created during the cell, newest cell-state
+    return err
+
+
 def run_code(dialog: str, code: str) -> tuple[str, list]:
-    """Execute code in the dialog's namespace.
+    """Execute code in the dialog's namespace (synchronous, blocking).
 
     Returns (text, rich) where text is stdout/stderr plus the last expression's
     repr, and rich is a list of MIME-typed outputs (plots, images, dataframes).
     """
     buf = io.StringIO()
     rich: list = []
-    try:
-        tree = ast.parse(code, mode="exec")
-    except SyntaxError as e:
-        return f"SyntaxError: {e}", rich
-
-    # A trailing ';' suppresses the last expression's value, Jupyter-style. The
-    # statement still runs (side effects, plots) — only its repr is hidden.
-    suppress = code.rstrip().endswith(";")
-    last_expr = None
-    if not suppress and tree.body and isinstance(tree.body[-1], ast.Expr):
-        last_expr = ast.Expression(tree.body.pop().value)
-
     with _dialog_locks(dialog):        # serialize exec/complete against this namespace
-        ns = _ns(dialog)
-        try:
-            with contextlib.redirect_stdout(buf), contextlib.redirect_stderr(buf), \
-                    warnings.catch_warnings():
-                # plt.show() is a no-op under the headless Agg backend, but matplotlib
-                # still warns "FigureCanvasAgg is non-interactive…" to stderr — pure
-                # noise here, since _capture_figs() renders the figure inline anyway.
-                warnings.filterwarnings("ignore", message="FigureCanvasAgg is non-interactive")
-                exec(compile(tree, "<dialog>", "exec"), ns)
-                if last_expr is not None:
-                    val = eval(compile(last_expr, "<dialog>", "eval"), ns)
-                    if val is not None:
-                        r = _rich_repr(val)
-                        if r:
-                            rich.append(r)
-                        else:
-                            print(repr(val), file=buf)
-        except Exception as e:  # noqa: BLE001 — surface kernel errors as output
-            print(f"{type(e).__name__}: {e}", file=buf)
-            _dbg(f"run_code: exec/eval raised: {type(e).__name__}: {e}")
-        rich = _capture_figs() + rich      # plots created during the cell, newest cell-state
+        _execute(dialog, code, buf, rich)
     return buf.getvalue().rstrip("\n"), rich
+
+
+# ---- Async / interruptible execution ----------------------------------------
+# The synchronous /exec above is one blocking HTTP call: a long-running cell (a
+# training loop on the H100) shows NOTHING until it finishes — tqdm is useless and
+# there's no way to stop it. The async path fixes both: /exec_start spawns a worker
+# thread that streams stdout/stderr into a per-run buffer, /exec_poll snapshots it
+# ~live, and /exec_stop raises KeyboardInterrupt in the worker.
+RUNS: dict[str, "RunState"] = {}
+_RUNS_GUARD = threading.Lock()
+
+
+class RunState:
+    """One async run for a dialog. The worker thread writes output into `buf`
+    incrementally; pollers read a snapshot. `_lock` guards the done/error/rich
+    flags for a consistent cross-thread read (the StringIO itself is fine to read
+    under the GIL)."""
+
+    def __init__(self, dialog: str, code: str):
+        import uuid
+        self.run_id = uuid.uuid4().hex[:12]
+        self.dialog = dialog
+        self.code = code
+        self.buf = io.StringIO()
+        self.rich: list = []
+        self.done = False
+        self.error: str | None = None
+        self.interrupted = False
+        self.thread: threading.Thread | None = None
+        self.thread_id: int | None = None
+        self._lock = threading.Lock()
+
+    def snapshot(self) -> dict:
+        with self._lock:
+            return {
+                "output": self.buf.getvalue().rstrip("\n"),
+                "done": self.done,
+                # rich (plots/images) is only complete once the run finishes.
+                "rich": list(self.rich) if self.done else [],
+                "error": self.error,
+                "interrupted": self.interrupted,
+            }
+
+
+def _run_worker(run: "RunState") -> None:
+    """Worker-thread body: acquire the dialog lock (cooperating with the sync
+    /exec, /complete, /reset paths) and run the code, streaming output into the
+    RunState buffer. A KeyboardInterrupt injected by /exec_stop marks the run
+    interrupted."""
+    run.thread_id = threading.get_ident()
+    try:
+        with _dialog_locks(run.dialog):
+            err = _execute(run.dialog, run.code, run.buf, run.rich)
+        with run._lock:
+            run.error = err
+    except KeyboardInterrupt:
+        with run._lock:
+            run.interrupted = True
+            run.error = "KeyboardInterrupt"
+    except BaseException as e:  # noqa: BLE001 — a worker must never die silently
+        with run._lock:
+            run.error = f"{type(e).__name__}: {e}"
+        _dbg(f"_run_worker: {type(e).__name__}: {e}")
+    finally:
+        with run._lock:
+            run.done = True
+
+
+def exec_start(dialog: str, code: str) -> str:
+    """Start an async run of `code` in `dialog`. Returns its run_id. Only one active
+    run per dialog: if one is still running, its run_id is returned unchanged (the
+    per-dialog lock would serialize a second worker anyway, so we don't spawn one)."""
+    with _RUNS_GUARD:
+        existing = RUNS.get(dialog)
+        if existing is not None and not existing.done:
+            return existing.run_id            # busy — reuse the active run
+        run = RunState(dialog, code)
+        RUNS[dialog] = run
+    t = threading.Thread(target=_run_worker, args=(run,), daemon=True)
+    run.thread = t
+    t.start()
+    return run.run_id
+
+
+def exec_poll(dialog: str, run_id: str) -> dict:
+    """Non-blocking snapshot of a run's buffer: {output, done, rich, error,
+    interrupted}. rich is only populated once done. Unknown run → done+error."""
+    run = RUNS.get(dialog)
+    if run is None or run.run_id != run_id:
+        return {"output": "", "done": True, "rich": [],
+                "error": "unknown run", "interrupted": False}
+    return run.snapshot()
+
+
+def _async_raise(thread_id: int, exctype) -> bool:
+    """Raise `exctype` asynchronously in the thread with id `thread_id` via CPython's
+    C API.
+
+    KNOWN LIMITATION: PyThreadState_SetAsyncExc only delivers the exception at a
+    Python *bytecode boundary*. A thread blocked inside a C extension call (a
+    numpy/torch matmul, time.sleep, a blocking socket read) will NOT be interrupted
+    until control returns to the Python interpreter loop. Pure-Python loops (the
+    common `while True`/training-loop case) interrupt promptly."""
+    res = ctypes.pythonapi.PyThreadState_SetAsyncExc(
+        ctypes.c_long(thread_id), ctypes.py_object(exctype))
+    if res > 1:
+        # We hit more than one thread (shouldn't happen for a real tid) — undo it so
+        # we don't leave a pending exception in an unrelated thread.
+        ctypes.pythonapi.PyThreadState_SetAsyncExc(ctypes.c_long(thread_id), None)
+    return res == 1
+
+
+def exec_stop(dialog: str, run_id: str) -> dict:
+    """Interrupt an active run by raising KeyboardInterrupt in its worker thread.
+    Returns {ok, done}. A no-op (ok=True) if the run is unknown or already done."""
+    run = RUNS.get(dialog)
+    if run is None or run.run_id != run_id:
+        return {"ok": False, "error": "unknown run"}
+    if run.done:
+        return {"ok": True, "done": True}
+    tid = run.thread_id
+    delivered = _async_raise(tid, KeyboardInterrupt) if tid is not None else False
+    return {"ok": True, "done": False, "delivered": delivered}
 
 
 # Variable/expression injection: $`expr` in a prompt is evaluated against the
@@ -448,6 +598,12 @@ class Handler(BaseHTTPRequestHandler):
             return self._send(200, "here", ctype="text/plain")
         if self.path.rstrip("/") == "/health":
             return self._send(200, {"ok": True, "dialogs": list(KERNELS)})
+        if self.path.split("?", 1)[0].rstrip("/") == "/exec_poll":
+            from urllib.parse import urlparse, parse_qs
+            q = parse_qs(urlparse(self.path).query)
+            dialog = q.get("dialog", ["default"])[0]
+            run_id = q.get("run_id", [""])[0]
+            return self._send(200, exec_poll(dialog, run_id))
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
@@ -464,6 +620,12 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/exec":
             out, rich = run_code(payload.get("dialog", "default"), payload.get("code", ""))
             return self._send(200, {"output": out, "rich": rich})
+        if path == "/exec_start":
+            run_id = exec_start(payload.get("dialog", "default"), payload.get("code", ""))
+            return self._send(200, {"run_id": run_id})
+        if path == "/exec_stop":
+            r = exec_stop(payload.get("dialog", "default"), payload.get("run_id", ""))
+            return self._send(200, r)
         if path == "/complete":
             comps = complete_code(payload.get("dialog", "default"), payload.get("code", ""),
                                   int(payload.get("line", 1)), int(payload.get("col", 0)))
