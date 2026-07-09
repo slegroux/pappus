@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import os
+import urllib.error
 import uuid
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
@@ -68,6 +69,15 @@ def _save_dialogs(key: str, dialogs: dict[str, list[Msg]]) -> None:
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
         raw = {name: [asdict(m) for m in msgs] for name, msgs in dialogs.items()}
+        # Poor-man's history guard: snapshot the prior store to a single rolling
+        # <name>.bak before we overwrite it, so a destructive edit is recoverable.
+        # Best-effort — never let a failed backup block the actual save.
+        if p.exists():
+            try:
+                import shutil
+                shutil.copy2(p, p.with_suffix(".json.bak"))
+            except OSError:
+                pass
         tmp = p.with_suffix(".json.tmp")
         tmp.write_text(json.dumps(raw, indent=2))
         tmp.replace(p)                 # atomic write
@@ -151,19 +161,31 @@ def build_context(msgs: list, upto_id: str | None = None,
             continue
         cells.append((getattr(m, "pinned", False), _cell_xml(m, out_trunc, i + 1)))
 
-    keep = [False] * len(cells)
+    # `text[i]` is what we actually ship for cell i (may be truncated); None = dropped.
+    text: list[str | None] = [None] * len(cells)
     budget = max_chars
-    for i, (pinned, c) in enumerate(cells):       # pinned cells always survive
+    for i, (pinned, c) in enumerate(cells):       # pinned cells survive first
         if pinned:
-            keep[i] = True
-            budget -= len(c)
+            if budget <= 0:                       # no room left even for a pin
+                continue
+            # If the pinned content alone would blow the budget, truncate it so the
+            # total kept never exceeds max_chars (a huge pin must not push us over,
+            # nor starve every unpinned cell into being dropped).
+            kept_c = c if len(c) <= budget else _trunc_middle(c, budget)
+            text[i] = kept_c
+            budget -= len(kept_c)
     for i in range(len(cells) - 1, -1, -1):       # fill remaining budget, newest first
         pinned, c = cells[i]
         if not pinned and len(c) <= budget:
-            keep[i] = True
+            text[i] = c
             budget -= len(c)
+    # Guarantee the newest non-empty cell survives even if it alone exceeds the
+    # budget: truncate it to fit rather than shipping a near-empty context.
+    if cells and all(t is None for t in text):
+        i = len(cells) - 1
+        text[i] = _trunc_middle(cells[i][1], max_chars)
 
-    kept = [c for i, (_, c) in enumerate(cells) if keep[i]]
+    kept = [t for t in text if t is not None]
     dropped = len(cells) - len(kept)
     body = "\n".join(kept)
     if dropped:
@@ -466,7 +488,16 @@ class HttpKernelBackend(_InMemoryBackend):
         if m is None:
             raise KeyError(msg_id)
         if m.msg_type == "code":
-            r = self._post("/exec", {"dialog": dialog, "code": m.content})
+            try:
+                r = self._post("/exec", {"dialog": dialog, "code": m.content})
+            except (urllib.error.URLError, TimeoutError, OSError) as e:
+                # Kernel unreachable/timed out: degrade to a readable error in the
+                # cell rather than blowing up the caller (mirrors the best-effort
+                # try/except that add_syspath/eval_exprs/complete/rename already use).
+                m.output = f"[kernel error: {e}]"
+                m.rich = []
+                self._save()
+                return m
             m.output = r.get("output", "")
             m.rich = r.get("rich", [])      # plots/images/dataframes from the kernel
         elif m.msg_type == "prompt":
