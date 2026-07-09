@@ -238,13 +238,77 @@ def conv_arch(layers, title=None, *, fmt="svg", depth_scale=0.16,
 _TORCH_KINDS = ("conv", "linear", "pool", "convtranspose")
 
 
+def _shape_to_ch_size(shape):
+    """Map a captured output shape to (channels, size) for the slab geometry."""
+    if len(shape) >= 3:                         # (N, C, *spatial) — keep H,W for the label
+        return shape[1], tuple(shape[2:])
+    if len(shape) == 2:                         # (N, features)
+        return shape[1], 1
+    return shape[-1], 1
+
+
+def _human_count(n: int) -> str:
+    """Compact parameter count: 1234 -> '1.2k', 1_500_000 -> '1.5M'."""
+    if n >= 1_000_000:
+        return f"{n / 1_000_000:.1f}M"
+    if n >= 1_000:
+        return f"{n / 1_000:.1f}k"
+    return str(int(n))
+
+
+def _hook_shapes(model, example, *, kinds=None, all_leaves=False):
+    """Run one forward pass and capture each leaf module's output shape via hooks.
+
+    Shared shape-introspection used by both `from_torch` (filtered by `kinds`) and
+    `summary` (`all_leaves=True`). `example` is either a size tuple (a zero tensor
+    is fed) or an actual input tensor. Returns a list of records preserving forward
+    order, each ``{"module", "name", "shape"}``.
+    """
+    import torch
+
+    records: list[dict] = []
+
+    def make_hook(module):
+        def hook(_m, _inp, out):
+            if isinstance(out, (tuple, list)):
+                out = out[0]
+            shape = getattr(out, "shape", None)
+            if shape is None:
+                return
+            records.append({"module": module,
+                            "name": type(module).__name__,
+                            "shape": tuple(int(d) for d in shape)})
+        return hook
+
+    handles = []
+    for module in model.modules():
+        if list(module.children()):             # not a leaf
+            continue
+        if all_leaves or (kinds and any(k in type(module).__name__.lower() for k in kinds)):
+            handles.append(module.register_forward_hook(make_hook(module)))
+
+    inp = example if isinstance(example, torch.Tensor) else torch.zeros(*example)
+    try:
+        was_training = model.training
+        model.eval()
+        with torch.no_grad():
+            model(inp)
+    finally:
+        for h in handles:
+            h.remove()
+        if was_training:
+            model.train()
+    return records
+
+
 def from_torch(model, input_size, *, title=None, fmt="svg",
                kinds=_TORCH_KINDS, collapse=True, **kw):
     """Introspect a PyTorch nn.Module and draw it from its real per-layer shapes.
 
     Runs one forward pass on a zero tensor of `input_size` (e.g. (1, 3, 224, 224)),
     capturing each interesting leaf module's output shape via forward hooks. So you
-    point it at a model instead of hand-typing dims.
+    point it at a model instead of hand-typing dims. Each block is annotated with
+    its parameter count (below the layer name), so heavy layers stand out.
 
       from_torch(torchvision.models.resnet18(), (1, 3, 224, 224))
 
@@ -252,44 +316,15 @@ def from_torch(model, input_size, *, title=None, fmt="svg",
     lower-cased). `collapse=True` drops consecutive layers with the same (channels,
     size) so repeated blocks don't pile up. Transposed convs are colored as decoder.
     """
-    import torch
-
     captured: list[dict] = []
-
-    def hook(module, _inp, out):
-        if isinstance(out, (tuple, list)):
-            out = out[0]
-        shape = getattr(out, "shape", None)
-        if shape is None:
-            return
-        shape = tuple(int(d) for d in shape)
-        if len(shape) >= 3:                     # (N, C, *spatial) — keep H,W for the label
-            ch, size = shape[1], tuple(shape[2:])
-        elif len(shape) == 2:                   # (N, features)
-            ch, size = shape[1], 1
-        else:
-            ch, size = shape[-1], 1
-        name = type(module).__name__
+    for rec in _hook_shapes(model, input_size, kinds=kinds):
+        ch, size = _shape_to_ch_size(rec["shape"])
+        name = rec["name"]
         grp = "dec" if "convtranspose" in name.lower() else "enc"
-        captured.append({"label": name.replace("Conv", "C").replace("Transpose", "T"),
-                         "channels": ch, "size": size, "group": grp})
-
-    handles = []
-    for module in model.modules():
-        if list(module.children()):             # not a leaf
-            continue
-        if any(k in type(module).__name__.lower() for k in kinds):
-            handles.append(module.register_forward_hook(hook))
-    try:
-        was_training = model.training
-        model.eval()
-        with torch.no_grad():
-            model(torch.zeros(*input_size))
-    finally:
-        for h in handles:
-            h.remove()
-        if was_training:
-            model.train()
+        params = sum(p.numel() for p in rec["module"].parameters())
+        short = name.replace("Conv", "C").replace("Transpose", "T")
+        label = f"{short}\n{_human_count(params)}p" if params else short
+        captured.append({"label": label, "channels": ch, "size": size, "group": grp})
 
     layers = captured
     if collapse:                                # fold runs of identical shape
@@ -301,6 +336,61 @@ def from_torch(model, input_size, *, title=None, fmt="svg",
             folded.append(layer)
         layers = folded
     return conv_arch(layers, title=title, fmt=fmt, **kw)
+
+
+class _Table:
+    """Carrier so an HTML table renders inline via the IPython display protocol."""
+
+    def __init__(self, html: str):
+        self._html = html
+
+    def _repr_html_(self) -> str:
+        return self._html
+
+    def __repr__(self) -> str:
+        return "<conv_arch summary table>"
+
+
+def summary(model, input):
+    """Per-layer summary table (name / output shape / param count) as rich HTML.
+
+    Reuses the same forward-hook shape-introspection as `from_torch` (`all_leaves`),
+    running the model on the given `input` tensor and reporting every leaf module in
+    forward order. Returns an object whose `_repr_html_` is a table — just call it
+    in a cell.
+
+      summary(model, torch.randn(1, 3, 224, 224))
+
+    MACs are intentionally omitted: reliable per-layer MAC counts need op-specific
+    formulas beyond the shape capture the forward hooks provide, so output shapes and
+    parameter counts are reported instead (a note in the table's footer says so).
+    """
+    rows, total = [], 0
+    for rec in _hook_shapes(model, input, all_leaves=True):
+        params = sum(p.numel() for p in rec["module"].parameters())
+        total += params
+        shape_str = "×".join(str(d) for d in rec["shape"])
+        rows.append((rec["name"], shape_str, params))
+
+    body = "".join(
+        f'<tr><td style="padding:2px 12px 2px 0;">{name}</td>'
+        f'<td style="padding:2px 12px 2px 0;font-family:monospace;">{shape}</td>'
+        f'<td style="padding:2px 0;text-align:right;">{params:,}</td></tr>'
+        for name, shape, params in rows)
+    html = (
+        '<table style="border-collapse:collapse;font:13px sans-serif;">'
+        '<thead><tr style="border-bottom:1px solid #ccc;text-align:left;">'
+        '<th style="padding:2px 12px 2px 0;">layer</th>'
+        '<th style="padding:2px 12px 2px 0;">output shape</th>'
+        '<th style="padding:2px 0;text-align:right;">params</th></tr></thead>'
+        f'<tbody>{body}</tbody>'
+        '<tfoot><tr style="border-top:1px solid #ccc;font-weight:600;">'
+        '<td colspan="2" style="padding:2px 12px 2px 0;">total</td>'
+        f'<td style="padding:2px 0;text-align:right;">{total:,}</td></tr></tfoot>'
+        '</table>'
+        '<div style="font:italic 11px sans-serif;color:#888;margin-top:4px;">'
+        'MACs omitted — needs op-specific formulas beyond forward-hook shapes.</div>')
+    return _Table(html)
 
 
 # A few ready-made specs so the helper is discoverable: conv_arch(PRESETS["unet"]).
@@ -345,5 +435,42 @@ PRESETS = {
         {"label": "layer4", "channels": 2048, "size": (7, 7),     "group": "enc"},
         {"label": "pool",   "channels": 2048, "size": (1, 1),     "group": "lat"},
         {"label": "fc",     "channels": 1000, "size": 1,          "group": "dec"},
+    ],
+    # --- Audio models (schematic; 1-D time axis, sizes are #samples/frames) ---
+    # EnCodec-style neural codec: conv encoder downsamples to an RVQ latent, then
+    # a mirror decoder reconstructs. ~24kHz, 1s clip, strides ~(2,4,5,8).
+    "encodec": [
+        {"label": "in",      "channels": 1,    "size": 24000, "group": "enc"},
+        {"label": "conv",    "channels": 32,   "size": 24000, "group": "enc"},
+        {"label": "down",    "channels": 64,   "size": 12000, "group": "enc"},
+        {"label": "down",    "channels": 128,  "size": 3000,  "group": "enc"},
+        {"label": "down",    "channels": 256,  "size": 600,   "group": "enc"},
+        {"label": "down",    "channels": 512,  "size": 75,    "group": "enc"},
+        {"label": "z (RVQ)", "channels": 128,  "size": 75,    "group": "lat"},
+        {"label": "up",      "channels": 512,  "size": 75,    "group": "dec"},
+        {"label": "up",      "channels": 256,  "size": 600,   "group": "dec"},
+        {"label": "up",      "channels": 128,  "size": 3000,  "group": "dec"},
+        {"label": "up",      "channels": 64,   "size": 12000, "group": "dec"},
+        {"label": "out",     "channels": 1,    "size": 24000, "group": "dec"},
+    ],
+    # HiFi-GAN-style vocoder (decoder only): a mel spectrogram is transposed-conv
+    # upsampled back to a raw waveform.
+    "hifigan": [
+        {"label": "mel",  "channels": 80,  "size": 32,   "group": "lat"},
+        {"label": "conv", "channels": 512, "size": 32,   "group": "dec"},
+        {"label": "up×8", "channels": 256, "size": 256,  "group": "dec"},
+        {"label": "up×8", "channels": 128, "size": 2048, "group": "dec"},
+        {"label": "up×2", "channels": 64,  "size": 4096, "group": "dec"},
+        {"label": "up×2", "channels": 32,  "size": 8192, "group": "dec"},
+        {"label": "wav",  "channels": 1,   "size": 8192, "group": "dec"},
+    ],
+    # Whisper-encoder-style (encoder only): 2 conv layers (one strided) over a
+    # log-mel input, then a stack of constant-width transformer blocks.
+    "whisper": [
+        {"label": "mel",    "channels": 80,  "size": 3000, "group": "enc"},
+        {"label": "conv1",  "channels": 512, "size": 3000, "group": "enc"},
+        {"label": "conv2",  "channels": 512, "size": 1500, "group": "enc"},
+        {"label": "block×6", "channels": 512, "size": 1500, "group": "enc"},
+        {"label": "enc out", "channels": 512, "size": 1500, "group": "lat"},
     ],
 }

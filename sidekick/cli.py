@@ -81,8 +81,16 @@ def cmd_serve(_):
     reload = os.environ.get("SIDEKICK_RELOAD", "").lower() in ("1", "true", "yes")
     print(f"SolveIt Sidekick UI -> http://{host}:{port}" + ("  (auto-reload)" if reload else ""))
     if host not in ("127.0.0.1", "localhost"):
-        print("  ⚠ binding a non-loopback host — this single-user UI (and your stored "
-              "API keys) will be reachable by anyone on the network.")
+        # The app has no auth layer of its own, so a non-loopback bind exposes
+        # unauthenticated code execution and your stored API keys to the network.
+        # There is deliberately no env-var escape hatch (a token that gated the
+        # bind but enforced no auth would be false security). For remote access,
+        # forward the loopback port over SSH instead:
+        #   ssh -L 8000:127.0.0.1:8000 <host>   # then open http://127.0.0.1:8000
+        raise SystemExit(
+            f"refusing to bind {host}: the UI has no authentication, so this would "
+            "expose unauthenticated code execution and your stored API keys. "
+            "Use an SSH tunnel for remote access (see the comment in cli.py).")
     if reload:
         uvicorn.run("sidekick.app:app", host=host, port=port,
                     reload=True, reload_dirs=[os.path.dirname(__file__)])

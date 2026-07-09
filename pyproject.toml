@@ -20,6 +20,7 @@ dependencies = [
     "anthropic",   # Ask AI → Claude (API key)
     "openai",      # Ask AI → Codex
     "zhipuai",     # Ask AI → GLM
+    "nh3",         # HTML sanitization for untrusted rendered content
 ]
 
 [project.optional-dependencies]
@@ -37,6 +38,8 @@ kernel = [
     "scikit-learn",
     "scipy",
     "torch",
+    "torchaudio",    # audio tensors / transforms for audio code cells
+    "soundfile",     # read/write WAV/FLAC in the kernel
     "jedi",          # code completion: introspects the live kernel namespace
 ]
 ml = ["solveit-sidekick[kernel]"]   # back-compat alias for the former name

@@ -46,6 +46,18 @@ from sidekick import claude_cli   # CLI (subscription) Claude + shared notebook 
 _AUTH_TOKEN: str | None = None
 
 
+def _dbg(msg) -> None:
+    """Print a diagnostic to stderr, but only when SIDEKICK_DEBUG is truthy.
+
+    The kernel deliberately swallows errors around exec/capture so a bad cell
+    can't take the server down; that makes failures invisible. Set SIDEKICK_DEBUG
+    to surface them. With the flag unset this is a no-op — default output is
+    byte-for-byte unchanged."""
+    if os.environ.get("SIDEKICK_DEBUG"):
+        import sys
+        print(f"[sidekick-kernel] {msg}", file=sys.stderr)
+
+
 def _is_loopback(host: str) -> bool:
     return host in ("127.0.0.1", "localhost", "::1", "")
 
@@ -152,8 +164,8 @@ def _capture_figs() -> list:
         try:
             plt.figure(num).savefig(bio, format="png", bbox_inches="tight")
             out.append({"type": "image/png", "data": _b64(bio.getvalue())})
-        except Exception:  # noqa: BLE001 — a bad figure shouldn't break the cell
-            pass
+        except Exception as e:  # noqa: BLE001 — a bad figure shouldn't break the cell
+            _dbg(f"_capture_figs: figure {num} failed: {type(e).__name__}: {e}")
     plt.close("all")
     return out
 
@@ -166,6 +178,14 @@ def _rich_repr(val) -> dict | None:
     """
     if type(val).__module__.startswith("matplotlib"):
         return None
+    # Audio first: a carrier from sidekick.audio.play() advertises a WAV via
+    # _repr_audio_wav_, returning a complete base64-encoded WAV file (the kernel
+    # side of the audio contract). Checked before the image/html branches.
+    fn = getattr(val, "_repr_audio_wav_", None)
+    if callable(fn):
+        b64 = fn()
+        if b64:
+            return {"type": "audio/wav", "data": b64}
     for meth, mime in (("_repr_png_", "image/png"), ("_repr_jpeg_", "image/jpeg")):
         fn = getattr(val, meth, None)
         if callable(fn):
@@ -250,6 +270,7 @@ def run_code(dialog: str, code: str) -> tuple[str, list]:
                             print(repr(val), file=buf)
         except Exception as e:  # noqa: BLE001 — surface kernel errors as output
             print(f"{type(e).__name__}: {e}", file=buf)
+            _dbg(f"run_code: exec/eval raised: {type(e).__name__}: {e}")
         rich = _capture_figs() + rich      # plots created during the cell, newest cell-state
     return buf.getvalue().rstrip("\n"), rich
 
@@ -287,6 +308,7 @@ def inject_vars(dialog: str, content: str) -> tuple[str, list]:
             return _inject_str(val)     # str(val) can itself raise (broken __str__) — guard it too
         except Exception as e:  # noqa: BLE001 — surface, don't crash the prompt
             warnings_.append(f"{expr}: {type(e).__name__}: {e}")
+            _dbg(f"inject_vars: `{expr}` failed: {type(e).__name__}: {e}")
             return f"[unresolved `{expr}`: {type(e).__name__}]"
 
     with _dialog_locks(dialog):     # eval against a stable namespace, not one mid-exec
@@ -407,7 +429,19 @@ class Handler(BaseHTTPRequestHandler):
     def _authorized(self) -> bool:
         return _check_auth(_AUTH_TOKEN, self.headers.get("Cookie", ""))
 
+    def _host_ok(self):
+        raw = (self.headers.get("Host", "") or "").strip()
+        if raw.startswith("["):                       # [::1] or [::1]:5001
+            host = raw[1:raw.index("]")] if "]" in raw else raw
+        elif raw.count(":") == 1:                     # host:port
+            host = raw.rsplit(":", 1)[0]
+        else:
+            host = raw                                 # bare host, or bare IPv6
+        return host in {"127.0.0.1", "localhost", "::1"}
+
     def do_GET(self):
+        if not self._host_ok():
+            return self._send(403, {"error": "forbidden host"})
         if not self._authorized():
             return self._send(403, {"error": "unauthorized — bad or missing _solveit token"})
         if self.path.rstrip("/") == "/test_route":
@@ -417,6 +451,8 @@ class Handler(BaseHTTPRequestHandler):
         return self._send(404, {"error": "not found"})
 
     def do_POST(self):
+        if not self._host_ok():
+            return self._send(403, {"error": "forbidden host"})
         if not self._authorized():
             return self._send(403, {"error": "unauthorized — bad or missing _solveit token"})
         n = int(self.headers.get("Content-Length", 0))

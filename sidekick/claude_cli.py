@@ -345,6 +345,16 @@ def cost_for(dialog: str) -> dict | None:
     return CLI_COST.get(dialog)
 
 
+def drop(dialog: str) -> None:
+    """Evict a dialog's in-memory CLI session and running cost totals.
+
+    Called when a dialog is deleted so a later dialog reusing the name can't
+    resume a stale `claude` session or inherit an old cost tally. Best-effort:
+    a dialog that never ran has no entries, which is fine."""
+    CLI_SESSIONS.pop(dialog, None)
+    CLI_COST.pop(dialog, None)
+
+
 def call(dialog: str, content: str, context: str = "", model: str | None = None,
          mode: str | None = None) -> str:
     """Non-streaming: one `claude -p` call, full text back. Used by the kernel server."""
@@ -400,30 +410,43 @@ def stream(dialog: str, content: str, context: str = "", model: str | None = Non
     final_sid, got_any, final_result = sid, False, None
     # readline() (not `for line in p.stdout`) avoids the iterator's read-ahead
     # buffer, so each line surfaces as soon as Claude emits it — real streaming.
-    for line in iter(p.stdout.readline, ""):
-        try:
-            ev = json.loads(line)
-        except (ValueError, TypeError):
-            continue
-        kind = ev.get("type")
-        if kind == "stream_event":
-            d = ev.get("event") or {}
-            if d.get("type") == "content_block_delta":
-                txt = (d.get("delta") or {}).get("text")
-                if txt:
-                    got_any = True
-                    yield txt
-        elif kind == "result":
-            final_sid = ev.get("session_id") or sid
-            final_result = ev                        # carries usage + total_cost_usd
-            if ev.get("is_error") and not got_any:
-                yield f"[Claude (Max plan) error: {ev.get('result') or 'unknown'}]"
     try:
-        p.wait(timeout=5)
-    except Exception:  # noqa: BLE001 — reaping is best-effort
-        pass
-    # Advance the session: remember its id, the full context it now knows, and the
-    # mode it was started with (a mode change forces a fresh session — see _build_cmd).
-    CLI_SESSIONS[dialog] = {"id": final_sid, "sent": context, "mode": mode}
-    if final_result is not None and not final_result.get("is_error"):
-        _accrue(dialog, final_result)                # running token/cost tally
+        for line in iter(p.stdout.readline, ""):
+            try:
+                ev = json.loads(line)
+            except (ValueError, TypeError):
+                continue
+            kind = ev.get("type")
+            if kind == "stream_event":
+                d = ev.get("event") or {}
+                if d.get("type") == "content_block_delta":
+                    txt = (d.get("delta") or {}).get("text")
+                    if txt:
+                        got_any = True
+                        yield txt
+            elif kind == "result":
+                final_sid = ev.get("session_id") or sid
+                final_result = ev                    # carries usage + total_cost_usd
+                if ev.get("is_error") and not got_any:
+                    yield f"[Claude (Max plan) error: {ev.get('result') or 'unknown'}]"
+        try:
+            p.wait(timeout=5)
+        except Exception:  # noqa: BLE001 — reaping is best-effort
+            pass
+        # Advance the session: remember its id, the full context it now knows, and the
+        # mode it was started with (a mode change forces a fresh session — see _build_cmd).
+        CLI_SESSIONS[dialog] = {"id": final_sid, "sent": context, "mode": mode}
+        if final_result is not None and not final_result.get("is_error"):
+            _accrue(dialog, final_result)            # running token/cost tally
+    finally:
+        # If the SSE consumer abandons the generator (GeneratorExit on .close())
+        # mid-stream, the loop above never finishes and the `claude -p` child would
+        # otherwise leak. Reap it so an abandoned request never orphans a process.
+        # (getattr guard: tolerate lightweight fake processes that omit poll().)
+        poll = getattr(p, "poll", None)
+        if poll is not None and poll() is None:
+            p.terminate()
+            try:
+                p.wait(timeout=5)
+            except Exception:  # noqa: BLE001
+                p.kill()
