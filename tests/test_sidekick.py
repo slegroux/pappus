@@ -987,6 +987,51 @@ def test_run_code_trailing_semicolon_suppresses_value():
     assert text == "" and rich == []                    # Jupyter-style suppression
 
 
+def test_run_code_concurrent_same_dialog_no_lost_updates():
+    """Threads exec'ing into ONE dialog are serialized by the per-dialog lock, so a
+    read-modify-write spanning statements never loses an increment. The sleep
+    between read and write releases the GIL to widen the race window — without the
+    lock the final count would fall short of N."""
+    import threading
+    import server.kernel_server as ks
+    ks.run_code("conc/same", "acc = 0")
+    N = 20
+
+    def bump():
+        ks.run_code("conc/same", "_t = acc\nimport time\ntime.sleep(0.001)\nacc = _t + 1")
+
+    threads = [threading.Thread(target=bump) for _ in range(N)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    text, _ = ks.run_code("conc/same", "acc")
+    assert text == str(N)                               # every increment landed
+
+
+def test_run_code_concurrent_different_dialogs_stay_isolated():
+    """Concurrent execs in different dialogs keep separate namespaces — one
+    dialog's variable never bleeds into another's."""
+    import threading
+    import server.kernel_server as ks
+    errors: list = []
+
+    def work(dialog, val):
+        for _ in range(20):
+            ks.run_code(dialog, f"who = {val!r}")
+            text, _ = ks.run_code(dialog, "who")
+            if text != repr(val):
+                errors.append((dialog, text))
+
+    ta = threading.Thread(target=work, args=("conc/a", "A"))
+    tb = threading.Thread(target=work, args=("conc/b", "B"))
+    ta.start()
+    tb.start()
+    ta.join()
+    tb.join()
+    assert errors == []
+
+
 # ---- variable / expression injection ($`expr` in prompts) ------------------
 def test_inject_vars_evaluates_against_namespace():
     import server.kernel_server as ks
@@ -1548,6 +1593,33 @@ def test_arxiv_url_rewrites_to_pdf():
     assert pl._arxiv_pdf("https://example.com/post") is None        # not arXiv
 
 
+def test_fetch_guard_rejects_nonhttp_and_private_hosts(monkeypatch):
+    from sidekick import paper as pl
+    import pytest as _pt
+    # non-http(s) scheme (file:// local-file read) — refused before any I/O
+    with _pt.raises(pl._BlockedURLError):
+        pl._check_url_allowed("file:///etc/passwd")
+    # loopback and cloud-metadata link-local (numeric IPs → no DNS needed)
+    with _pt.raises(pl._BlockedURLError):
+        pl._check_url_allowed("http://127.0.0.1/internal")
+    with _pt.raises(pl._BlockedURLError):
+        pl._check_url_allowed("http://169.254.169.254/latest/meta-data/")
+    # _fetch itself must refuse before opening a connection
+    with _pt.raises(pl._BlockedURLError):
+        pl._fetch("file:///etc/passwd")
+
+
+def test_fetch_guard_allows_public_host_and_honors_escape_hatch(monkeypatch):
+    from sidekick import paper as pl
+    # a host that resolves to a public IP passes (getaddrinfo mocked — no live network)
+    monkeypatch.setattr(pl.socket, "getaddrinfo",
+                        lambda *a, **k: [(2, 1, 6, "", ("93.184.216.34", 443))])
+    pl._check_url_allowed("https://example.com/paper.pdf")          # does not raise
+    # the escape hatch permits private hosts (legitimate intranet papers)
+    monkeypatch.setenv("SIDEKICK_ALLOW_PRIVATE_URLS", "1")
+    pl._check_url_allowed("http://127.0.0.1/intranet")              # allowed now
+
+
 def test_convert_url_html_is_article_extracted_and_cached(monkeypatch, tmp_path):
     monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
     from sidekick import paper as pl
@@ -2056,10 +2128,14 @@ def test_tools_config_defaults_and_file(monkeypatch, tmp_path):
     assert tc.deny_list() == ["Bash"]
 
 
-def _mcp_client():
+def _mcp_client(client_host="127.0.0.1"):
+    # The /internal/* routes are loopback-only; present a loopback client host so
+    # these tests stand in for the legitimate on-box MCP caller (TestClient's
+    # default host is "testclient", which the loopback guard would reject).
     from starlette.testclient import TestClient
     import sidekick.app as app
-    return app, TestClient(app.app), app.STATE["mcp_token"]
+    tc = TestClient(app.app, client=(client_host, 50000))
+    return app, tc, app.STATE["mcp_token"]
 
 
 def test_internal_cells_forbidden_without_token():
@@ -2067,6 +2143,18 @@ def test_internal_cells_forbidden_without_token():
     app.STATE["dialog"] = "mcp/list"
     app.STATE["backend"].messages("mcp/list")
     assert client.get("/internal/cells", params={"dialog": "mcp/list", "tok": "bad"}).status_code == 403
+
+
+def test_internal_route_rejects_nonloopback_origin_even_with_valid_token():
+    # A correct token from off-box must still be refused — the cell-mutation routes
+    # are loopback-only, a second factor beyond the token (guards SIDEKICK_HOST=0.0.0.0).
+    app, client, tok = _mcp_client(client_host="10.0.0.5")
+    bk = app.STATE["backend"]; d = "mcp/lan"; bk.messages(d)
+    m = bk.add(d, "keep", "code")
+    r = client.post("/internal/cell/update",
+                    data={"dialog": d, "id": m.id, "content": "hijacked", "tok": tok})
+    assert r.status_code == 403
+    assert bk.messages(d)[-1].content == "keep"        # unchanged
 
 
 def test_internal_cell_update_edits_live_backend():
@@ -2102,6 +2190,45 @@ def test_internal_cell_insert_after():
                           "after_id": a.id, "tok": tok})
     assert r.json()["ok"] is True
     assert [c.content for c in bk.messages(d)] == ["first", "second", "third"]
+
+
+def test_cells_dirty_mark_during_stream_survives_to_consume():
+    """The stream generator resets cells_dirty at the start of a turn; an MCP cell
+    edit on another thread mid-turn must still be seen by the end-of-turn consume."""
+    import threading
+    import sidekick.app as app
+    app._reset_cells_dirty()                            # gen: start of turn
+    t = threading.Thread(target=app._mark_cells_dirty)  # the AI edits a cell mid-turn
+    t.start(); t.join()
+    assert app._consume_cells_dirty() is True           # gen: end of turn — edit seen
+    assert app.STATE["cells_dirty"] is False            # and cleared
+
+
+def test_cells_dirty_consume_atomic_no_lost_update():
+    """A mark racing the consume is never silently dropped: it is either observed by
+    that consume or left set for the next one. With a non-atomic read-then-reset a
+    mark landing between the read and the reset would be lost."""
+    import threading
+    import sidekick.app as app
+    app._reset_cells_dirty()
+    observed = 0
+    ROUNDS = 200
+    for _ in range(ROUNDS):
+        go = threading.Event()
+
+        def marker():
+            go.wait()
+            app._mark_cells_dirty()
+
+        t = threading.Thread(target=marker)
+        t.start()
+        go.set()                                        # release ~simultaneously with consume
+        if app._consume_cells_dirty():
+            observed += 1
+        t.join()
+        if app._consume_cells_dirty():                  # a mark that landed just after
+            observed += 1
+    assert observed == ROUNDS                           # every mark accounted for, none lost
 
 
 def test_mcp_server_dispatches_tools(monkeypatch):
@@ -2473,6 +2600,35 @@ def test_build_library_reuses_existing_nbdev_project(tmp_path, monkeypatch):
     res = nx.build_library(_lib_backend(), "audiolib", str(tmp_path), pkg_name="audiolib")
     assert "existing nbdev project" in res["scaffold"]
     assert (tmp_path / "nbs" / "layers.ipynb").exists()       # notebooks refreshed
+
+
+def test_build_library_prunes_orphaned_modules_on_retag(tmp_path, monkeypatch):
+    # Retagging every cell to a new module must not leave the old module's notebook
+    # (or its tangled .py) behind — the live cells are the source of truth.
+    from sidekick import nbdev_export as nx
+    monkeypatch.setenv("SIDEKICK_NBDEV_SCAFFOLD", "0")        # minimal, offline
+    monkeypatch.setattr(nx, "run_nbdev", lambda dest: (False, "skipped"))
+    nx.build_library(_lib_backend(), "audiolib", str(tmp_path), pkg_name="audiolib")
+    assert (tmp_path / "nbs" / "layers.ipynb").exists()
+    assert (tmp_path / "nbs" / "blocks.ipynb").exists()
+    # simulate a prior nbdev tangle + nbdev-owned files in the package dir
+    pkgdir = tmp_path / "audiolib"; pkgdir.mkdir(exist_ok=True)
+    (pkgdir / "layers.py").write_text("# tangled")
+    (pkgdir / "blocks.py").write_text("# tangled")
+    (pkgdir / "__init__.py").write_text("__version__ = '0'")  # nbdev-owned, must survive
+    # retag: cells now target a single new module
+    b = MockBackend()
+    b.add("conv/conv1d", "#| export audiolib:newmod\nclass X:\n    pass", "code")
+    res = nx.build_library(b, "audiolib", str(tmp_path), pkg_name="audiolib")
+    assert not (tmp_path / "nbs" / "layers.ipynb").exists()   # orphan notebooks gone
+    assert not (tmp_path / "nbs" / "blocks.ipynb").exists()
+    assert not (pkgdir / "layers.py").exists()                # and their tangled .py
+    assert not (pkgdir / "blocks.py").exists()
+    assert (tmp_path / "nbs" / "newmod.ipynb").exists()       # the current module written
+    assert (tmp_path / "nbs" / "index.ipynb").exists()        # index never pruned
+    assert (pkgdir / "__init__.py").exists()                  # nbdev-owned file untouched
+    assert set(res["pruned"]) == {"nbs/layers.ipynb", "nbs/blocks.ipynb",
+                                  "audiolib/layers.py", "audiolib/blocks.py"}
 
 
 def test_is_nbdev_project(tmp_path):

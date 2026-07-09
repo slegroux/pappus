@@ -249,6 +249,89 @@ def render_site(dest: str) -> tuple[bool, str]:
     return True, "quarto rendered the site to _site/."
 
 
+# ---- incremental publish (one dialog at a time, reconciled) -----------------
+def _manifest_path(dest: str) -> str:
+    import os
+    return os.path.join(dest, "published.json")
+
+
+def _load_manifest(dest: str) -> dict[str, str]:
+    """The blog's ``dialog name → post slug`` map, recording what has been
+    published so a re-publish is idempotent and renames/collisions can be
+    reconciled. Missing or corrupt → empty (treat as a fresh blog)."""
+    try:
+        with open(_manifest_path(dest), encoding="utf-8") as f:
+            m = json.load(f)
+        return {str(k): str(v) for k, v in m.items()} if isinstance(m, dict) else {}
+    except (OSError, ValueError):
+        return {}
+
+
+def _save_manifest(dest: str, manifest: dict[str, str]) -> None:
+    import os
+    os.makedirs(dest, exist_ok=True)
+    with open(_manifest_path(dest), "w", encoding="utf-8") as f:
+        json.dump(manifest, f, indent=1, sort_keys=True)
+
+
+def _unique_slug(base: str, taken) -> str:
+    s = base or "post"
+    while s in taken:
+        s += "_"
+    return s
+
+
+def publish_dialog(backend, dialog: str, dest: str, title: str = "Sidekick",
+                   date: str | None = None, author: str | None = None) -> dict:
+    """Publish ONE dialog as a post, reconciling against prior publishes recorded in
+    the blog's manifest (``dialog name → post slug``):
+
+    * a dialog re-published **reuses its recorded slug** (stable URL; overwrites
+      only its own post);
+    * a *different* dialog whose name slugs to an already-taken post gets a
+      **distinct slug** — no silent overwrite (the collision the in-run de-dup
+      couldn't see across sessions);
+    * posts whose dialog **no longer exists** (renamed away or deleted) are pruned,
+      so a rename leaves exactly one post, not two.
+
+    Returns ``{"slug", "posts", "pruned", "files", "render_ok", "render_detail"}``.
+    """
+    import os
+    from .nbdev_export import _git_identity, write_files
+
+    if author is None:
+        author = _git_identity()[0] or None
+
+    manifest = _load_manifest(dest)
+    live = set(backend.list_dialogs() or [])
+
+    # GC posts for dialogs that vanished (renamed/deleted), except the current one.
+    pruned: list[str] = []
+    for name in list(manifest):
+        if name != dialog and name not in live:
+            old = os.path.join(dest, "posts", f"{manifest[name]}.ipynb")
+            if os.path.isfile(old):
+                os.remove(old)
+                pruned.append(os.path.relpath(old, dest))
+            del manifest[name]
+
+    # Reuse this dialog's own slug if it has one; else pick a fresh unique slug.
+    if dialog in manifest:
+        post_slug = manifest[dialog]
+    else:
+        post_slug = _unique_slug(slug(dialog), set(manifest.values()))
+    manifest[dialog] = post_slug
+
+    nb = dialog_to_post(backend.messages(dialog), title=dialog, date=date, author=author)
+    files = {"_quarto.yml": _quarto_yml(title), "index.qmd": _index_qmd(title),
+             f"posts/{post_slug}.ipynb": json.dumps(nb, indent=1) + "\n"}
+    write_files(dest, files)
+    _save_manifest(dest, manifest)
+    render_ok, detail = render_site(dest)
+    return {"slug": post_slug, "posts": sorted(manifest.values()), "pruned": pruned,
+            "files": sorted(files), "render_ok": render_ok, "render_detail": detail}
+
+
 def build_blog(backend, dialogs: list[str], dest: str, title: str = "Sidekick",
                date: str | None = None, author: str | None = None) -> dict:
     """Build a blog at ``dest`` from the named ``dialogs`` (one post each), then

@@ -8,8 +8,11 @@ marker isn't available we fall back to lightweight pypdf text extraction.
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import os
+import socket
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 def _cache_dir() -> Path:
@@ -149,11 +152,59 @@ def _arxiv_pdf(url: str) -> str | None:
     return f"https://arxiv.org/pdf/{m.group(1)}{m.group(2) or ''}" if m else None
 
 
+class _BlockedURLError(ValueError):
+    """A URL was refused by the SSRF guard (bad scheme or a private/loopback host)."""
+
+
+def _ip_is_blocked(ip: str) -> bool:
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return True                          # unparseable address → refuse
+    return (addr.is_private or addr.is_loopback or addr.is_link_local
+            or addr.is_reserved or addr.is_multicast or addr.is_unspecified)
+
+
+def _check_url_allowed(url: str) -> None:
+    """Raise _BlockedURLError unless `url` is a plain http(s) URL whose host resolves
+    only to public addresses. Guards the paper importer against SSRF: `file://` and
+    other schemes, loopback (127/8, ::1), private ranges (10/8, 172.16/12,
+    192.168/16, fc00::/7), and cloud metadata (link-local 169.254/16, fe80::/10) are
+    refused. Set SIDEKICK_ALLOW_PRIVATE_URLS=1 to permit private/loopback hosts
+    (legitimate intranet papers)."""
+    parsed = urlparse(url)
+    if parsed.scheme not in ("http", "https"):
+        raise _BlockedURLError(f"refusing non-http(s) URL scheme: {parsed.scheme or '(none)'}")
+    if os.environ.get("SIDEKICK_ALLOW_PRIVATE_URLS") == "1":
+        return
+    host = parsed.hostname
+    if not host:
+        raise _BlockedURLError("URL has no host")
+    port = parsed.port or (443 if parsed.scheme == "https" else 80)
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    except socket.gaierror as e:
+        raise _BlockedURLError(f"cannot resolve host {host!r}: {e}") from e
+    for info in infos:
+        ip = info[4][0]
+        if _ip_is_blocked(ip):
+            raise _BlockedURLError(f"refusing private/loopback host {host!r} → {ip}")
+
+
 def _fetch(url: str) -> tuple[bytes, str]:
-    """Fetch a URL → (bytes, content_type). Follows redirects (urllib default)."""
+    """Fetch a URL → (bytes, content_type). Only http(s) to public hosts (SSRF
+    guard, _check_url_allowed); redirects are followed but re-checked at each hop."""
     import urllib.request
+
+    class _GuardedRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            _check_url_allowed(newurl)       # a redirect must not escape the guard
+            return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+    _check_url_allowed(url)
+    opener = urllib.request.build_opener(_GuardedRedirect())
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (solveit-sidekick)"})
-    with urllib.request.urlopen(req, timeout=25) as r:
+    with opener.open(req, timeout=25) as r:
         return r.read(), (r.headers.get("Content-Type") or "")
 
 
