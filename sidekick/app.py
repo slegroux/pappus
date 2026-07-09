@@ -24,7 +24,7 @@ from .client import (connect, build_context, est_tokens, _InMemoryBackend, MockB
                      HttpKernelBackend)
 from .claude_cli import (stream as stream_claude, call as call_claude,
                          cost_for, CLI_MODELS, AI_MODES, DEFAULT_MODE)
-from . import secrets_store, export, libraries, nbdev_export
+from . import secrets_store, export, libraries, nbdev_export, scaffold
 from . import paper as paperlib
 
 
@@ -1252,8 +1252,31 @@ def MsgRow(m, num=None):
         primary.append(_stream_btn(
             "Split to code", "/cell/split", vals={"id": m.id},
             title="Extract the answer's code blocks into runnable code cells below"))
+    if m.msg_type == "code":
+        primary += _fade_buttons(m)
     return Div(_head(m, primary, num=num), _rendered_content(m), *_output_views(m),
                cls=_rowcls(m), id=f"cell-{m.id}")
+
+
+def _fade_buttons(m):
+    """Faded-scaffolding (F6) cell-toolbar affordance, mirroring "Split to code".
+
+    A worked code cell gets "Fade to exercise" (→ level-1 exercise below). A cell
+    that is already a faded exercise gets a fade stepper (Show worked / Fill-in /
+    From scratch) plus "Ask AI to check" — all re-run `/cell/fade` (or `/cell/check`)."""
+    if _is_exercise(m.content):
+        lvl = lambda label, n, title: _stream_btn(
+            label, "/cell/fade", cls="cell-btn fade", vals={"id": m.id, "level": n}, title=title)
+        return [
+            lvl("Show worked", 0, "Reveal the full worked solution (level 0)"),
+            lvl("Fill-in", 1, "Blank the load-bearing lines to complete (level 1)"),
+            lvl("From scratch", 2, "Collapse to a goal + stub; write it yourself (level 2)"),
+            _stream_btn("Ask AI to check", "/cell/check", cls="cell-btn", vals={"id": m.id},
+                        title="Ask the AI to compare your attempt to the worked solution and hint"),
+        ]
+    return [_stream_btn(
+        "Fade to exercise", "/cell/fade", cls="cell-btn fade", vals={"id": m.id, "level": 1},
+        title="Turn this worked code into a fill-in-the-blank exercise below")]
 
 
 def _cell_edit(m, num=None):
@@ -3519,6 +3542,105 @@ def cell_split(id: str):
             anchor = last.id
         if last is not None:
             STATE["scroll_to"] = last.id
+    return Stream()
+
+
+# ── Faded scaffolding (F6) ───────────────────────────────────────────────────
+# A "faded exercise" is just an ordinary CODE cell (no new cell type) whose first
+# line is this marker comment — that both tells the learner what to do and lets
+# us detect the cell so re-fading updates it in place instead of stacking copies.
+_EXERCISE_HEADER = "# ✏️ Exercise — fill in the ___ blanks (faded from the worked cell above)"
+
+
+def _exercise_content(faded: str) -> str:
+    """Wrap faded code as an exercise cell (marker header + the faded body)."""
+    return f"{_EXERCISE_HEADER}\n{faded}"
+
+
+def _is_exercise(content: str) -> bool:
+    return (content or "").lstrip().startswith(_EXERCISE_HEADER)
+
+
+def _strip_exercise_marker(content: str) -> str:
+    """The learner's attempt without the marker header line."""
+    lines = (content or "").splitlines()
+    if lines and lines[0].lstrip().startswith(_EXERCISE_HEADER):
+        lines = lines[1:]
+    return "\n".join(lines)
+
+
+def _fade_source(msgs, idx: int):
+    """The worked code cell an exercise at position `idx` was faded from: the
+    nearest preceding code cell that is not itself an exercise."""
+    for j in range(idx - 1, -1, -1):
+        s = msgs[j]
+        if s.msg_type == "code" and not _is_exercise(s.content):
+            return s
+    return None
+
+
+@rt("/cell/fade", methods=["post"])
+def cell_fade(id: str, level: int = 1):
+    """Fade a worked code cell into a graded exercise — a cell TRANSFORM in the
+    same spirit as "Split to code" (`/cell/split`).
+
+    From a worked (non-exercise) code cell it inserts ONE derived exercise cell
+    below at `level` (reusing the same `backend.insert` split uses); if an
+    exercise already sits directly below, it re-fades that in place. Called on an
+    existing exercise cell it re-fades in place from its worked source above —
+    so `level` 0/1/2 = "show worked answer" / "fill-in" / "from scratch"."""
+    backend = STATE["backend"]
+    if not hasattr(backend, "insert"):
+        return Stream()
+    msgs = backend.messages(STATE["dialog"])
+    idx = next((i for i, m in enumerate(msgs) if m.id == id), None)
+    if idx is None or msgs[idx].msg_type != "code":
+        return Stream()
+    m = msgs[idx]
+
+    if _is_exercise(m.content):
+        src = _fade_source(msgs, idx)
+        if src is None:
+            return Stream()
+        content = _exercise_content(scaffold.fade_code(src.content, level))
+        if hasattr(backend, "update"):
+            backend.update(STATE["dialog"], m.id, content)
+        STATE["scroll_to"] = m.id
+        return Stream()
+
+    content = _exercise_content(scaffold.fade_code(m.content, level))
+    nxt = msgs[idx + 1] if idx + 1 < len(msgs) else None
+    if nxt is not None and nxt.msg_type == "code" and _is_exercise(nxt.content) \
+            and hasattr(backend, "update"):
+        backend.update(STATE["dialog"], nxt.id, content)
+        STATE["scroll_to"] = nxt.id
+    else:
+        new = backend.insert(STATE["dialog"], content, "code", anchor_id=id)
+        STATE["scroll_to"] = new.id
+    return Stream()
+
+
+@rt("/cell/check", methods=["post"])
+def cell_check(id: str):
+    """AI-check step for a faded exercise. This does NOT add any AI wiring: it
+    inserts an ordinary prompt cell pre-filled with `scaffold.check_prompt(...)`
+    below the exercise, then drops the learner into it so they hit the existing
+    "Ask" button — the answer streams through the normal `/cell/run` prompt path
+    with full dialog context."""
+    backend = STATE["backend"]
+    if not hasattr(backend, "insert"):
+        return Stream()
+    msgs = backend.messages(STATE["dialog"])
+    idx = next((i for i, m in enumerate(msgs) if m.id == id), None)
+    if idx is None:
+        return Stream()
+    src = _fade_source(msgs, idx)
+    original = src.content if src is not None else ""
+    attempt = _strip_exercise_marker(msgs[idx].content)
+    prompt = scaffold.check_prompt(original, attempt)
+    m = backend.insert(STATE["dialog"], prompt, "prompt", anchor_id=id)
+    STATE["editing"] = m.id          # let the learner review, then click Ask
+    STATE["scroll_to"] = m.id
     return Stream()
 
 
