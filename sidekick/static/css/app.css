@@ -1,0 +1,384 @@
+
+:root{
+  --bg:#F0EEE6; --panel:#FAF9F5; --sidebar:#F0EEE6; --ink:#2B2A27; --muted:#73706A;
+  --line:#E4E1D8; --accent:#D97757; --accent-ink:#fff; --code-bg:#2B2A27; --code-ink:#EFE9DD;
+  --md-code-bg:#EAE6DA;  /* non-runnable code in answers/notes; sync with _LightCodeStyle */
+  --bubble-user:#F5E9E2; --chip:#EDEAE1;
+}
+*{box-sizing:border-box} html,body{margin:0;height:100%}
+body{font-family:'Styrene B','Segoe UI',system-ui,-apple-system,sans-serif;
+  background:var(--bg);color:var(--ink);font-size:15px;line-height:1.55}
+/* global top bar over a flex row of columns; any column can be hidden */
+.app{display:flex;flex-direction:column;height:100vh;--side-w:264px;--toc-w:244px;--paper-w:50%}
+.cols{display:flex;flex:1;min-height:0}
+/* drag-to-resize handles between columns: zero-width flex items with a wider
+   invisible hit area straddling the seam, so resizing adds no layout gap. */
+.gutter{flex:0 0 0;position:relative;z-index:6}
+.gutter::before{content:"";position:absolute;top:0;bottom:0;left:-3px;width:7px;cursor:col-resize}
+.gutter:hover::before,.gutter.dragging::before{background:var(--accent);opacity:.5}
+.app.no-side .gutter-side{display:none}
+.gutter-paper,.gutter-toc{display:none}
+.app.paper-open .gutter-paper{display:block}
+.app.paper-collapsed .gutter-paper{display:none}
+.app.toc-open .gutter-toc{display:block}
+body.col-resizing{cursor:col-resize;user-select:none}
+.app.no-side .side{display:none}
+.topbar-left{display:flex;align-items:center;gap:12px;min-width:0}
+.topbar-right{display:flex;align-items:center;gap:12px}
+/* paper reading panel (left column, toggled open when a paper is loaded) */
+.paper{display:none;background:var(--panel);border-right:1px solid var(--line);overflow:auto;padding:16px 18px;min-width:0}
+.app.paper-open .paper{display:flex;flex-direction:column;flex:0 0 var(--paper-w)}
+.app.paper-open.no-paper .paper,.app.no-paper .gutter-paper{display:none}   /* topbar 📖 toggle */
+.paper-head{display:flex;align-items:center;justify-content:space-between;gap:8px;margin-bottom:4px}
+.paper-actions{display:flex;align-items:center;gap:8px;flex-shrink:0}
+.paper-import{margin:0;display:flex;align-items:center;gap:5px}
+.paper-name{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.paper-converting{margin-top:14px;color:var(--muted);font-size:13px;font-style:italic}
+.paper-body{margin-top:10px;font-size:13px;line-height:1.6}
+.paper-body img{max-width:100%}
+/* collapsed paper: hide the text, keep the header (incl. Next section) in a
+   compact strip so the notebook reclaims the width. */
+.paper-toggle{cursor:pointer;transition:transform .12s}
+.app.paper-collapsed .paper-toggle{transform:rotate(-90deg)}
+.app.paper-collapsed .paper-body,.app.paper-collapsed .paper-badge{display:none}
+.app.paper-collapsed .paper{flex:0 0 auto}
+.app.paper-collapsed .paper-name{max-width:150px}
+/* secondary import options (stepper + bulk), behind a small "Import…" menu */
+.paper-import-menu{position:absolute;right:0;top:28px;z-index:30;display:flex;flex-direction:column;gap:6px;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:10px;min-width:210px;
+  box-shadow:0 6px 18px rgba(0,0,0,.12)}
+.paper-import-menu .ins-col-head{margin:2px 0 0}
+/* floating toolbar shown when you highlight text in the paper */
+.sel-tools{position:absolute;z-index:60;display:none;gap:6px;box-shadow:0 4px 12px rgba(0,0,0,.20);
+  border-radius:8px}
+.sel-btn{border:none;border-radius:8px;padding:5px 11px;font-size:12px;cursor:pointer;white-space:nowrap}
+.sel-btn.import{background:var(--accent);color:#fff;font-weight:600}
+.sel-btn:not(.import){background:var(--panel);color:var(--ink);border:1px solid var(--line)}
+/* the 📄 topbar icon IS the file picker: a label wrapping a hidden file input */
+.paper-file{display:none}
+/* "open a source" dropdown: a PDF file pick or a web-page URL */
+.src-form{position:absolute;right:0;top:28px;z-index:30;display:flex;flex-direction:column;gap:8px;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;min-width:248px;
+  box-shadow:0 6px 18px rgba(0,0,0,.12)}
+.src-file-label{font-size:13px;font-weight:600;color:var(--accent);cursor:pointer}
+.src-url{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;font-size:13px;outline:none}
+.src-url:focus{border-color:var(--accent)}
+/* table of contents (right column, toggleable, full-height so it stays in view) */
+.toc{display:none;background:var(--sidebar);border-left:1px solid var(--line);
+  padding:16px 14px;overflow:auto}
+.app.toc-open .toc{display:flex;flex-direction:column;flex:0 0 var(--toc-w)}
+.toc-head{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);margin-bottom:10px}
+.toc-list{display:flex;flex-direction:column;gap:1px}
+.toc-link{display:block;text-decoration:none;color:var(--ink);font-size:13px;padding:4px 8px;border-radius:7px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.toc-link:hover{background:#E8E5DB}
+.toc-h1{font-weight:600}
+.toc-h2{padding-left:18px}
+.toc-h3{padding-left:30px;color:var(--muted)}
+.toc-h4,.toc-h5,.toc-h6{padding-left:42px;color:var(--muted);font-size:12px}
+.toc-empty{font-size:12px;color:var(--muted);font-style:italic;padding:4px 8px}
+.toc-toggle{cursor:pointer}
+/* sidebar */
+.side{flex:0 0 var(--side-w);background:var(--sidebar);border-right:1px solid var(--line);display:flex;flex-direction:column;padding:14px 12px;overflow:auto}
+.brand{display:flex;align-items:center;gap:9px;font-weight:600;padding:6px 8px 14px}
+.brand .dot{width:22px;height:22px;border-radius:6px;background:var(--accent);display:grid;place-items:center;color:#fff;font-size:13px}
+.newbtn{display:flex;align-items:center;gap:8px;width:100%;border:1px solid var(--line);background:var(--panel);
+  color:var(--ink);border-radius:10px;padding:9px 12px;cursor:pointer;font-size:14px;margin-bottom:12px}
+.newbtn:hover{border-color:#d4d0c4}
+.seclabel{font-size:11px;letter-spacing:.04em;text-transform:uppercase;color:var(--muted);padding:8px 8px 4px}
+.conv{display:block;padding:8px 10px;border-radius:8px;color:var(--ink);text-decoration:none;font-size:14px;cursor:pointer;
+  flex:1 1 auto;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.conv:hover{background:#E8E5DB} .conv.active{background:#E3DFD3;font-weight:500}
+/* a dialog row: open-link + a ⋯ actions menu revealed on hover */
+.conv-row{display:flex;align-items:center;gap:2px;position:relative}
+.conv-actions{position:relative;flex:0 0 auto}
+.conv-dots{list-style:none;cursor:pointer;color:var(--muted);opacity:0;padding:2px 7px;border-radius:6px;
+  font-size:16px;line-height:1;transition:opacity .12s}
+.conv-dots::-webkit-details-marker{display:none}
+.conv-row:hover .conv-dots,.conv-actions[open] .conv-dots{opacity:.65}
+.conv-dots:hover{opacity:1;background:#E8E5DB}
+.conv-menu{position:absolute;right:0;top:26px;z-index:30;background:var(--panel);border:1px solid var(--line);
+  border-radius:8px;padding:4px;box-shadow:0 6px 18px rgba(0,0,0,.14);min-width:120px}
+.conv-del-form{margin:0}
+.conv-del{display:block;width:100%;text-align:left;border:none;background:none;color:#B3402F;cursor:pointer;
+  font:inherit;font-size:13px;padding:6px 10px;border-radius:6px}
+.conv-del:hover{background:#F6E8E4}
+.folder>.conv-row,.folder>.folder{margin-left:10px}
+/* multi-select (shift/⌘-click) + bulk-delete bar */
+.conv-row.sel>.conv{background:#E6F2EA;box-shadow:inset 2px 0 0 var(--accent)}
+.sel-bar{display:none;align-items:center;gap:6px;margin:4px 2px 6px;padding:5px 8px;border-radius:8px;
+  background:#FBF3E7;border:1px solid #E3C7AE}
+.sel-count{flex:1 1 auto;font-size:12px;color:var(--muted)}
+.sel-del{border:none;background:none;color:#B3402F;font:inherit;font-size:12px;font-weight:600;cursor:pointer;
+  padding:3px 7px;border-radius:6px}
+.sel-del:hover{background:#F6E8E4}
+.sel-clear{border:none;background:none;color:var(--muted);font:inherit;font-size:12px;cursor:pointer;padding:3px 5px}
+.sel-clear:hover{color:var(--ink)}
+.folder-label{list-style:none;cursor:pointer;font-size:11px;letter-spacing:.04em;text-transform:uppercase;
+  color:var(--muted);padding:8px 8px 4px;user-select:none}
+.folder-label::-webkit-details-marker{display:none}
+.folder-label::before{content:"▸ ";font-size:9px;display:inline-block;transition:transform .12s}
+.folder[open]>.folder-label::before{transform:rotate(90deg)}
+.side-foot{margin-top:auto;font-size:12px;color:var(--muted);padding:8px}
+/* main */
+.main{flex:1 1 0;display:flex;flex-direction:column;min-width:0;min-height:0}  /* min-height:0 lets .stream scroll, not .main */
+.topbar{flex-shrink:0;display:flex;align-items:center;justify-content:space-between;gap:14px;padding:12px 22px;border-bottom:1px solid var(--line)}
+.title{font-weight:600}
+.title-form{margin:0}
+.title-edit{font-weight:600;font-size:15px;font-family:inherit;color:var(--ink);
+  border:1px solid transparent;background:transparent;border-radius:7px;padding:4px 8px;
+  min-width:240px;outline:none}
+.title-edit:hover{border-color:var(--line)}
+.title-edit:focus{border-color:var(--accent);background:var(--panel)}
+.gear{text-decoration:none;font-size:18px;color:var(--muted);line-height:1}
+.gear:hover{color:var(--ink)}
+.gear.tgl{cursor:pointer;border-radius:7px;padding:2px 4px;transition:opacity .12s,background .12s}
+/* a panel-toggle whose panel is hidden: dimmed, so what's collapsed is obvious */
+.gear.tgl.off{opacity:.34}
+.gear.tgl.off:hover{opacity:1;background:var(--chip)}
+/* export dropdown */
+.export{position:relative}
+.export>summary{list-style:none;cursor:pointer}
+.export>summary::-webkit-details-marker{display:none}
+.export-menu{position:absolute;right:0;top:28px;z-index:20;display:flex;flex-direction:column;gap:2px;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:6px;min-width:188px;
+  box-shadow:0 6px 18px rgba(0,0,0,.10)}
+.export-menu a{text-decoration:none;color:var(--ink);font-size:13px;padding:6px 10px;border-radius:7px;white-space:nowrap}
+.export-menu a:hover{background:#E8E5DB}
+/* settings */
+.settings-page{min-height:100vh;background:var(--bg);overflow:auto}
+.settings-wrap{max-width:640px;margin:0 auto;padding:28px 22px 60px}
+.settings-top{display:flex;align-items:center;gap:14px;margin-bottom:6px}
+.back{text-decoration:none;color:var(--muted);font-size:14px}
+.back:hover{color:var(--ink)}
+.settings-intro{color:var(--muted);font-size:13px;margin:8px 0 20px;line-height:1.5}
+.saved{background:#E6F2EA;border:1px solid #BFE0CC;color:#2C6B45;padding:8px 12px;border-radius:8px;margin-bottom:14px;font-size:14px}
+.prov-card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:14px 16px;margin-bottom:14px}
+.prov-head{margin-bottom:4px}
+.prov-status{font-size:13px;margin-bottom:9px}
+.prov-status.ok{color:#2C6B45}.prov-status.off{color:var(--muted)}
+.keyinput{width:100%;border:1px solid var(--line);border-radius:8px;padding:9px 11px;font:inherit;background:#fff;color:var(--ink);outline:none}
+.keyinput:focus{border-color:var(--accent)}
+.muted{color:var(--muted)}.small{font-size:12px;margin-top:6px}
+.pill-default{background:var(--accent);color:#fff;font-size:11px;border-radius:999px;padding:2px 8px;margin-left:8px}
+.save-btn{background:var(--accent);border:none;color:#fff;border-radius:10px;padding:10px 22px;font-size:14px;cursor:pointer;margin-top:4px}
+.save-btn:hover{filter:brightness(1.05)}
+.target{display:flex;align-items:center;gap:8px}
+.target form{display:inline}
+.pill{display:inline-flex;align-items:center;gap:7px;background:var(--chip);border:1px solid var(--line);
+  border-radius:999px;padding:6px 12px;font-size:13px;cursor:pointer}
+.led{width:8px;height:8px;border-radius:50%}
+.led.live{background:#3FA66A;box-shadow:0 0 0 3px rgba(63,166,106,.18)}
+.led.mock{background:#C9A227;box-shadow:0 0 0 3px rgba(201,162,39,.18)}
+select.tsel{appearance:none;background:var(--chip);border:1px solid var(--line);border-radius:999px;
+  padding:6px 30px 6px 12px;font-size:13px;cursor:pointer;color:var(--ink)}
+.banner{background:#FBF3E7;border-bottom:1px solid #EAD9BE;color:#7A5B1E;padding:8px 22px;font-size:13px}
+/* conversation */
+.stream{flex:1;overflow:auto;padding:14px 0}
+.wrap{max-width:760px;margin:0 auto;padding:0 22px}
+.row{margin-bottom:9px}
+.who{font-size:11px;color:var(--muted);margin-bottom:2px;display:flex;align-items:center;gap:6px}
+.tag{font-size:10px;border:1px solid var(--line);border-radius:6px;padding:0 5px;color:var(--muted)}
+/* collapsible heading sections */
+.sec-caret{cursor:pointer;color:var(--ink);opacity:.6;font-size:18px;line-height:1;user-select:none;
+  transition:transform .12s,opacity .12s;display:inline-flex;align-items:center;
+  width:20px;height:20px;justify-content:center;border-radius:6px}
+.sec-caret:hover{opacity:1;background:var(--chip)}
+.sec-caret.collapsed{transform:rotate(-90deg)}
+.sec-count{font-size:11px;color:var(--muted);background:var(--chip);border-radius:10px;padding:0 7px}
+#stream .row.sec-hidden{display:none}
+.bubble{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px 12px}
+.bubble.user{background:var(--bubble-user);border-color:#EBD9CD}
+.bubble.note{background:transparent;border:none;padding:2px 0}
+/* AI "working" indicators: a spinning wheel while we wait for the first token,
+   then a blinking caret at the tail of the answer while it streams in. */
+.thinking{display:inline-flex;align-items:center;gap:8px;color:var(--muted);font-size:13px}
+.spinner{display:inline-block;width:13px;height:13px;border:2px solid var(--line);
+  border-top-color:var(--accent);border-radius:50%;animation:spin .7s linear infinite}
+@keyframes spin{to{transform:rotate(360deg)}}
+.bubble.streaming::after{content:'▌';color:var(--accent);margin-left:1px;
+  animation:caret-blink 1s step-start infinite}
+@keyframes caret-blink{50%{opacity:0}}
+pre.code{background:var(--code-bg);color:var(--code-ink);border-radius:10px;padding:10px 14px;overflow:auto;
+  font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;margin:0}
+.out{margin-top:4px;border-left:2px solid var(--line);padding:3px 0 3px 12px;color:var(--muted);
+  font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;white-space:pre-wrap}
+.empty{color:var(--muted);text-align:center;margin-top:60px}
+/* composer */
+.composer{padding:0 0 22px} .composer .wrap{padding:0 22px}
+.box{background:var(--panel);border:1px solid var(--line);border-radius:16px;padding:10px 12px;
+  box-shadow:0 1px 2px rgba(0,0,0,.03)}
+.box textarea{width:100%;border:none;outline:none;resize:none;background:transparent;font:inherit;color:var(--ink);min-height:46px}
+.row2{display:flex;align-items:center;justify-content:space-between;margin-top:6px}
+.modes{display:flex;gap:6px}
+.mode{font-size:12px;border:1px solid var(--line);background:#fff;border-radius:8px;height:32px;padding:0 12px;
+  display:inline-flex;align-items:center;cursor:pointer;color:var(--muted)}
+.mode input{display:none}
+.mode.sel{background:var(--accent);border-color:var(--accent);color:#fff}
+select.msel{appearance:none;background:#fff;border:1px solid var(--line);border-radius:8px;height:32px;padding:0 24px 0 12px;
+  font-size:12px;cursor:pointer;color:var(--ink)}
+.send{background:var(--accent);border:none;color:#fff;border-radius:8px;width:32px;height:32px;cursor:pointer;font-size:15px}
+.send:hover{filter:brightness(1.05)}
+.hint{font-size:11px;color:var(--muted);margin-top:8px;text-align:center}
+/* editable cells */
+.cell-edit{width:100%;border:1px solid var(--line);border-radius:11px;padding:11px 13px;font:inherit;
+  background:var(--panel);color:var(--ink);resize:none;outline:none;overflow:hidden;min-height:42px;display:block;
+  field-sizing:content}     /* auto-grows to fit content (Chrome/Edge/Safari); JS fallback below */
+.cell-edit:focus{border-color:var(--accent)}
+.cell-edit.code-edit{font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;
+  background:var(--code-bg);color:var(--code-ink);border-color:#3a3933}
+.cell-actions{display:flex;gap:6px;margin-left:auto;opacity:0;transition:opacity .12s}
+.row:hover .cell-actions,.cell-actions:focus-within,.cell-actions.show{opacity:1}
+/* rendered cells are click-to-edit; hint it on hover */
+.clickedit{cursor:text;border-radius:9px;transition:outline-color .12s}
+.clickedit:hover{outline:1px dashed var(--line);outline-offset:4px}
+.note-view{padding:1px 0}.prompt-view{white-space:pre-wrap}
+.note-view .muted,.prompt-view .muted,.code-view .muted{font-style:italic}
+/* pygments code block (server-side highlight, inline colors) */
+.code-view .highlight{margin:0;border-radius:11px;overflow:auto}
+.code-view .highlight pre{margin:0;padding:8px 13px;border-radius:11px;
+  font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;line-height:1.45}
+/* CodeMirror: highlight-while-editing for code cells (matches the rendered look) */
+.CodeMirror{height:auto;border:1px solid #3a3933;border-radius:11px;
+  font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px;line-height:1.5}
+.CodeMirror-scroll{min-height:auto}
+.CodeMirror-lines{padding:9px 0}
+/* Re-map CodeMirror's monokai onto Pygments' exact monokai palette, so a code
+   cell looks IDENTICAL rendered (Pygments) vs being edited (CodeMirror). CM's
+   own theme uses `span.cm-*` selectors, so we match that specificity to win. */
+.cm-s-monokai.CodeMirror{color:#f8f8f2}
+.cm-s-monokai span.cm-keyword{color:#66d9ef}
+.cm-s-monokai span.cm-operator{color:#ff4689}
+.cm-s-monokai span.cm-def{color:#a6e22e}
+.cm-s-monokai span.cm-variable,.cm-s-monokai span.cm-variable-2,
+.cm-s-monokai span.cm-property{color:#f8f8f2}
+.cm-s-monokai span.cm-builtin,.cm-s-monokai span.cm-variable-3,
+.cm-s-monokai span.cm-type{color:#f8f8f2}
+.cm-s-monokai span.cm-string,.cm-s-monokai span.cm-string-2{color:#e6db74}
+.cm-s-monokai span.cm-number,.cm-s-monokai span.cm-atom{color:#ae81ff}
+.cm-s-monokai span.cm-comment{color:#959077}
+.cm-s-monokai span.cm-meta,.cm-s-monokai span.cm-qualifier{color:#a6e22e}
+.cell-btn{font-size:12px;border:1px solid var(--line);background:#fff;border-radius:7px;padding:3px 11px;
+  cursor:pointer;color:var(--muted);line-height:1.6}
+.cell-btn:hover{border-color:#d4d0c4;color:var(--ink)}
+.cell-btn.run{background:var(--accent);color:#fff;border-color:var(--accent)}
+.cell-btn.run:hover{filter:brightness(1.05);color:#fff}
+.cell-btn.del:hover{border-color:#C0584B;color:#C0584B}
+.cell-btn.link{padding:3px 8px}
+.cell-btn.link.copied{border-color:var(--accent);color:var(--accent)}
+/* #_msgid references in notes / AI answers */
+a.msglink{color:var(--accent);text-decoration:none;border-bottom:1px dotted var(--accent);
+  font-variant-numeric:tabular-nums;cursor:pointer}
+a.msglink:hover{border-bottom-style:solid}
+/* brief pulse when you jump to a cell via a link */
+@keyframes msgflash{0%{background:rgba(217,119,87,.22)}100%{background:transparent}}
+.row.msg-flash{animation:msgflash 1.6s ease-out;border-radius:10px}
+.cell-btn.ins{color:#2C6B45;font-weight:600}
+.cell-btn.ins:hover{border-color:#BFE0CC;background:#E6F2EA}
+.ins{position:relative;display:inline-block}
+.ins>summary{list-style:none;cursor:pointer}
+.ins>summary::-webkit-details-marker{display:none}
+.ins-menu{position:absolute;right:0;top:26px;z-index:30;display:flex;gap:10px;
+  background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px;
+  box-shadow:0 6px 18px rgba(0,0,0,.12)}
+.ins-col{display:flex;flex-direction:column;gap:3px;min-width:80px}
+.lib-form{display:flex;flex-direction:column;gap:6px;min-width:190px}
+.lib-form .keyinput{font-size:12px;padding:5px 8px}
+.ins-col-head{font-size:10px;text-transform:uppercase;letter-spacing:.04em;color:var(--muted);margin-bottom:2px}
+.ins-item{text-align:left;font-size:12px;border:1px solid var(--line);background:#fff;border-radius:7px;
+  padding:4px 9px;cursor:pointer;color:var(--ink)}
+.ins-item:hover{border-color:var(--accent);background:#FBF3E7}
+.type-menu{position:absolute;right:0;top:26px;z-index:30;display:flex;flex-direction:column;gap:3px;
+  min-width:96px;background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:8px;
+  box-shadow:0 6px 18px rgba(0,0,0,.12)}
+.ins-item.cur{border-color:var(--accent);background:#FBF3E7;font-weight:600}   /* the current type */
+/* Copy-to-dialog menu: same drop as the type menu, but names can be long, so cap
+   the width and keep the list scrollable rather than letting it run off-screen. */
+.copy-menu{min-width:140px;max-width:240px;max-height:280px;overflow:auto}
+.copy-menu .ins-item{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+/* one-shot confirmation banner after a cross-dialog copy */
+.flash{position:sticky;bottom:10px;align-self:center;margin:8px auto 0;width:fit-content;
+  background:#2C6B45;color:#fff;font-size:13px;border-radius:8px;padding:7px 14px;
+  box-shadow:0 6px 18px rgba(0,0,0,.18);animation:flashin .15s ease-out}
+@keyframes flashin{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:none}}
+/* the cell a/b will target (last hovered) */
+#stream .row:hover{box-shadow:inset 2px 0 0 var(--line)}
+/* the selected cell in Jupyter-style command mode (Esc / j / k) */
+#stream .row.selected{box-shadow:inset 3px 0 0 var(--accent);border-radius:10px;
+  background:rgba(44,107,69,.04)}
+.cell-btn.ctx.off{color:#B0784F;border-color:#E3C7AE;background:#FBF3E7}
+.cell-btn.pin.on{color:#2C6B45;border-color:#BFE0CC;background:#E6F2EA}
+.cell-btn.exp.on{color:#4A5BA6;border-color:#C3CBEB;background:#ECEFF9}
+.tok{margin-left:2px;font-variant-numeric:tabular-nums}
+/* cell number badge: a quiet gutter index the user can say "fix cell 3" by, and
+   the same number the AI sees as n="…" in its context. */
+.cell-num{color:var(--muted);font-size:11px;font-variant-numeric:tabular-nums;
+  min-width:15px;text-align:right;user-select:none;flex:0 0 auto}
+.row.muted .cell-num{opacity:.5}
+/* drag-to-reorder handle (hover-revealed, like the toolbar) */
+.drag-handle{cursor:grab;color:var(--muted);opacity:0;transition:opacity .12s;
+  user-select:none;font-size:14px;line-height:1;padding:0 3px;margin-left:-6px}
+.row:hover .drag-handle{opacity:.55}
+.drag-handle:hover{opacity:1}
+.drag-handle:active{cursor:grabbing}
+.sortable-ghost{opacity:.35}
+.sortable-chosen{background:#EDEAE1;border-radius:10px}
+/* a cell muted out of the AI's context: dim it, but keep it usable */
+.row.muted .cell-edit,.row.muted .bubble,.row.muted .out,.row.muted .cell-img{opacity:.5}
+.row.muted .tag{opacity:.6}
+/* a pinned cell: a small accent rail on the left */
+.row.pinned{border-left:2px solid var(--accent);margin-left:-12px;padding-left:10px}
+/* rich kernel output: plots, images, dataframes */
+.cell-img{max-width:100%;height:auto;border:1px solid var(--line);border-radius:8px;margin-top:9px;display:block;background:#fff}
+.cell-svg{margin-top:9px;background:#fff;border:1px solid var(--line);border-radius:8px;padding:6px;overflow-x:auto}
+.cell-svg svg{max-width:100%;height:auto;display:block}
+.row.muted .cell-svg{opacity:.5}
+.cell-html table{border-collapse:collapse}
+.cell-html th,.cell-html td{border:1px solid var(--line);padding:4px 9px;text-align:right}
+.cell-html th{background:var(--chip)}
+/* live context meter at the foot of the stream */
+.ctx-meter{margin:10px auto 4px;text-align:center;font-size:12px;color:var(--muted);
+  border-top:1px dashed var(--line);padding-top:8px}
+.answer{margin-top:5px}
+/* An Ask AI cell = question + answer as ONE bordered card, so it's unmistakably a
+   single cell (not two). A thin divider separates the question from the answer. */
+#stream .row.prompt{border:1px solid var(--line);border-radius:14px;background:var(--panel);
+  padding:7px 13px 9px}
+#stream .row.prompt .prompt-view{font-weight:500;color:var(--ink)}     /* the question */
+#stream .row.prompt .answer{margin-top:7px;border-top:1px solid var(--line);padding-top:7px}
+#stream .row.prompt .answer .bubble{background:transparent;border:none;padding:0}  /* card bounds it */
+#stream .row.prompt .answer .who .tag{border:none;padding:0;font-weight:600;color:var(--accent)}
+.md>*:first-child{margin-top:0}.md>*:last-child{margin-bottom:0}
+.md p{margin:.35em 0}.md ul,.md ol{margin:.35em 0;padding-left:1.4em}
+.md h1,.md h2,.md h3{margin:.6em 0 .3em;line-height:1.3}
+.md table{border-collapse:collapse;margin:.5em 0}.md th,.md td{border:1px solid var(--line);padding:4px 9px}
+/* Mermaid: each diagram is bounded by its cell. useMaxWidth:true (mermaid config) makes
+   the svg width:100% + max-width:<natural>px, so a diagram that fits renders at natural
+   size (crisp) and one that would overflow scales down to fit — it never spills past the
+   cell or scrolls sideways. Generation is steered hard top-down (`flowchart TD` — see
+   _DIAGRAM_GUIDANCE) to keep diagrams narrow, so the down-scale rarely bites. Framed as a
+   subtle card so a diagram reads as a deliberate figure. Architectures grow downward, so
+   the reader scrolls down, not sideways.
+   `.md pre.mermaid` (not bare `pre.mermaid`) out-specifies the `.md pre` code-block rule
+   below — otherwise the diagram inherits the tan illustrative-code background. */
+.md pre.mermaid{margin:.7em 0;padding:8px;background:#fff;border:1px solid var(--line);border-radius:10px;
+  text-align:left;line-height:normal;
+  max-width:100%;
+  max-height:85vh;overflow:auto}
+.md pre.mermaid svg{display:block;margin:0 auto}
+/* Non-runnable code inside an answer/note: light background (not the dark code-cell
+   palette), so it's unmistakably illustrative rather than executable. Covers the
+   plain-<pre> fallback when Pygments is unavailable. */
+.md pre{background:var(--md-code-bg);color:var(--ink);border:1px solid var(--line);border-radius:10px;
+  padding:12px 14px;overflow:auto;font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:13px}
+/* Pygments-highlighted fenced code blocks in markdown (the .highlight div owns the bg) */
+.md .highlight{border:1px solid var(--line);border-radius:10px;overflow:auto;margin:.5em 0;position:relative}
+.md .highlight pre{background:transparent;margin:0;padding:12px 14px}
+/* hover Copy button on code snippets (light theme, to match the light code bg) */
+.copy-btn{position:absolute;top:7px;right:7px;font-size:11px;line-height:1.4;
+  border:1px solid var(--line);background:rgba(250,249,245,.85);color:var(--muted);border-radius:6px;
+  padding:2px 9px;cursor:pointer;opacity:0;transition:opacity .12s}
+.md .highlight:hover .copy-btn,.copy-btn:focus{opacity:1}
+.copy-btn:hover{color:var(--ink);border-color:var(--muted)}
+.md code{font-family:'SF Mono',ui-monospace,Menlo,monospace;font-size:.92em}
+.md :not(pre)>code{background:var(--chip);border-radius:5px;padding:1px 5px}
