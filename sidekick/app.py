@@ -9,10 +9,12 @@ The whole point: the target switcher in the top-right flips between your laptop
 """
 from __future__ import annotations
 
+import contextvars
 import hmac
 import json
 import os
 import re
+import secrets
 import threading
 from urllib.parse import quote
 
@@ -233,6 +235,65 @@ STATE = {
 # STATE — that larger refactor is out of scope here.
 _STATE_LOCK = threading.Lock()
 
+# ---- per-tab (session-scoped) UI state --------------------------------------
+# Two browser tabs used to clobber each other because ALL of STATE is process-
+# global. A handful of keys are genuinely PER-TAB (which notebook this tab is
+# viewing, and its one-shot render transients); the rest are genuinely shared
+# (the backend connection, target, warning banner, user model/mode prefs, and
+# the AI/kernel streaming coordination flags written from cookie-less threads).
+#
+# The per-tab keys get an additive session overlay: each browser session (keyed
+# by an `sk_sid` cookie, see _SessionScope below) has its own dict in SESSIONS,
+# and `cur/set_cur/pop_cur` read/write that overlay WHEN a session is in scope,
+# else fall back to the module-global STATE. That fallback is what keeps the
+# existing suite working unchanged: tests call handlers directly (no request →
+# no session in scope) and keep seeing/setting global STATE exactly as before.
+PER_TAB = ("dialog", "editing", "scroll_to", "flash")
+SESSIONS: dict[str, dict] = {}
+# The current request's session id, or None when no request is in scope (import
+# time, background threads, direct test calls). Set by _SessionScope per request.
+_CUR_SID: contextvars.ContextVar[str | None] = contextvars.ContextVar("sk_sid", default=None)
+
+
+def _overlay() -> dict | None:
+    """The current session's per-tab overlay dict, or None when no session is in
+    scope (→ callers fall back to the shared global STATE)."""
+    sid = _CUR_SID.get()
+    if sid is None:
+        return None
+    return SESSIONS.setdefault(sid, {})
+
+
+def cur(key: str, default=None):
+    """Read a per-tab key: the session overlay if it holds this key, else the
+    shared global STATE (which is also the no-session/back-compat path)."""
+    ov = _overlay()
+    if ov is not None and key in ov:
+        return ov[key]
+    return STATE.get(key, default)
+
+
+def set_cur(key: str, value) -> None:
+    """Write a per-tab key into the current session overlay; with no session in
+    scope, write the shared global STATE (back-compat for direct calls)."""
+    ov = _overlay()
+    with _STATE_LOCK:
+        if ov is not None:
+            ov[key] = value
+        else:
+            STATE[key] = value
+
+
+def pop_cur(key: str, default=None):
+    """Read-and-clear a one-shot per-tab transient. In a session, pop only from
+    that session's overlay (never the global — so a transient set in one tab
+    can't leak into another). With no session, pop the global STATE."""
+    ov = _overlay()
+    with _STATE_LOCK:
+        if ov is not None:
+            return ov.pop(key, default)
+        return STATE.pop(key, default)
+
 
 def _mark_cells_dirty() -> None:
     """Record that the AI edited a cell (called from the internal-route thread while
@@ -295,14 +356,13 @@ def _start_streamed_exec(backend, dialog: str, mid: str) -> None:
     run_id = backend.exec_start(dialog, mid)
     if run_id:
         _set_pending_run(dialog, mid, run_id)
-        STATE["scroll_to"] = mid
+        set_cur("scroll_to", mid)
     else:
         backend.exec(dialog, mid)             # kernel down → sync degrade
 
 
 def _set_dialog(name: str) -> None:
-    with _STATE_LOCK:
-        STATE["dialog"] = name
+    set_cur("dialog", name)
 
 
 def _init_cell_tools() -> None:
@@ -331,8 +391,8 @@ def use_target(name: str):
     STATE.update(target_name=name, backend=backend, warning=warning)
     if not backend.list_dialogs():
         pass
-    if STATE["dialog"] not in (backend.list_dialogs() or [STATE["dialog"]]):
-        STATE["dialog"] = backend.list_dialogs()[0] if backend.list_dialogs() else "demo/welcome"
+    if cur("dialog") not in (backend.list_dialogs() or [cur("dialog")]):
+        set_cur("dialog", backend.list_dialogs()[0] if backend.list_dialogs() else "demo/welcome")
 
 
 def _ensure_target() -> None:
@@ -452,7 +512,7 @@ SIDEBAR_JS = _static_text("js/sidebar.js")
 
 def Sidebar():
     backend = STATE["backend"]
-    names = backend.list_dialogs() or [STATE["dialog"]]
+    names = backend.list_dialogs() or [cur("dialog")]
     tree = _dialog_tree(names)
     sel_bar = Div(
         Span("0 selected", id="selCount", cls="sel-count"),
@@ -465,7 +525,7 @@ def Sidebar():
     recent = list(reversed(names))[:5]
     recent_section = (
         [Div("Recent", cls="seclabel"),
-         *[_dialog_leaf(r.rsplit("/", 1)[-1], r, STATE["dialog"]) for r in recent]]
+         *[_dialog_leaf(r.rsplit("/", 1)[-1], r, cur("dialog")) for r in recent]]
         if len(names) > 1 else [])
     return Div(
         Div(Span("S", cls="dot"), "SolveIt Sidekick", cls="brand"),
@@ -473,7 +533,7 @@ def Sidebar():
         *recent_section,
         Div("Dialogs", cls="seclabel", title="Shift/⌘-click to select several, then Delete"),
         sel_bar,
-        *_render_dialog_nodes(tree, STATE["dialog"]),
+        *_render_dialog_nodes(tree, cur("dialog")),
         Div(f"target: {STATE['target_name']}", cls="side-foot"),
         Script(src="/static/js/sidebar.js"),
         cls="side",
@@ -551,7 +611,7 @@ def _copy_menu(mid):
     """⧉ dropdown: copy this cell into another dialog (appended at its end). Lists
     every other dialog; hidden entirely when there's nowhere to copy to."""
     backend = STATE["backend"]
-    others = [d for d in (backend.list_dialogs() or []) if d != STATE["dialog"]]
+    others = [d for d in (backend.list_dialogs() or []) if d != cur("dialog")]
     if not others or not hasattr(backend, "copy_cell"):
         return None
     items = [_stream_btn(d, "/cell/copy", cls="ins-item", vals={"id": mid, "target": d})
@@ -705,7 +765,7 @@ def _output_views(m):
     """Code output + plots/images, or the rendered AI answer for a prompt."""
     out = []
     if m.msg_type == "code":
-        run_id = _pending_run_id(STATE["dialog"], m.id)
+        run_id = _pending_run_id(cur("dialog"), m.id)
         if run_id:
             # A live exec: a vanilla EventSource (see STREAM_JS) connects to
             # /exec_stream and replaces this <pre>'s content as stdout arrives, with
@@ -727,7 +787,7 @@ def _output_views(m):
             out.append(Div(m.output, cls="out"))
         out += [_rich_view(it) for it in m.rich]
     elif m.msg_type == "prompt":
-        pending = STATE.get("pending_stream") == (STATE["dialog"], m.id)
+        pending = STATE.get("pending_stream") == (cur("dialog"), m.id)
         if pending:
             # Live answer: a vanilla EventSource (see STREAM_JS) connects to /stream
             # and replaces this bubble's innerHTML as tokens arrive. We show this
@@ -1369,7 +1429,7 @@ def _ctx_meter_text(msgs, dialog=None):
         bits.append(f"{n_pin} pinned")
     if n_muted:
         bits.append(f"{n_muted} muted")
-    cost = cost_for(dialog if dialog is not None else STATE["dialog"])
+    cost = cost_for(dialog if dialog is not None else cur("dialog"))
     if cost and cost["turns"]:
         bits.append(_cost_label(cost))
     return " · ".join(bits)
@@ -1384,10 +1444,10 @@ def _ctx_meter(msgs):
 
 
 def Stream():
-    msgs = STATE["backend"].messages(STATE["dialog"])
-    editing = STATE.pop("editing", None)            # a just-inserted cell opens in edit mode (one-shot)
-    scroll_to = STATE.pop("scroll_to", None)        # scroll a just-added cell into view (one-shot)
-    flash = STATE.pop("flash", None)                # transient confirmation banner (one-shot)
+    msgs = STATE["backend"].messages(cur("dialog"))
+    editing = pop_cur("editing", None)            # a just-inserted cell opens in edit mode (one-shot)
+    scroll_to = pop_cur("scroll_to", None)        # scroll a just-added cell into view (one-shot)
+    flash = pop_cur("flash", None)                # transient confirmation banner (one-shot)
     if not msgs:
         inner = Div("Start the conversation — write code, ask the AI, or jot a note.",
                     cls="empty")
@@ -1411,7 +1471,7 @@ def Stream():
                          Script("setTimeout(function(){var f=document.getElementById('flash');"
                                 "if(f)f.remove();},2400);"))
     return Div(inner, Script(STREAM_JS), *extra, cls="stream", id="stream",
-               **{"data-dialog": STATE["dialog"]})
+               **{"data-dialog": cur("dialog")})
 
 
 COMPOSER_JS = _static_text("js/composer.js")
@@ -1478,11 +1538,11 @@ def Composer():
 def TitleEditor():
     """The dialog name, editable in place. Submits on Enter or blur."""
     return Form(
-        Input(name="new", value=STATE["dialog"], cls="title-edit",
+        Input(name="new", value=cur("dialog"), cls="title-edit",
               title="Rename this dialog — press Enter",
               onblur="this.form.submit()",
               onkeydown="if(event.key==='Enter'){event.preventDefault();this.form.submit();}"),
-        Input(type="hidden", name="old", value=STATE["dialog"]),
+        Input(type="hidden", name="old", value=cur("dialog")),
         method="post", action="/rename", cls="title-form",
     )
 
@@ -1966,7 +2026,60 @@ class _LocalGuard:
         await PlainTextResponse(f"forbidden: {why}", status_code=403)(scope, receive, send)
 
 
+class _SessionScope:
+    """Pure-ASGI middleware that gives every browser session its own per-tab UI
+    state. Reads the `sk_sid` cookie (minting one on the response when absent),
+    and binds it to the _CUR_SID ContextVar for the duration of the request so
+    cur/set_cur/pop_cur — used deep inside the render helpers — resolve to THIS
+    session's overlay without every handler having to thread a session through.
+
+    The sid is an opaque random key into the in-process SESSIONS dict; it carries
+    no authority (the app is already loopback- and same-origin-guarded), it only
+    selects which tab's dialog/transients you see. Non-browser / cookie-less
+    callers (the MCP subprocess, tests calling handlers directly) never get a sid
+    → cur/set_cur fall back to the shared global STATE, exactly as before."""
+
+    _COOKIE = "sk_sid"
+
+    def __init__(self, app):
+        self.app = app
+
+    def _read_sid(self, scope) -> str | None:
+        for k, v in scope.get("headers", []):
+            if k == b"cookie":
+                for part in v.decode("latin-1").split(";"):
+                    name, _, val = part.strip().partition("=")
+                    if name == self._COOKIE and val:
+                        return val
+        return None
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        sid = self._read_sid(scope)
+        minted = sid is None
+        if minted:
+            sid = secrets.token_urlsafe(16)
+        token = _CUR_SID.set(sid)
+
+        async def _send(message):
+            if minted and message["type"] == "http.response.start":
+                message = dict(message)
+                headers = list(message.get("headers", []))
+                cookie = (f"{self._COOKIE}={sid}; Path=/; HttpOnly; SameSite=Lax")
+                headers.append((b"set-cookie", cookie.encode("latin-1")))
+                message["headers"] = headers
+            await send(message)
+
+        try:
+            await self.app(scope, receive, _send)
+        finally:
+            _CUR_SID.reset(token)
+
+
 app.add_middleware(_LocalGuard)
+app.add_middleware(_SessionScope)
 
 
 @app.on_event("startup")
@@ -2077,14 +2190,14 @@ def library_use(name: str = ""):
 def cell_export_to(id: str, lib: str = "", module: str = "core"):
     """Tag a code cell into `<lib>:<module>` (the per-cell library picker)."""
     backend = STATE["backend"]
-    m = _msg_by_id(backend, STATE["dialog"], id)
+    m = _msg_by_id(backend, cur("dialog"), id)
     if m is not None and m.msg_type == "code" and lib.strip():
         target = f"{lib.strip()}:{module.strip() or 'core'}"
         new = export.set_export_target(m.content, target)
         if isinstance(backend, _InMemoryBackend):
             m.content = new
         elif hasattr(backend, "update"):
-            backend.update(STATE["dialog"], id, new)
+            backend.update(cur("dialog"), id, new)
     return Stream()
 
 
@@ -2114,7 +2227,7 @@ def new_dialog():
     while f"untitled/dialog-{n}" in existing:
         n += 1
     _set_dialog(f"untitled/dialog-{n}")
-    STATE["backend"].messages(STATE["dialog"])  # touch -> create
+    STATE["backend"].messages(cur("dialog"))  # touch -> create
     return Page()
 
 
@@ -2131,10 +2244,10 @@ def _delete_dialogs(targets: list[str]):
             claude_cli.drop(d)
         except Exception:  # noqa: BLE001 — eviction is best-effort cleanup
             _dbg(f"drop({d!r}) failed during delete")
-    if STATE["dialog"] in targets:
+    if cur("dialog") in targets:
         remaining = backend.list_dialogs()
         _set_dialog(remaining[0] if remaining else "demo/welcome")
-        backend.messages(STATE["dialog"])       # touch -> ensure it exists
+        backend.messages(cur("dialog"))       # touch -> ensure it exists
 
 
 @rt("/dialog/delete", methods=["post"])
@@ -2158,7 +2271,7 @@ def dialog_duplicate(dialog: str):
     for m in list(backend.messages(dialog)):     # snapshot: copy preserves order
         backend.copy_cell(dialog, m.id, new)
     backend.messages(new)                        # touch -> exists even if source was empty
-    STATE["dialog"] = new
+    set_cur("dialog", new)
     return Page()
 
 
@@ -2188,14 +2301,14 @@ def send(content: str, msg_type: str = "prompt", model: str = None,
         backend = STATE["backend"]
         use_model = STATE["model"] if msg_type == "prompt" else None
         use_mode = STATE["ai_mode"] if msg_type == "prompt" else None
-        m = backend.add(STATE["dialog"], content, msg_type, model=use_model, ai_mode=use_mode)
-        STATE["scroll_to"] = m.id            # render scrolls to the new cell
+        m = backend.add(cur("dialog"), content, msg_type, model=use_model, ai_mode=use_mode)
+        set_cur("scroll_to", m.id)           # render scrolls to the new cell
         if msg_type == "prompt" and _can_stream(backend, use_model):
             # Defer the AI call: the page renders an SSE-wired answer that streams
             # tokens in (the browser opens /stream), instead of blocking here.
-            _set_pending_stream(STATE["dialog"], m.id)
+            _set_pending_stream(cur("dialog"), m.id)
         elif msg_type in ("code", "prompt"):
-            backend.exec(STATE["dialog"], m.id)
+            backend.exec(cur("dialog"), m.id)
     # The composer posts via htmx → swap just #stream (no full-page reload, so the
     # answer starts streaming sooner). A no-JS submit gets the whole page.
     return Stream() if (htmx and htmx.request) else Page()
@@ -2238,18 +2351,18 @@ def cell_run(id: str, content: str = ""):
     """Save a cell's edited source, then (re)execute it. Returns just the stream."""
     backend = STATE["backend"]
     if hasattr(backend, "update"):
-        backend.update(STATE["dialog"], id, content)
-    m = _msg_by_id(backend, STATE["dialog"], id)
+        backend.update(cur("dialog"), id, content)
+    m = _msg_by_id(backend, cur("dialog"), id)
     if m is not None and m.msg_type == "prompt" and _can_stream(backend, m.model):
-        _set_pending_stream(STATE["dialog"], id)          # re-ask, streamed live
+        _set_pending_stream(cur("dialog"), id)          # re-ask, streamed live
         # The #stream swap resets the scroll container to the top, so bring the
         # re-run cell (and its "Thinking…" spinner) back into view — otherwise a
         # mid-notebook re-ask looks frozen because the spinner is below the fold.
-        STATE["scroll_to"] = id
+        set_cur("scroll_to", id)
     elif m is not None and m.msg_type == "code" and _exec_streams(backend):
-        _start_streamed_exec(backend, STATE["dialog"], id)
+        _start_streamed_exec(backend, cur("dialog"), id)
     elif m is not None and m.msg_type in ("code", "prompt"):
-        backend.exec(STATE["dialog"], id)
+        backend.exec(cur("dialog"), id)
     return Stream()
 
 
@@ -2342,9 +2455,9 @@ def cell_stop(id: str):
     """Interrupt a running code cell: raise KeyboardInterrupt in the kernel worker.
     The cell's live EventSource then sees the run finish and reloads #stream."""
     backend = STATE["backend"]
-    run_id = _pending_run_id(STATE["dialog"], id)
+    run_id = _pending_run_id(cur("dialog"), id)
     if run_id and hasattr(backend, "exec_stop"):
-        backend.exec_stop(STATE["dialog"], run_id)
+        backend.exec_stop(cur("dialog"), run_id)
     return Div("", id=f"stop-{id}")                      # hx-swap="none": nothing to render
 
 
@@ -2353,10 +2466,10 @@ def kernel_restart():
     """Restart the kernel for the current dialog: drop its server-side namespace via
     the kernel's /reset endpoint, so the next run starts from a clean slate."""
     backend = STATE["backend"]
-    dialog = STATE["dialog"]
+    dialog = cur("dialog")
     if hasattr(backend, "reset"):
         backend.reset(dialog)
-    STATE["flash"] = "Kernel restarted — variables cleared."
+    set_cur("flash", "Kernel restarted — variables cleared.")
     return Stream()
 
 
@@ -2365,7 +2478,7 @@ def cell_run_all():
     """Run every code cell in the current dialog, top to bottom, sequentially —
     reusing the blocking run path (a clean re-execution of the whole notebook)."""
     backend = STATE["backend"]
-    dialog = STATE["dialog"]
+    dialog = cur("dialog")
     for m in list(backend.messages(dialog)):
         if m.msg_type == "code":
             backend.exec(dialog, m.id)
@@ -2474,7 +2587,7 @@ def complete(code: str = "", line: int = 1, col: int = 0):
     comps = []
     if hasattr(backend, "complete"):
         try:
-            comps = backend.complete(STATE["dialog"], code, int(line), int(col))
+            comps = backend.complete(cur("dialog"), code, int(line), int(col))
         except Exception as e:  # noqa: BLE001
             _dbg(f"kernel completion failed: {e}")
             comps = []
@@ -2493,14 +2606,14 @@ def cell_save(id: str, content: str = ""):
     """Save a cell's edited source without executing (used by note cells)."""
     backend = STATE["backend"]
     if hasattr(backend, "update"):
-        backend.update(STATE["dialog"], id, content)
+        backend.update(cur("dialog"), id, content)
     return Stream()
 
 
 @rt("/cell/answer/edit")
 def cell_answer_edit(id: str):
     """Swap a prompt's AI answer into edit mode (textarea over its output)."""
-    bk, d = STATE["backend"], STATE["dialog"]
+    bk, d = STATE["backend"], cur("dialog")
     m = _msg_by_id(bk, d, id)
     if m is None or m.msg_type != "prompt" or not _can_edit_answer():
         return Stream()
@@ -2510,7 +2623,7 @@ def cell_answer_edit(id: str):
 @rt("/cell/answer/view")
 def cell_answer_view(id: str):
     """Swap a prompt's AI answer back to its rendered view — used by Cancel."""
-    bk, d = STATE["backend"], STATE["dialog"]
+    bk, d = STATE["backend"], cur("dialog")
     m = _msg_by_id(bk, d, id)
     return _answer_view(m) if m is not None and m.msg_type == "prompt" else Stream()
 
@@ -2519,7 +2632,7 @@ def cell_answer_view(id: str):
 def cell_answer_save(id: str, output: str = ""):
     """Persist an edited AI answer in place (no re-ask), then render it read-only.
     Only prompt cells have an editable answer, so other types are left untouched."""
-    bk, d = STATE["backend"], STATE["dialog"]
+    bk, d = STATE["backend"], cur("dialog")
     m = _msg_by_id(bk, d, id)
     if m is None or m.msg_type != "prompt":
         return Stream()
@@ -2532,7 +2645,7 @@ def cell_answer_save(id: str, output: str = ""):
 def cell_delete(id: str):
     backend = STATE["backend"]
     if hasattr(backend, "delete"):
-        backend.delete(STATE["dialog"], id)
+        backend.delete(cur("dialog"), id)
     return Stream()
 
 
@@ -2541,7 +2654,7 @@ def cell_type(id: str, msg_type: str = "code"):
     """Convert a cell to another type in place (y=code, m=note, i=prompt)."""
     backend = STATE["backend"]
     if hasattr(backend, "set_type"):
-        backend.set_type(STATE["dialog"], id, msg_type)
+        backend.set_type(cur("dialog"), id, msg_type)
     return Stream()
 
 
@@ -2550,7 +2663,7 @@ def cell_undo():
     """Restore the last deleted cell in this dialog (Jupyter's 'z')."""
     backend = STATE["backend"]
     if hasattr(backend, "undo"):
-        backend.undo(STATE["dialog"])
+        backend.undo(cur("dialog"))
     return Stream()
 
 
@@ -2559,7 +2672,7 @@ def cell_mute(id: str):
     """Toggle whether this cell is included in the AI's notebook context."""
     backend = STATE["backend"]
     if hasattr(backend, "set_muted"):
-        backend.set_muted(STATE["dialog"], id)
+        backend.set_muted(cur("dialog"), id)
     return Stream()
 
 
@@ -2568,7 +2681,7 @@ def cell_pin(id: str):
     """Toggle whether this cell is pinned into context (survives trimming)."""
     backend = STATE["backend"]
     if hasattr(backend, "set_pinned"):
-        backend.set_pinned(STATE["dialog"], id)
+        backend.set_pinned(cur("dialog"), id)
     return Stream()
 
 
@@ -2576,20 +2689,20 @@ def cell_pin(id: str):
 def cell_export(id: str):
     """Toggle this code cell's `#| export` directive (whether it's tangled into the package)."""
     backend = STATE["backend"]
-    m = _msg_by_id(backend, STATE["dialog"], id)
+    m = _msg_by_id(backend, cur("dialog"), id)
     if m is not None and m.msg_type == "code":
         new = export.toggle_export(m.content)
         if isinstance(backend, _InMemoryBackend):
             m.content = new                  # a directive is a no-op comment — keep the cell's output
         elif hasattr(backend, "update"):
-            backend.update(STATE["dialog"], id, new)
+            backend.update(cur("dialog"), id, new)
     return Stream()
 
 
 @rt("/export/package")
 def export_package():
     """Tangle the current dialog's `#| export` cells into a downloadable package zip."""
-    dialog = STATE["dialog"]
+    dialog = cur("dialog")
     msgs = STATE["backend"].messages(dialog)
     pkg = export.slug(dialog)
     files = export.dialog_to_package(msgs, dialog, dialog_name=dialog)
@@ -2600,7 +2713,7 @@ def export_package():
 @rt("/cell/edit")
 def cell_edit(id: str):
     """Swap a single cell into edit mode (raw textarea)."""
-    bk, d = STATE["backend"], STATE["dialog"]
+    bk, d = STATE["backend"], cur("dialog")
     m = _msg_by_id(bk, d, id)
     return _cell_edit(m, num=_cell_number(bk, d, id)) if m else Stream()
 
@@ -2608,7 +2721,7 @@ def cell_edit(id: str):
 @rt("/cell/view")
 def cell_view(id: str):
     """Swap a single cell back to its rendered (read-only) view — used by Cancel."""
-    bk, d = STATE["backend"], STATE["dialog"]
+    bk, d = STATE["backend"], cur("dialog")
     m = _msg_by_id(bk, d, id)
     return MsgRow(m, num=_cell_number(bk, d, id)) if m else Stream()
 
@@ -2617,18 +2730,18 @@ def cell_view(id: str):
 def cell_exec(id: str):
     """Re-run a cell's stored source without editing (the rendered-view Run/Ask)."""
     backend = STATE["backend"]
-    m = _msg_by_id(backend, STATE["dialog"], id)
+    m = _msg_by_id(backend, cur("dialog"), id)
     if m is not None and m.msg_type == "prompt" and _can_stream(backend, m.model):
         m.output = ""                                     # clear stale answer to re-stream
-        _set_pending_stream(STATE["dialog"], id)          # re-ask, streamed live
+        _set_pending_stream(cur("dialog"), id)          # re-ask, streamed live
         # The #stream swap resets the scroll container to the top, so a mid-notebook
         # re-run looks frozen — the "Thinking…" spinner is below the fold. Bring the
         # re-run cell back into view (matches /cell/run).
-        STATE["scroll_to"] = id
+        set_cur("scroll_to", id)
     elif m is not None and m.msg_type == "code" and _exec_streams(backend):
-        _start_streamed_exec(backend, STATE["dialog"], id)
+        _start_streamed_exec(backend, cur("dialog"), id)
     elif m is not None:
-        backend.exec(STATE["dialog"], id)
+        backend.exec(cur("dialog"), id)
     return Stream()
 
 
@@ -2639,9 +2752,9 @@ def cell_insert(id: str, msg_type: str = "code", where: str = "below"):
     if msg_type not in ("code", "note", "prompt"):
         msg_type = "code"
     if hasattr(backend, "insert"):
-        m = backend.insert(STATE["dialog"], "", msg_type, anchor_id=id,
+        m = backend.insert(cur("dialog"), "", msg_type, anchor_id=id,
                            above=(where == "above"))
-        STATE["editing"] = m.id
+        set_cur("editing", m.id)
     return Stream()
 
 
@@ -2651,9 +2764,9 @@ def cell_copy(id: str, target: str = ""):
     dialog — the stream re-renders unchanged but for a one-shot flash confirming where
     the copy landed."""
     backend = STATE["backend"]
-    if target and target != STATE["dialog"] and hasattr(backend, "copy_cell"):
-        m = backend.copy_cell(STATE["dialog"], id, target)
-        STATE["flash"] = f"Copied cell to “{target}”" if m else "Couldn't copy that cell."
+    if target and target != cur("dialog") and hasattr(backend, "copy_cell"):
+        m = backend.copy_cell(cur("dialog"), id, target)
+        set_cur("flash", f"Copied cell to “{target}”" if m else "Couldn't copy that cell.")
     return Stream()
 
 
@@ -2663,20 +2776,20 @@ def cell_split(id: str):
     answer and insert them as runnable code cells just below it, in order. The
     cells aren't auto-run — the user still runs each one (small-steps contract)."""
     backend = STATE["backend"]
-    m = _msg_by_id(backend, STATE["dialog"], id)
+    m = _msg_by_id(backend, cur("dialog"), id)
     if m is not None and m.msg_type == "prompt" and hasattr(backend, "insert"):
         anchor, last = id, None
         for lang, code in _answer_code_blocks(m.output):
             # mermaid isn't kernel code — land it in a note, which renders the fence
             # as a diagram; everything else becomes a runnable code cell.
             if lang == "mermaid":
-                last = backend.insert(STATE["dialog"], f"```mermaid\n{code}\n```",
+                last = backend.insert(cur("dialog"), f"```mermaid\n{code}\n```",
                                       "note", anchor_id=anchor)
             else:
-                last = backend.insert(STATE["dialog"], code, "code", anchor_id=anchor)
+                last = backend.insert(cur("dialog"), code, "code", anchor_id=anchor)
             anchor = last.id
         if last is not None:
-            STATE["scroll_to"] = last.id
+            set_cur("scroll_to", last.id)
     return Stream()
 
 
@@ -2727,7 +2840,7 @@ def cell_fade(id: str, level: int = 1):
     backend = STATE["backend"]
     if not hasattr(backend, "insert"):
         return Stream()
-    msgs = backend.messages(STATE["dialog"])
+    msgs = backend.messages(cur("dialog"))
     idx = next((i for i, m in enumerate(msgs) if m.id == id), None)
     if idx is None or msgs[idx].msg_type != "code":
         return Stream()
@@ -2739,19 +2852,19 @@ def cell_fade(id: str, level: int = 1):
             return Stream()
         content = _exercise_content(scaffold.fade_code(src.content, level))
         if hasattr(backend, "update"):
-            backend.update(STATE["dialog"], m.id, content)
-        STATE["scroll_to"] = m.id
+            backend.update(cur("dialog"), m.id, content)
+        set_cur("scroll_to", m.id)
         return Stream()
 
     content = _exercise_content(scaffold.fade_code(m.content, level))
     nxt = msgs[idx + 1] if idx + 1 < len(msgs) else None
     if nxt is not None and nxt.msg_type == "code" and _is_exercise(nxt.content) \
             and hasattr(backend, "update"):
-        backend.update(STATE["dialog"], nxt.id, content)
-        STATE["scroll_to"] = nxt.id
+        backend.update(cur("dialog"), nxt.id, content)
+        set_cur("scroll_to", nxt.id)
     else:
-        new = backend.insert(STATE["dialog"], content, "code", anchor_id=id)
-        STATE["scroll_to"] = new.id
+        new = backend.insert(cur("dialog"), content, "code", anchor_id=id)
+        set_cur("scroll_to", new.id)
     return Stream()
 
 
@@ -2765,7 +2878,7 @@ def cell_check(id: str):
     backend = STATE["backend"]
     if not hasattr(backend, "insert"):
         return Stream()
-    msgs = backend.messages(STATE["dialog"])
+    msgs = backend.messages(cur("dialog"))
     idx = next((i for i, m in enumerate(msgs) if m.id == id), None)
     if idx is None:
         return Stream()
@@ -2773,9 +2886,9 @@ def cell_check(id: str):
     original = src.content if src is not None else ""
     attempt = _strip_exercise_marker(msgs[idx].content)
     prompt = scaffold.check_prompt(original, attempt)
-    m = backend.insert(STATE["dialog"], prompt, "prompt", anchor_id=id)
-    STATE["editing"] = m.id          # let the learner review, then click Ask
-    STATE["scroll_to"] = m.id
+    m = backend.insert(cur("dialog"), prompt, "prompt", anchor_id=id)
+    set_cur("editing", m.id)         # let the learner review, then click Ask
+    set_cur("scroll_to", m.id)
     return Stream()
 
 
@@ -2786,7 +2899,7 @@ def cell_move(ids: str = ""):
     backend = STATE["backend"]
     order = [i for i in ids.split(",") if i]
     if order and hasattr(backend, "reorder"):
-        backend.reorder(STATE["dialog"], order)
+        backend.reorder(cur("dialog"), order)
     return ""
 
 
@@ -2798,15 +2911,15 @@ def _download(body: str, fname: str, media: str):
 
 @rt("/export/ipynb")
 def export_ipynb():
-    msgs = STATE["backend"].messages(STATE["dialog"])
-    fname = STATE["dialog"].replace("/", "-") + ".ipynb"
+    msgs = STATE["backend"].messages(cur("dialog"))
+    fname = cur("dialog").replace("/", "-") + ".ipynb"
     return _download(json.dumps(to_ipynb(msgs), indent=1), fname, "application/x-ipynb+json")
 
 
 @rt("/export/md")
 def export_md():
-    msgs = STATE["backend"].messages(STATE["dialog"])
-    fname = STATE["dialog"].replace("/", "-") + ".md"
+    msgs = STATE["backend"].messages(cur("dialog"))
+    fname = cur("dialog").replace("/", "-") + ".md"
     return _download(to_markdown(msgs), fname, "text/markdown; charset=utf-8")
 
 
@@ -2823,11 +2936,11 @@ def publish_blog():
     from datetime import date
     from starlette.responses import RedirectResponse
     from . import blog
-    dialog = STATE["dialog"]
+    dialog = cur("dialog")
     result = blog.publish_dialog(STATE["backend"], dialog, blog.default_blog_dir(),
                                  title="Sidekick Blog", date=date.today().isoformat())
     if not result["render_ok"]:
-        STATE["flash"] = f"Post written to {blog.default_blog_dir()} — {result['render_detail']}"
+        set_cur("flash", f"Post written to {blog.default_blog_dir()} — {result['render_detail']}")
         return RedirectResponse("/", status_code=303)
     return RedirectResponse(f"/blog/posts/{result['slug']}.html", status_code=303)
 
@@ -2847,7 +2960,7 @@ def recall_quiz(n: int = 5):
     from starlette.responses import RedirectResponse
     from . import recall
     backend = STATE["backend"]
-    dialog = STATE["dialog"]
+    dialog = cur("dialog")
     prompt = recall.build_quiz_prompt(backend.messages(dialog), n=n)
     # A distinct session key ("recall:<dialog>") so quizzing never disturbs the
     # dialog's own resumable CLI session or its running cost tally.
@@ -2857,7 +2970,7 @@ def recall_quiz(n: int = 5):
                                 "then Ask AI to check.", "note")
     for q in questions:
         backend.add(dialog, q, "prompt")
-    STATE["scroll_to"] = intro.id            # bring the fresh quiz into view
+    set_cur("scroll_to", intro.id)           # bring the fresh quiz into view
     return RedirectResponse("/", status_code=303)
 
 
@@ -3015,7 +3128,7 @@ def _append_passage(p: dict, text: str):
     backend.add(dialog, text, "note")            # the passage to read…
     code = backend.add(dialog, "", "code")       # …and a cell to reimplement it
     _set_dialog(dialog)
-    STATE["editing"] = code.id                   # open the code cell, focused & in view
+    set_cur("editing", code.id)                  # open the code cell, focused & in view
 
 
 @rt("/paper/step", methods=["post"])
