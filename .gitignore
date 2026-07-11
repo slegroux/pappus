@@ -15,3 +15,4 @@ preview.html
 
 # generated, machine-specific (built by `just app`)
 SolveIt Sidekick.app/
+.DS_Store
