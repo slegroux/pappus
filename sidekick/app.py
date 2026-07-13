@@ -771,7 +771,7 @@ def _output_views(m):
             # /exec_stream and replaces this <pre>'s content as stdout arrives, with
             # a Stop button to interrupt a runaway loop. On done it reloads #stream
             # so the finished cell (rich plots, normal Run button) renders.
-            url = (f"/exec_stream?dialog={quote(STATE['dialog'])}"
+            url = (f"/exec_stream?dialog={quote(cur('dialog'))}"
                    f"&id={m.id}&run_id={quote(run_id)}")
             stop = Button("■ Stop", type="button", cls="cell-btn del",
                           title="Interrupt this running cell",
@@ -799,7 +799,7 @@ def _output_views(m):
                 Div(Span(who, cls="tag"), cls="who"),
                 Div(Span(Span(cls="spinner"), "Thinking…", cls="thinking"),
                     cls="bubble md", id=f"ans-{m.id}",
-                    **{"data-stream-url": f"/stream?dialog={quote(STATE['dialog'])}&id={m.id}"}),
+                    **{"data-stream-url": f"/stream?dialog={quote(cur('dialog'))}&id={m.id}"}),
                 cls="answer"))
         elif m.output:
             out.append(_answer_view(m))
