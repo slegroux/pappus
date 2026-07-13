@@ -480,6 +480,8 @@ MODEL_NAMES = {
 CLI_MODELS = claude_cli.CLI_MODELS
 CLI_SESSIONS = claude_cli.CLI_SESSIONS     # same dict the app's SSE path advances
 _system = claude_cli.system                # preamble + context, used by the API callers
+_wants_diagram = claude_cli._wants_diagram # just-in-time diagram conventions — the CLI
+_DIAGRAM_GUIDANCE = claude_cli._DIAGRAM_GUIDANCE  # path attaches these in _build_cmd
 
 
 def _call_claude(key: str, content: str, context: str = "", mode: str | None = None) -> str:
@@ -534,6 +536,9 @@ def run_prompt(dialog: str, content: str, model: str, context: str = "",
 
     if model in CLI_MODELS:               # subscription-backed Claude (no API key)
         return claude_cli.call(dialog, content, context, model=model, mode=mode)
+
+    if _wants_diagram(content):           # mirror the CLI path: attach the diagram
+        content += _DIAGRAM_GUIDANCE      # conventions to the turn that asks for one
 
     try:
         from sidekick.secrets_store import key_for_model, PROVIDERS
