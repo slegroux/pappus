@@ -500,8 +500,10 @@ def _call_openai(key: str, content: str, context: str = "", mode: str | None = N
     sysmsg = _system(context, mode)
     if sysmsg:
         msgs.insert(0, {"role": "system", "content": sysmsg})
+    # max_completion_tokens: the reasoning-tier models (o*/gpt-5*) reject the
+    # legacy max_tokens param; the newer name works across all current models.
     r = client.chat.completions.create(
-        model=MODEL_NAMES["codex"], max_tokens=1500, messages=msgs,
+        model=MODEL_NAMES["codex"], max_completion_tokens=1500, messages=msgs,
     )
     return r.choices[0].message.content
 

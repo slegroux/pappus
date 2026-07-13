@@ -12,6 +12,19 @@
 kernel_port := "5055"     # must match the `kernel` target's url in targets.yaml
 ui_port     := "8000"
 
+# Codex-via-Portkey: when PORTKEY_API_KEY is set, the kernel's "Codex" model is
+# routed through the Portkey gateway (Azure OpenAI behind it) instead of hitting
+# api.openai.com with the global OPENAI_API_KEY. Scoped to the kernel process
+# only, so other tools keep seeing the unmodified environment. The model must be
+# an Azure *deployment* name; override with OPENAI_MODEL if yours differs.
+# Recipes paste this snippet and pass $PKENV via `env` at kernel launch.
+portkey_env := '''
+    PKENV=""
+    if [ -n "${PORTKEY_API_KEY:-}" ]; then
+        PKENV="OPENAI_BASE_URL=https://api.portkey.ai/v1 OPENAI_API_KEY=$PORTKEY_API_KEY OPENAI_MODEL=${OPENAI_MODEL:-gpt-5.5}"
+    fi
+'''
+
 # Show the available recipes.
 default:
     @just --list
@@ -31,7 +44,8 @@ start reload="":
     if [ "{{reload}}" = "reload" ]; then RELOAD_ENV="SIDEKICK_RELOAD=1"; echo "  (auto-reload on)"; fi
     if ! up {{kernel_port}}; then
         echo "▶ kernel server → :{{kernel_port}}  (logs: $LOG/kernel.log)"
-        nohup uv run --extra kernel python -m server.kernel_server --port {{kernel_port}} >"$LOG/kernel.log" 2>&1 &
+        {{portkey_env}}
+        nohup env $PKENV uv run --extra kernel python -m server.kernel_server --port {{kernel_port}} >"$LOG/kernel.log" 2>&1 &
         for i in $(seq 1 120); do up {{kernel_port}} && break; sleep 0.5; done
     fi
     echo "▶ web UI → http://localhost:{{ui_port}}  (logs: $LOG/ui.log)"
@@ -49,7 +63,8 @@ dev:
     #!/usr/bin/env bash
     set -euo pipefail
     echo "▶ kernel server  → http://localhost:{{kernel_port}}  (--extra kernel: numpy/torch/…)"
-    uv run --extra kernel python -m server.kernel_server --port {{kernel_port}} &
+    {{portkey_env}}
+    env $PKENV uv run --extra kernel python -m server.kernel_server --port {{kernel_port}} &
     KERNEL_PID=$!
     trap 'echo; echo "■ stopping…"; kill $KERNEL_PID 2>/dev/null || true; \
           lsof -ti:{{kernel_port}} | xargs kill 2>/dev/null || true' INT TERM EXIT
@@ -64,7 +79,10 @@ dev:
 
 # Just the kernel server (e.g. to run it on its own / on the H100).
 kernel:
-    uv run --extra kernel python -m server.kernel_server --port {{kernel_port}}
+    #!/usr/bin/env bash
+    set -euo pipefail
+    {{portkey_env}}
+    exec env $PKENV uv run --extra kernel python -m server.kernel_server --port {{kernel_port}}
 
 # Just the web UI (assumes the kernel server is already running).
 ui:
@@ -117,9 +135,16 @@ app:
     cd "$PROJ" || exit 1
     up(){ curl -s -o /dev/null "http://localhost:$1/" 2>/dev/null; }
     KPID=""; UPID=""
-    # 1) kernel server on :5055 (start only if not already up)
+    # 1) kernel server on :5055 (start only if not already up).
+    # Codex-via-Portkey (see the justfile's portkey_env): GUI apps don't source
+    # .zshrc, so pull PORTKEY_API_KEY from ~/.secrets.env before checking it.
+    [ -f "$HOME/.secrets.env" ] && source "$HOME/.secrets.env"
+    PKENV=""
+    if [ -n "${PORTKEY_API_KEY:-}" ]; then
+        PKENV="OPENAI_BASE_URL=https://api.portkey.ai/v1 OPENAI_API_KEY=$PORTKEY_API_KEY OPENAI_MODEL=${OPENAI_MODEL:-gpt-5.5}"
+    fi
     if ! up 5055; then
-        nohup "$UV" run --extra kernel python -m server.kernel_server --port 5055 \
+        nohup env $PKENV "$UV" run --extra kernel python -m server.kernel_server --port 5055 \
             >"$LOG/kernel.log" 2>&1 & KPID=$!
         for i in $(seq 1 120); do up 5055 && break; sleep 0.5; done
     fi
