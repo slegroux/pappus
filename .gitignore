@@ -16,3 +16,9 @@ preview.html
 # generated, machine-specific (built by `just app`)
 SolveIt Sidekick.app/
 .DS_Store
+
+# data/ holds the dialog store (committed on purpose — this repo is PRIVATE and
+# doubles as the sync/backup channel for dialogs). Keep secrets and the rolling
+# save-backups out of it; API keys live in ~/.config/solveit-sidekick/secrets.json.
+data/secrets.json
+data/*.bak

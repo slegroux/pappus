@@ -8,9 +8,15 @@
 #   just ui         start only the web UI
 #   just test       run the test suite
 #   just doctor     check the kernel target is reachable
+#   just sync       commit/pull/push the dialog store (data/) across machines
 
 kernel_port := "5055"     # must match the `kernel` target's url in targets.yaml
 ui_port     := "8000"
+
+# Dialogs/papers/blog live IN the repo (data/) — this repo is private and doubles
+# as the cross-machine sync + backup channel for them (`just sync`). Secrets stay
+# outside (~/.config/solveit-sidekick/secrets.json, see .gitignore).
+data_dir := justfile_directory() / "data"
 
 # Codex-via-Portkey: when PORTKEY_API_KEY is set, the kernel's "Codex" model is
 # routed through the Portkey gateway (Azure OpenAI behind it) instead of hitting
@@ -49,7 +55,7 @@ start reload="":
         for i in $(seq 1 120); do up {{kernel_port}} && break; sleep 0.5; done
     fi
     echo "▶ web UI → http://localhost:{{ui_port}}  (logs: $LOG/ui.log)"
-    nohup env $RELOAD_ENV SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} uv run python -m sidekick.cli serve >"$LOG/ui.log" 2>&1 &
+    nohup env $RELOAD_ENV SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run python -m sidekick.cli serve >"$LOG/ui.log" 2>&1 &
     for i in $(seq 1 60); do up {{ui_port}} && break; sleep 0.5; done
     if up {{ui_port}}; then
         echo "✓ running in the background → http://localhost:{{ui_port}}   (stop with: just stop)"
@@ -75,7 +81,7 @@ dev:
     done
     echo " ✓"
     echo "▶ web UI         → http://localhost:{{ui_port}}  (target: kernel)"
-    SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} uv run python -m sidekick.cli serve
+    SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run python -m sidekick.cli serve
 
 # Just the kernel server (e.g. to run it on its own / on the H100).
 kernel:
@@ -86,7 +92,20 @@ kernel:
 
 # Just the web UI (assumes the kernel server is already running).
 ui:
-    SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} uv run python -m sidekick.cli serve
+    SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run python -m sidekick.cli serve
+
+# Sync dialogs across machines: commit local dialog/paper changes, pull, push.
+# Run at session start (get the other machine's dialogs) and session end (share
+# this one's). Conflicts are rare (one machine at a time) but resolve manually.
+sync:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cd {{justfile_directory()}}
+    git add data
+    git diff --cached --quiet -- data || git commit -m "data: sync dialogs ($(hostname -s))"
+    git pull --rebase --autostash
+    git push
+    echo "✓ dialogs in sync"
 
 # Run the test suite.
 test:
@@ -150,7 +169,7 @@ app:
     fi
     # 2) UI on :8000 — after the kernel, so it connects live (not the mock)
     if ! up 8000; then
-        nohup env SIDEKICK_TARGET=kernel SIDEKICK_PORT=8000 "$UV" run python -m sidekick.cli serve \
+        nohup env SIDEKICK_TARGET=kernel SIDEKICK_PORT=8000 SIDEKICK_DATA="$PROJ/data" "$UV" run python -m sidekick.cli serve \
             >"$LOG/ui.log" 2>&1 & UPID=$!
         for i in $(seq 1 60); do up 8000 && break; sleep 0.5; done
     fi
