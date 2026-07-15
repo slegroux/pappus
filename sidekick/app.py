@@ -28,6 +28,11 @@ from .claude_cli import (stream as stream_claude, call as call_claude,
                          cost_for, CLI_MODELS, AI_MODES, DEFAULT_MODE)
 from . import secrets_store, export, libraries, nbdev_export, scaffold
 from . import paper as paperlib
+# Shared allowlist sanitizer (drops <script>, event handlers, javascript: URLs
+# while keeping tables/plots) — the same one the blog publisher uses. Rich cell
+# outputs are now untrusted (dialogs sync across machines via data/), so the live
+# view sanitizes too, not just published posts.
+from .blog import _sanitize as _sanitize_rich
 
 
 def _dbg(msg):
@@ -389,8 +394,6 @@ def use_target(name: str):
     t = get_target(name)
     backend, warning = connect(t)
     STATE.update(target_name=name, backend=backend, warning=warning)
-    if not backend.list_dialogs():
-        pass
     if cur("dialog") not in (backend.list_dialogs() or [cur("dialog")]):
         set_cur("dialog", backend.list_dialogs()[0] if backend.list_dialogs() else "demo/welcome")
 
@@ -702,10 +705,12 @@ def _rich_view(item):
         return Img(src=f"data:{t};base64,{data}", cls="cell-img")
     if t == "image/svg+xml":
         # Inline the SVG markup directly so it stays crisp/scalable (vector
-        # diagrams from conv_arch, plots saved as SVG, etc.).
-        return Div(NotStr(data), cls="cell-svg")
+        # diagrams from conv_arch, plots saved as SVG, etc.). Sanitize first: cached
+        # outputs are persisted to data/ and synced across machines, so a crafted
+        # dialog is untrusted input — strip <script>/event-handlers before NotStr.
+        return Div(NotStr(_sanitize_rich(data)), cls="cell-svg")
     if t == "text/html":
-        return Div(NotStr(data), cls="cell-html")
+        return Div(NotStr(_sanitize_rich(data)), cls="cell-html")
     if t == "audio/wav":
         # Kernel-emitted audio (e.g. IPython.display.Audio) — an inline player.
         return Audio(controls=True, src=f"data:audio/wav;base64,{data}", cls="cell-audio")
@@ -1024,9 +1029,31 @@ STREAM_JS = """
   }
 
   // Mermaid: turn <pre class="mermaid"> (from ```mermaid fences) into diagrams.
-  // No-op offline / before mermaid loads. Initialised once with manual start so
-  // we control *when* it runs (after a render, never mid-stream on partial source).
+  // The library (~3.2MB) is lazy-loaded on first use: ensureMermaid() injects the
+  // vendored script only when a diagram is actually present, so sessions that never
+  // draw one pay nothing. renderMermaid() is the entry point; it bails cheaply when
+  // there's no <pre.mermaid> to draw and otherwise loads-then-renders.
+  function ensureMermaid(){
+    if(window.mermaid) return Promise.resolve(window.mermaid);
+    if(window.__mermaidLoading) return window.__mermaidLoading;
+    window.__mermaidLoading = new Promise(function(resolve, reject){
+      var s = document.createElement('script');
+      s.src = '/vendor/mermaid.min.js';
+      s.onload = function(){ resolve(window.mermaid); };
+      s.onerror = function(){ window.__mermaidLoading = null; reject(new Error('mermaid load failed')); };
+      document.head.appendChild(s);
+    });
+    return window.__mermaidLoading;
+  }
   function renderMermaid(el){
+    if(!el) return;
+    // Cheap guard: only fetch the library when there's an unprocessed diagram.
+    if(!el.querySelector('pre.mermaid:not([data-processed])')) return;
+    ensureMermaid().then(function(){ drawMermaid(el); }).catch(function(){});
+  }
+  // Initialised once with manual start so we control *when* it runs (after a
+  // render, never mid-stream on partial source).
+  function drawMermaid(el){
     if(!el || !window.mermaid) return;
     if(!window.__mermaidInit){
       // Theme mermaid to the app's warm Claude palette (default theme is purple
@@ -1957,7 +1984,8 @@ _LOCAL_HDRS = (
     Link(rel="stylesheet", href="/vendor/katex.min.css"),
     Script(src="/vendor/katex.min.js"),
     Script(src="/vendor/auto-render.min.js"),
-    Script(src="/vendor/mermaid.min.js"),         # ```mermaid → diagrams (renderMermaid)
+    # mermaid.min.js (~3.2MB) is NOT eager-loaded — renderMermaid lazy-loads it on
+    # first use via ensureMermaid(), so pages without a diagram never fetch it.
     Script(src="/vendor/sortable.min.js"),
 )
 app, rt = fast_app(pico=False, default_hdrs=False, hdrs=_LOCAL_HDRS)
@@ -1967,12 +1995,21 @@ app, rt = fast_app(pico=False, default_hdrs=False, hdrs=_LOCAL_HDRS)
 app.routes[:] = [r for r in app.routes if getattr(r, "path", "") != "/{fname:path}.{ext:static}"]
 
 
-# ---- localhost-only defense (Host/Origin) ----------------------------------
-# The app executes code on the box it runs on; without this a malicious web page
-# could drive its POST routes (/send, /cell/run, /cell/exec) cross-origin. We
-# gate on Host (must be loopback) and, for POSTs, same-origin. "testserver" is
-# allowed so the Starlette TestClient (its default Host) keeps working.
+# ---- localhost-only defense (peer address + Host/Origin) -------------------
+# The app executes code on the box it runs on and has no auth layer, so every
+# request must originate from loopback. The PRIMARY gate is the real TCP peer
+# address (scope["client"]), which the client cannot forge — so even if the app
+# is bound to 0.0.0.0 by a raw `uvicorn sidekick.app:app --host 0.0.0.0` (the CLI
+# refuses this, but the ASGI app can be run directly), a remote box is rejected.
+# The Host/Sec-Fetch/Origin checks below remain as defense-in-depth against a
+# malicious local web page driving the POST routes cross-origin; they are NOT the
+# authentication (the Host header is client-controlled and must never be trusted
+# for that — the reason this gate exists).
 _ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "testserver"})
+# Real peer addresses that count as loopback. "testclient" is what Starlette's
+# in-process TestClient reports; no network peer can present it (the OS sets the
+# source address), so allowlisting it is safe and keeps the test suite working.
+_LOOPBACK_PEERS = frozenset({"127.0.0.1", "::1", "testclient"})
 
 
 def _host_only(raw: str) -> str:
@@ -1995,6 +2032,12 @@ class _LocalGuard:
     async def __call__(self, scope, receive, send):
         if scope["type"] != "http":
             await self.app(scope, receive, send)
+            return
+        # PRIMARY auth: the unforgeable TCP peer address. Fail closed if unknown.
+        client = scope.get("client")
+        peer = client[0] if client else None
+        if peer not in _LOOPBACK_PEERS:
+            await self._forbid(scope, receive, send, "non-loopback peer")
             return
         headers = {k.decode("latin-1").lower(): v.decode("latin-1")
                    for k, v in scope.get("headers", [])}
@@ -2429,12 +2472,14 @@ def exec_stream(dialog: str, id: str, run_id: str):
             yield sse_message(Div("reload"), event="done")
             return
         last = None
+        last_beat = time.monotonic()
         while True:
             snap = backend.exec_poll(dialog, run_id)
             out = snap.get("output", "")
             if out != last:                              # push only when it changed
                 yield sse_message(Pre(out, cls="out"), event="msg")
                 last = out
+                last_beat = time.monotonic()
             if snap.get("done"):
                 m.output = out
                 m.rich = snap.get("rich", []) or []
@@ -2445,6 +2490,14 @@ def exec_stream(dialog: str, id: str, run_id: str):
                 # (rich plots, restored Run button) renders in its resting state.
                 yield sse_message(Div("reload"), event="done")
                 return
+            # Heartbeat: a cell that hangs producing NO output (e.g. `while True:
+            # pass`) otherwise never yields, so Starlette can't notice the client
+            # disconnected and this generator leaks a threadpool worker forever.
+            # A periodic SSE comment forces a send, which raises on a dead client
+            # and tears the stream down. EventSource ignores comment lines.
+            elif time.monotonic() - last_beat > 15:
+                yield ": keepalive\n\n"
+                last_beat = time.monotonic()
             time.sleep(0.25)                             # ~4 polls/sec
 
     return StreamingResponse(gen(), media_type="text/event-stream")
@@ -2993,16 +3046,19 @@ def _convert_paper_async(path: str, name: str | None = None):
     """Convert a PDF in a background thread (marker can take a while), updating
     STATE['paper'] from 'converting' to 'ready'/'error'. The panel polls."""
     name = name or os.path.basename(path)
-    STATE["paper"] = {"name": name, "status": "converting"}
+    with _STATE_LOCK:
+        STATE["paper"] = {"name": name, "status": "converting"}
 
     def work():
         try:
             md, engine = paperlib.convert(path)
-            STATE["paper"] = {"name": name, "status": "ready", "md": md, "engine": engine}
+            new = {"name": name, "status": "ready", "md": md, "engine": engine}
         except Exception as e:  # noqa: BLE001 — surface conversion failures in the panel
             _dbg(f"paper convert failed for {path!r}: {e}")
-            STATE["paper"] = {"name": name, "status": "ready", "md": f"Could not open: {e}",
-                              "engine": "error"}
+            new = {"name": name, "status": "ready", "md": f"Could not open: {e}",
+                   "engine": "error"}
+        with _STATE_LOCK:                        # daemon thread → take the lock
+            STATE["paper"] = new
 
     threading.Thread(target=work, daemon=True).start()
 
@@ -3025,21 +3081,24 @@ def _url_name(url: str) -> str:
 def _convert_url_async(url: str, name: str):
     """Fetch + convert a web page to markdown in a background thread (same panel
     lifecycle as a PDF: 'converting' → 'ready'/'error', polled by the panel)."""
-    STATE["paper"] = {"name": name, "status": "converting", "source": url}
+    with _STATE_LOCK:
+        STATE["paper"] = {"name": name, "status": "converting", "source": url}
 
     def work():
         try:
             md, engine = paperlib.convert_url(url)
             if md.strip():
-                STATE["paper"] = {"name": name, "status": "ready", "md": md,
-                                  "engine": engine, "source": url}
+                new = {"name": name, "status": "ready", "md": md,
+                       "engine": engine, "source": url}
             else:
-                STATE["paper"] = {"name": name, "status": "ready", "engine": "error",
-                                  "md": f"**Couldn't extract anything from** `{url}`"}
+                new = {"name": name, "status": "ready", "engine": "error",
+                       "md": f"**Couldn't extract anything from** `{url}`"}
         except Exception as e:  # noqa: BLE001 — surface fetch/extract failures in the panel
             _dbg(f"url convert failed for {url!r}: {e}")
-            STATE["paper"] = {"name": name, "status": "ready", "engine": "error",
-                              "md": f"Could not open `{url}`:\n\n```\n{e}\n```"}
+            new = {"name": name, "status": "ready", "engine": "error",
+                   "md": f"Could not open `{url}`:\n\n```\n{e}\n```"}
+        with _STATE_LOCK:                        # daemon thread → take the lock
+            STATE["paper"] = new
 
     threading.Thread(target=work, daemon=True).start()
 
@@ -3061,6 +3120,31 @@ def _save_upload(pdf) -> tuple[str, str] | None:
     return str(dst), pdf.filename                # cache, keyed by path+mtime, still hits
 
 
+def _paper_path_allowed(src: str) -> bool:
+    """Whether a server-side `path` may be opened. The UI opens papers by upload or
+    URL; this `path` entry is for callers/tests, and an unrestricted local-file read
+    is a disclosure primitive (esp. if the loopback gate is ever bypassed). Confine
+    it to the user's home, the papers cache, or SIDEKICK_PAPER_DIR — resolved, so
+    `..`/symlinks can't escape."""
+    from pathlib import Path
+    bases = [Path.home()]
+    extra = os.environ.get("SIDEKICK_PAPER_DIR")
+    if extra:
+        bases.append(Path(extra).expanduser())
+    try:
+        bases.append(paperlib._cache_dir())
+    except Exception:  # noqa: BLE001 — cache dir is best-effort
+        pass
+    rp = Path(src).resolve()
+    for b in bases:
+        try:
+            if rp == b.resolve() or rp.is_relative_to(b.resolve()):
+                return True
+        except (OSError, ValueError):
+            continue
+    return False
+
+
 @rt("/paper/open", methods=["post"])
 def paper_open(pdf: UploadFile = None, path: str = "", url: str = ""):
     up = _save_upload(pdf)                       # an uploaded file takes precedence
@@ -3073,9 +3157,17 @@ def paper_open(pdf: UploadFile = None, path: str = "", url: str = ""):
         return Page()
     if path.strip():                             # a local file path (kept for callers/tests)
         src = os.path.expanduser(path.strip())
-        if not os.path.exists(src):
-            STATE["paper"] = {"name": os.path.basename(src) or src, "status": "ready",
-                              "engine": "error", "md": f"**File not found:** `{src}`"}
+        if not _paper_path_allowed(src):
+            with _STATE_LOCK:
+                STATE["paper"] = {"name": os.path.basename(src) or src, "status": "ready",
+                                  "engine": "error",
+                                  "md": f"**Refused:** `{src}` is outside the allowed "
+                                        f"directory (home, the papers cache, or "
+                                        f"$SIDEKICK_PAPER_DIR)."}
+        elif not os.path.exists(src):
+            with _STATE_LOCK:
+                STATE["paper"] = {"name": os.path.basename(src) or src, "status": "ready",
+                                  "engine": "error", "md": f"**File not found:** `{src}`"}
         else:
             _convert_paper_async(src, os.path.basename(src))
     return Page()

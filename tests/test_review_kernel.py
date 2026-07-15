@@ -10,7 +10,10 @@ import sys
 import wave
 from pathlib import Path
 
-import numpy as np
+import pytest
+
+np = pytest.importorskip("numpy")   # lives only in the `kernel` extra — skip, don't
+                                    # error at collection, on a base install
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
@@ -128,3 +131,88 @@ def test_rich_audio_branch_precedes_others():
 
     out = kernel_server._rich_repr(DummyBoth())
     assert out == {"type": "audio/wav", "data": "QkJC"}
+
+
+# ---- run_prompt provider routing (patched SDKs, no network) -----------------
+import types as _types
+
+
+def _install_fake_sdk(monkeypatch, modname, ctor, kind, captured):
+    """Inject a fake provider SDK into sys.modules. The fake records the client's
+    api_key and the create(**kw) call into `captured` so a test can assert shape
+    without any network. `kind` picks the response object each SDK returns."""
+    mod = _types.ModuleType(modname)
+
+    class _Create:
+        def create(self, **kw):
+            captured.update(kw)
+            if kind == "anthropic":                    # .content[0].text
+                return _types.SimpleNamespace(content=[_types.SimpleNamespace(text="ok")])
+            return _types.SimpleNamespace(              # .choices[0].message.content
+                choices=[_types.SimpleNamespace(message=_types.SimpleNamespace(content="ok"))])
+
+    if kind == "anthropic":
+        class _Client:
+            def __init__(self, api_key=None): captured["api_key"] = api_key
+            messages = _Create()
+    else:
+        class _Client:
+            def __init__(self, api_key=None): captured["api_key"] = api_key
+            chat = _types.SimpleNamespace(completions=_Create())
+
+    setattr(mod, ctor, _Client)
+    monkeypatch.setitem(sys.modules, modname, mod)
+
+
+def test_run_prompt_routes_to_anthropic(monkeypatch):
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-a")
+    cap = {}
+    _install_fake_sdk(monkeypatch, "anthropic", "Anthropic", "anthropic", cap)
+    out = kernel_server.run_prompt("d", "hello", "claude", context="ctx")
+    assert out == "ok"
+    assert cap["api_key"] == "sk-a"
+    assert cap["model"] == kernel_server.MODEL_NAMES["claude"]
+    assert cap["messages"] == [{"role": "user", "content": "hello"}]
+    assert cap.get("system")                           # non-empty context → preamble
+
+
+def test_run_prompt_routes_to_openai(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-o")
+    cap = {}
+    _install_fake_sdk(monkeypatch, "openai", "OpenAI", "openai", cap)
+    out = kernel_server.run_prompt("d", "hello", "codex", context="ctx")
+    assert out == "ok"
+    assert cap["api_key"] == "sk-o"
+    assert cap["model"] == kernel_server.MODEL_NAMES["codex"]
+    # newer param name (reasoning-tier models reject legacy max_tokens)
+    assert cap["max_completion_tokens"] == 1500
+    assert cap["messages"][-1] == {"role": "user", "content": "hello"}
+    assert cap["messages"][0]["role"] == "system"      # context inserted first
+
+
+def test_run_prompt_routes_to_zhipu(monkeypatch):
+    monkeypatch.setenv("ZHIPU_API_KEY", "sk-z")
+    cap = {}
+    _install_fake_sdk(monkeypatch, "zhipuai", "ZhipuAI", "zhipu", cap)
+    out = kernel_server.run_prompt("d", "hello", "glm", context="ctx")
+    assert out == "ok"
+    assert cap["api_key"] == "sk-z"
+    assert cap["model"] == kernel_server.MODEL_NAMES["glm"]
+
+
+def test_run_prompt_reports_missing_sdk(monkeypatch):
+    import importlib
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-a")     # key present…
+    orig = importlib.import_module
+    monkeypatch.setattr(importlib, "import_module",     # …but the SDK won't import
+                        lambda n, *a, **k: (_ for _ in ()).throw(ImportError())
+                        if n == "anthropic" else orig(n, *a, **k))
+    out = kernel_server.run_prompt("d", "hello", "claude")
+    assert "SDK not installed" in out
+
+
+def test_run_prompt_without_key_is_offline_stub(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr("sidekick.secrets_store.key_for_model", lambda m: None)
+    out = kernel_server.run_prompt("d", "hello", "claude")
+    assert "no API key" in out

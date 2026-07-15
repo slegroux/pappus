@@ -111,6 +111,86 @@ def test_port_open_false_on_unused_port():
     assert tunnel.port_open("127.0.0.1", 59999, timeout=0.3) is False
 
 
+# ---- tunnel lifecycle (fake Popen, no real ssh) -----------------------------
+import io as _io
+import types as _types
+
+
+class _FakePopen:
+    """Stand-in for the ssh subprocess. `poll` is the exit code (None = running)."""
+    def __init__(self, poll=None, stderr=b""):
+        self._poll = poll
+        self.stderr = _io.BytesIO(stderr)
+        self.terminated = self.killed = False
+        self.wait_raises = False
+
+    def poll(self): return self._poll
+    def terminate(self): self.terminated = True
+    def kill(self): self.killed = True
+
+    def wait(self, timeout=None):
+        if self.wait_raises:
+            raise tunnel.subprocess.TimeoutExpired("ssh", timeout)
+        return 0
+
+
+def _fast_clock(monkeypatch, step=0.2):
+    """Swap tunnel.time for an advancing fake so the wait-loop runs with no delay."""
+    clock = {"t": 0.0}
+
+    def _time():
+        clock["t"] += step
+        return clock["t"]
+    monkeypatch.setattr(tunnel, "time",
+                        _types.SimpleNamespace(time=_time, sleep=lambda *_: None))
+
+
+def test_open_tunnel_returns_proc_when_port_comes_up(monkeypatch):
+    _fast_clock(monkeypatch)
+    proc = _FakePopen(poll=None)                        # stays alive
+    monkeypatch.setattr(tunnel.subprocess, "Popen", lambda *a, **k: proc)
+    seq = iter([False, True])                           # in-use guard False, then live
+    monkeypatch.setattr(tunnel, "port_open", lambda *a, **k: next(seq, True))
+    assert tunnel.open_tunnel(targets.get_target("h100"), wait=1.0) is proc
+
+
+def test_open_tunnel_raises_when_ssh_exits_early(monkeypatch):
+    _fast_clock(monkeypatch)
+    proc = _FakePopen(poll=255, stderr=b"permission denied")   # died immediately
+    monkeypatch.setattr(tunnel.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(tunnel, "port_open", lambda *a, **k: False)
+    with pytest.raises(RuntimeError, match="exited early"):
+        tunnel.open_tunnel(targets.get_target("h100"), wait=1.0)
+
+
+def test_open_tunnel_times_out_and_terminates(monkeypatch):
+    _fast_clock(monkeypatch)
+    proc = _FakePopen(poll=None)                        # alive, but port never opens
+    monkeypatch.setattr(tunnel.subprocess, "Popen", lambda *a, **k: proc)
+    monkeypatch.setattr(tunnel, "port_open", lambda *a, **k: False)
+    with pytest.raises(TimeoutError):
+        tunnel.open_tunnel(targets.get_target("h100"), wait=0.6)
+    assert proc.terminated                              # spawned ssh was cleaned up
+
+
+def test_open_tunnel_refuses_when_local_port_busy(monkeypatch):
+    monkeypatch.setattr(tunnel, "port_open", lambda *a, **k: True)   # already in use
+    with pytest.raises(RuntimeError, match="already in use"):
+        tunnel.open_tunnel(targets.get_target("h100"))
+
+
+def test_close_tunnel_escalates_to_kill_on_timeout():
+    proc = _FakePopen(); proc.wait_raises = True
+    tunnel.close_tunnel(proc)
+    assert proc.terminated and proc.killed
+
+
+def test_close_tunnel_terminates_cleanly():
+    proc = _FakePopen()
+    tunnel.close_tunnel(proc)
+    assert proc.terminated and not proc.killed
+
+
 # ---- web send route ---------------------------------------------------------
 def test_send_route_adds_message_and_remembers_model():
     import sidekick.app as app
@@ -1869,6 +1949,7 @@ def test_paper_panel_shows_stepper_progress():
 def test_paper_open_and_close_routes(monkeypatch, tmp_path):
     import time, sidekick.app as app
     monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    monkeypatch.setenv("SIDEKICK_PAPER_DIR", str(tmp_path))   # allow the tmp path (S5)
     monkeypatch.setattr(app.paperlib, "convert", lambda p: ("# Paper", "pypdf"))
     pdf = tmp_path / "a.pdf"; pdf.write_bytes(b"%PDF-1.4 fake")   # must exist now
     app.paper_open(path=str(pdf))
@@ -1917,10 +1998,23 @@ def test_reupload_keeps_file_so_markdown_cache_hits(monkeypatch, tmp_path):
     assert app.paperlib.cache_path(Path(p2)) == key1     # so the .md cache key still matches
 
 
-def test_paper_open_bad_path_reports_not_found():
+def test_paper_open_bad_path_reports_not_found(monkeypatch, tmp_path):
     import sidekick.app as app
-    app.paper_open(path="/no/such/file.pdf")
+    monkeypatch.setenv("SIDEKICK_PAPER_DIR", str(tmp_path))   # allow the dir so we
+    app.paper_open(path=str(tmp_path / "nope.pdf"))          # reach the not-found path
     assert app.STATE["paper"]["engine"] == "error" and "not found" in app.STATE["paper"]["md"].lower()
+    app.STATE["paper"] = None
+
+
+def test_paper_open_refuses_path_outside_allowed_dir(monkeypatch, tmp_path):
+    # S5: a server-side `path` outside home/cache/$SIDEKICK_PAPER_DIR is refused,
+    # not opened — even when the file exists.
+    import sidekick.app as app
+    monkeypatch.setenv("SIDEKICK_PAPER_DIR", str(tmp_path / "allowed"))
+    outside = tmp_path / "secret.pdf"; outside.write_bytes(b"%PDF-1.4 secret")
+    app.paper_open(path=str(outside))
+    assert app.STATE["paper"]["engine"] == "error"
+    assert "refused" in app.STATE["paper"]["md"].lower()
     app.STATE["paper"] = None
 
 

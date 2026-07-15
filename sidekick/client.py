@@ -18,6 +18,15 @@ from pathlib import Path
 from .targets import Target, default_model
 
 
+def _dbg(msg):
+    """Log to stderr only when SIDEKICK_DEBUG is set, so the graceful-degradation
+    paths (mock fallback on connect) become diagnosable without changing default
+    behavior. Mirrors app._dbg."""
+    if os.environ.get("SIDEKICK_DEBUG"):
+        import sys
+        print(f"[sidekick] {msg}", file=sys.stderr)
+
+
 def _fallback_model() -> str:
     """The model to assume for a prompt cell that has none recorded. Follows the
     user's configured default (Claude Max via the CLI, out of the box) so a
@@ -633,5 +642,12 @@ def connect(target: Target) -> tuple[object, str | None]:
         return LiveBackend(target), None
     except ImportError:
         return MockBackend(), "solveit_client not installed (pip install solveit_client)"
-    except Exception as e:  # noqa: BLE001 — surface any connection issue to the UI
+    except (urllib.error.URLError, OSError, TimeoutError) as e:
+        # Expected "server down / unreachable" shape → degrade to the mock quietly.
         return MockBackend(), str(e)
+    except Exception as e:  # noqa: BLE001 — an *unexpected* error (e.g. a bug in a
+        # backend __init__) shouldn't masquerade as a plain connection issue. Still
+        # degrade so the UI stays usable, but name the type so it's diagnosable
+        # (and dump it under SIDEKICK_DEBUG) instead of looking like "server down".
+        _dbg(f"connect() unexpected {type(e).__name__}: {e}")
+        return MockBackend(), f"{type(e).__name__}: {e}"

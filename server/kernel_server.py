@@ -121,6 +121,13 @@ def _dialog_locks(*dialogs: str):
             lk.release()
 
 
+def _modname(dialog: str) -> str:
+    """The sys.modules key backing a dialog's namespace (see _ns). Deterministic so
+    /reset can drop the exact module it created."""
+    slug = "".join(c if c.isalnum() else "_" for c in dialog).strip("_") or "default"
+    return f"__solveit_{slug}__"
+
+
 def _ns(dialog: str) -> dict:
     ns = KERNELS.get(dialog)
     if ns is None:
@@ -133,8 +140,7 @@ def _ns(dialog: str) -> dict:
         # at that key, and dataclasses does sys.modules[cls.__module__].__dict__.
         # The per-dialog module name also keeps dialogs from sharing globals.
         import sys, types
-        slug = "".join(c if c.isalnum() else "_" for c in dialog).strip("_") or "default"
-        modname = f"__solveit_{slug}__"
+        modname = _modname(dialog)
         mod = types.ModuleType(modname)
         sys.modules[modname] = mod
         ns = mod.__dict__
@@ -657,10 +663,18 @@ class Handler(BaseHTTPRequestHandler):
                 sys.path.insert(0, p)
             return self._send(200, {"ok": bool(p), "added": added, "path": p})
         if path == "/reset":
+            import sys
             d = payload.get("dialog", "")
             with _dialog_locks(d):            # don't drop a namespace mid-exec
                 KERNELS.pop(d, None)
                 CLI_SESSIONS.pop(d, None)     # drop the CLI session too
+                # The backing module still references the whole namespace via
+                # sys.modules — drop it too, or /reset frees nothing (slow leak).
+                sys.modules.pop(_modname(d), None)
+            # And the per-dialog lock (recreated lazily on next use). Done after
+            # releasing it; a fresh lock for a just-reset dialog is harmless.
+            with _LOCKS_GUARD:
+                _LOCKS.pop(d, None)
             return self._send(200, {"ok": True})
         if path == "/rename":
             old, new = payload.get("old", ""), payload.get("new", "")

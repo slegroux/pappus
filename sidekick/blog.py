@@ -28,11 +28,12 @@ import nh3
 from .export import _directives, slug
 
 
-# Rich HTML/SVG cell outputs are the user's own kernel output, but a *published*
-# post is shared, so we sanitize it on the way out (nh3 strips <script>, event
-# handlers, javascript: URLs, …). The live in-app view is left unsanitized on
-# purpose — that's the single-user's own interactive output. nh3's defaults are
-# widened to keep typical DataFrame tables and SVG/matplotlib plots intact.
+# Rich HTML/SVG cell outputs get allowlist-sanitized here (nh3 strips <script>,
+# event handlers, javascript: URLs, …) both for a *published* post and for the
+# live in-app view (app._rich_view reuses _sanitize): dialogs now sync across
+# machines via data/, so a cached output is untrusted input, not just the local
+# user's own. nh3's defaults are widened to keep DataFrame tables and SVG/
+# matplotlib plots intact.
 _HTML_TAGS = nh3.ALLOWED_TAGS | {
     "table", "thead", "tbody", "tfoot", "tr", "td", "th", "caption", "colgroup", "col",
     "div", "span", "pre", "figure", "figcaption", "details", "summary", "img",

@@ -288,8 +288,9 @@ def _hook_shapes(model, example, *, kinds=None, all_leaves=False):
             handles.append(module.register_forward_hook(make_hook(module)))
 
     inp = example if isinstance(example, torch.Tensor) else torch.zeros(*example)
-    try:
-        was_training = model.training
+    was_training = False                          # set before try: if reading
+    try:                                          # model.training raises, `finally`
+        was_training = model.training             # must not throw NameError over it
         model.eval()
         with torch.no_grad():
             model(inp)

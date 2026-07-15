@@ -8,6 +8,7 @@ marker isn't available we fall back to lightweight pypdf text extraction.
 from __future__ import annotations
 
 import hashlib
+import http.client
 import ipaddress
 import os
 import socket
@@ -191,9 +192,46 @@ def _check_url_allowed(url: str) -> None:
             raise _BlockedURLError(f"refusing private/loopback host {host!r} → {ip}")
 
 
+def _vet_and_pick_ip(host: str, port: int) -> str:
+    """Resolve `host` and return one address to actually connect to. Unless
+    SIDEKICK_ALLOW_PRIVATE_URLS=1, the returned IP is guaranteed public — private/
+    loopback/link-local results are skipped, and if none qualify it raises. This
+    runs *at socket-connect time* (see the guarded connections below), so the IP we
+    vet is the IP we connect to — closing the DNS-rebinding TOCTOU where a name
+    passes _check_url_allowed and then re-resolves to 127.0.0.1/169.254.169.254."""
+    infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+    if os.environ.get("SIDEKICK_ALLOW_PRIVATE_URLS") == "1":
+        return infos[0][4][0]
+    for info in infos:
+        ip = info[4][0]
+        if not _ip_is_blocked(ip):
+            return ip
+    raise _BlockedURLError(f"refusing private/loopback host {host!r}")
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    """HTTPConnection that connects to a freshly-vetted public IP for self.host."""
+    def connect(self):
+        ip = _vet_and_pick_ip(self.host, self.port)
+        self.sock = socket.create_connection((ip, self.port), self.timeout,
+                                              self.source_address)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        ip = _vet_and_pick_ip(self.host, self.port)
+        sock = socket.create_connection((ip, self.port), self.timeout,
+                                        self.source_address)
+        # server_hostname=self.host keeps SNI + cert verification against the real
+        # hostname even though the socket is dialed by IP.
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
 def _fetch(url: str) -> tuple[bytes, str]:
     """Fetch a URL → (bytes, content_type). Only http(s) to public hosts (SSRF
-    guard, _check_url_allowed); redirects are followed but re-checked at each hop."""
+    guard, _check_url_allowed); redirects are followed but re-checked at each hop,
+    and every socket connects to a vetted IP (_Pinned*Connection) so a rebind can't
+    slip a private address in between the check and the connect."""
     import urllib.request
 
     class _GuardedRedirect(urllib.request.HTTPRedirectHandler):
@@ -201,8 +239,16 @@ def _fetch(url: str) -> tuple[bytes, str]:
             _check_url_allowed(newurl)       # a redirect must not escape the guard
             return super().redirect_request(req, fp, code, msg, headers, newurl)
 
+    class _HTTPHandler(urllib.request.HTTPHandler):
+        def http_open(self, req):
+            return self.do_open(_PinnedHTTPConnection, req)
+
+    class _HTTPSHandler(urllib.request.HTTPSHandler):
+        def https_open(self, req):
+            return self.do_open(_PinnedHTTPSConnection, req)
+
     _check_url_allowed(url)
-    opener = urllib.request.build_opener(_GuardedRedirect())
+    opener = urllib.request.build_opener(_GuardedRedirect(), _HTTPHandler(), _HTTPSHandler())
     req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (solveit-sidekick)"})
     with opener.open(req, timeout=25) as r:
         return r.read(), (r.headers.get("Content-Type") or "")

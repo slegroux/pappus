@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 
 # model id -> (provider label, env var the SDKs read)
@@ -49,11 +50,20 @@ def save(provider_env: str, key: str) -> None:
         data[provider_env] = key
     else:
         data.pop(provider_env, None)        # empty value clears it
-    p.write_text(json.dumps(data, indent=2))
+    # Write via a 0600 temp file + atomic rename so the key material is never
+    # readable in a world-readable window (mkstemp creates the file 0600 from the
+    # start, unlike write_text()+chmod which is briefly 0644).
+    fd, tmp = tempfile.mkstemp(dir=str(p.parent), prefix=".secrets-", suffix=".tmp")
     try:
-        p.chmod(0o600)
-    except OSError:
-        pass
+        with os.fdopen(fd, "w") as f:
+            f.write(json.dumps(data, indent=2))
+        os.replace(tmp, p)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
 
 
 def get_key(provider_env: str) -> str | None:

@@ -5,7 +5,10 @@ import base64
 import sys
 from pathlib import Path
 
-import numpy as np
+import pytest
+
+np = pytest.importorskip("numpy")   # lives only in the `kernel` extra — skip, don't
+                                    # error at collection, on a base install
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
