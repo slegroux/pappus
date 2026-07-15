@@ -65,7 +65,7 @@ solveit = ["solveit_client"]
 # tangles them into the .py package + docs.
 #   uv pip install "solveit-sidekick[nbdev]"
 nbdev = ["nbdev"]
-dev = ["pytest"]
+dev = ["pytest", "ruff"]
 
 # Everything for a full local workstation in one shot (server + coding stack +
 # paper reader + solveit + library builds).
@@ -85,5 +85,14 @@ sidekick = "sidekick.cli:main"
 # the source tree as a wheel (we run it in-place with `python -m`).
 package = false
 
+[tool.ruff.lint]
+# Lint for real defects (pyflakes), not for restyling working code. The codebase
+# makes deliberate choices ruff's defaults flag as errors, so we ignore those rules
+# rather than churn the source: `from fasthtml.common import *` (FastHTML is meant
+# to be star-imported → F403/F405), compact one-liners with `;` and grouped imports
+# (E702/E401 — house style), lazy/guarded imports below the top of a file (E402),
+# and a couple of intentional lambda assignments (E731).
+ignore = ["F403", "F405", "E402", "E702", "E401", "E731"]
+
 [dependency-groups]
-dev = ["pytest"]
+dev = ["pytest", "ruff"]

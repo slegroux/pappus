@@ -111,6 +111,10 @@ sync:
 test:
     uv run pytest -q
 
+# Lint with ruff (add `--fix` by hand for autofixes: `uv run ruff check --fix`).
+lint:
+    uv run ruff check
+
 # Diagnose the kernel target (DNS, port, token, /test_route).
 doctor:
     uv run python -m sidekick.cli doctor kernel

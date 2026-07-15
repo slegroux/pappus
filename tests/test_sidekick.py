@@ -1900,7 +1900,7 @@ def test_paper_open_accepts_upload(monkeypatch, tmp_path):
 def test_reupload_keeps_file_so_markdown_cache_hits(monkeypatch, tmp_path):
     # The same PDF re-uploaded must reuse its conversion: identical content lands
     # at the same path AND isn't rewritten, so the path+mtime cache key is stable.
-    import os, io, sidekick.app as app
+    import io, sidekick.app as app
     monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
 
     class FakeUpload:
