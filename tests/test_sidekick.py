@@ -1673,6 +1673,35 @@ def test_arxiv_url_rewrites_to_pdf():
     assert pl._arxiv_pdf("https://example.com/post") is None        # not arXiv
 
 
+def test_normalize_url_adds_scheme_to_bare_hosts():
+    from sidekick import paper as pl
+    # A bare host (what users actually paste) gets https:// — this is the whole
+    # reason the URL box works without typing the scheme.
+    assert pl.normalize_url("arxiv.org/abs/1706.03762") == "https://arxiv.org/abs/1706.03762"
+    assert pl.normalize_url("example.com") == "https://example.com"
+    assert pl.normalize_url("www.example.com/p") == "https://www.example.com/p"
+    assert pl.normalize_url("  example.com  ") == "https://example.com"   # trimmed
+    # An explicit scheme is left untouched (ftp:// still reaches the SSRF guard).
+    assert pl.normalize_url("http://x.com") == "http://x.com"
+    assert pl.normalize_url("https://y.com") == "https://y.com"
+    assert pl.normalize_url("ftp://z.com") == "ftp://z.com"
+    assert pl.normalize_url("") == ""
+
+
+def test_convert_url_normalizes_bare_host(monkeypatch, tmp_path):
+    # A scheme-less URL must reach _fetch as https://… (previously it was refused
+    # by the SSRF guard as scheme "(none)").
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    from sidekick import paper as pl
+    seen = {}
+    monkeypatch.setattr(pl, "_fetch",
+                        lambda u: (seen.setdefault("url", u), (b"<h1>Hi</h1>", "text/html"))[1])
+    monkeypatch.setattr(pl, "_extract_article", lambda html, url: ("# Hi", "bs4"))
+    md, engine = pl.convert_url("example.com/post")
+    assert seen["url"] == "https://example.com/post"
+    assert md.strip() == "# Hi"
+
+
 def test_fetch_guard_rejects_nonhttp_and_private_hosts(monkeypatch):
     from sidekick import paper as pl
     import pytest as _pt

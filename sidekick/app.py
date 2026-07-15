@@ -1904,7 +1904,11 @@ def Page():
                                         onchange="try{localStorage.removeItem('sidekick_nopaper')}catch(e){};this.form.submit()"),
                                   cls="src-file-label"),
                             Span("or a web page / blog", cls="ins-col-head"),
-                            Input(name="url", type="url", placeholder="https://…", cls="src-url"),
+                            # type="text" (not "url") so the browser doesn't silently
+                            # refuse a scheme-less paste like "arxiv.org/abs/1706.03762";
+                            # the server adds https:// (paperlib.normalize_url).
+                            Input(name="url", type="text", inputmode="url",
+                                  placeholder="arxiv.org/abs/…  or  https://…", cls="src-url"),
                             Button("Open URL", cls="cell-btn run", type="submit"),
                             method="post", action="/paper/open", enctype="multipart/form-data",
                             cls="src-form",
@@ -3152,8 +3156,8 @@ def paper_open(pdf: UploadFile = None, path: str = "", url: str = ""):
         _convert_paper_async(*up)
         return Page()
     if url.strip():                              # a web page / blog URL
-        u = url.strip()
-        _convert_url_async(u, _url_name(u))
+        u = paperlib.normalize_url(url)          # add https:// to a bare host so
+        _convert_url_async(u, _url_name(u))      # `arxiv.org/abs/…` just works
         return Page()
     if path.strip():                             # a local file path (kept for callers/tests)
         src = os.path.expanduser(path.strip())

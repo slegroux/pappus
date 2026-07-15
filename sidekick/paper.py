@@ -284,11 +284,23 @@ def _extract_article(html: str, url: str) -> tuple[str, str]:
     return markdownify(str(main), heading_style="ATX").strip(), "bs4"
 
 
+def normalize_url(url: str) -> str:
+    """Add a scheme to a bare URL so users can paste `arxiv.org/abs/1706.03762`
+    (or `example.com/post`) instead of the full `https://…`. Anything already
+    carrying a `scheme://` prefix is left untouched (an ftp:// URL still reaches
+    the SSRF guard, which refuses non-http(s))."""
+    url = (url or "").strip()
+    if url and not re.match(r"^[a-zA-Z][a-zA-Z0-9+.\-]*://", url):
+        url = "https://" + url.lstrip("/")
+    return url
+
+
 def convert_url(url: str) -> tuple[str, str]:
     """Fetch a URL and convert to markdown, auto-routing by what it actually is:
     a PDF (arXiv, a `.pdf` link, or `application/pdf`) goes through the PDF pipeline
     (marker/pypdf — equations/tables preserved); anything else is article-extracted
     (trafilatura/bs4). Returns (markdown, engine); cached on disk by URL."""
+    url = normalize_url(url)
     cp = _url_cache_path(url)
     if cp.exists():
         try:
