@@ -1910,6 +1910,15 @@ def Page():
                             Input(name="url", type="text", inputmode="url",
                                   placeholder="arxiv.org/abs/…  or  https://…", cls="src-url"),
                             Button("Open URL", cls="cell-btn run", type="submit"),
+                            # or a file already on disk — opened in place by its path
+                            # (no re-upload). Confined to home / the papers cache /
+                            # $SIDEKICK_PAPER_DIR by _paper_path_allowed.
+                            Span("or a file on this machine", cls="ins-col-head"),
+                            Input(name="path", type="text",
+                                  placeholder="~/papers/attention.pdf", cls="src-url",
+                                  title="Open a PDF already on disk by its path (under your "
+                                        "home dir, the papers cache, or $SIDEKICK_PAPER_DIR)"),
+                            Button("Open file", cls="cell-btn run", type="submit"),
                             method="post", action="/paper/open", enctype="multipart/form-data",
                             cls="src-form",
                             onsubmit="try{localStorage.removeItem('sidekick_nopaper')}catch(e){}"),

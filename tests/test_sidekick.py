@@ -2035,6 +2035,16 @@ def test_paper_open_bad_path_reports_not_found(monkeypatch, tmp_path):
     app.STATE["paper"] = None
 
 
+def test_source_form_has_local_path_field():
+    # The 📄 menu offers three ways to open a source: upload, URL, and a local
+    # file path (opened in place). Guard the path field against silent removal.
+    import sidekick.app as app
+    from starlette.testclient import TestClient
+    html = TestClient(app.app).get("/").text
+    assert 'name="path"' in html and "Open file" in html
+    assert "or a file on this machine" in html
+
+
 def test_paper_open_refuses_path_outside_allowed_dir(monkeypatch, tmp_path):
     # S5: a server-side `path` outside home/cache/$SIDEKICK_PAPER_DIR is refused,
     # not opened — even when the file exists.
