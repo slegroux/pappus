@@ -1898,11 +1898,15 @@ def Page():
                 Div(Details(
                         Summary("📄", cls="gear", title="Open a source — a PDF or a web page"),
                         Form(
-                            Label("Choose a PDF…",
-                                  Input(type="file", name="pdf", accept="application/pdf,.pdf",
-                                        cls="paper-file",
-                                        onchange="try{localStorage.removeItem('sidekick_nopaper')}catch(e){};this.form.submit()"),
-                                  cls="src-file-label"),
+                            # Explicit button → input.click() rather than a label
+                            # wrapping the hidden input: nested-label + display:none
+                            # file inputs fail to open the picker in some browsers.
+                            # This triggers the native dialog reliably everywhere.
+                            Input(type="file", name="pdf", id="pdfPick",
+                                  accept="application/pdf,.pdf", cls="paper-file",
+                                  onchange="try{localStorage.removeItem('sidekick_nopaper')}catch(e){};this.form.submit()"),
+                            Button("Choose a PDF…", type="button", cls="src-file-label",
+                                   onclick="document.getElementById('pdfPick').click()"),
                             Span("or a web page / blog", cls="ins-col-head"),
                             # type="text" (not "url") so the browser doesn't silently
                             # refuse a scheme-less paste like "arxiv.org/abs/1706.03762";

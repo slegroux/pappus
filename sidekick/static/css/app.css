@@ -54,13 +54,16 @@ body.col-resizing{cursor:col-resize;user-select:none}
 .sel-btn{border:none;border-radius:8px;padding:5px 11px;font-size:12px;cursor:pointer;white-space:nowrap}
 .sel-btn.import{background:var(--accent);color:#fff;font-weight:600}
 .sel-btn:not(.import){background:var(--panel);color:var(--ink);border:1px solid var(--line)}
-/* the 📄 topbar icon IS the file picker: a label wrapping a hidden file input */
+/* hidden file input; the .src-file-label button triggers it via input.click() */
 .paper-file{display:none}
 /* "open a source" dropdown: a PDF file pick or a web-page URL */
 .src-form{position:absolute;right:0;top:28px;z-index:30;display:flex;flex-direction:column;gap:8px;
   background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:12px;min-width:248px;
   box-shadow:0 6px 18px rgba(0,0,0,.12)}
-.src-file-label{font-size:13px;font-weight:600;color:var(--accent);cursor:pointer}
+/* a <button> that triggers the hidden file input — reset the native button chrome
+   so it reads as the accent-coloured text link it was */
+.src-file-label{font-size:13px;font-weight:600;color:var(--accent);cursor:pointer;
+  background:none;border:none;padding:0;text-align:left;font-family:inherit}
 .src-url{border:1px solid var(--line);border-radius:8px;padding:7px 10px;font:inherit;font-size:13px;outline:none}
 .src-url:focus{border-color:var(--accent)}
 /* table of contents (right column, toggleable, full-height so it stays in view) */

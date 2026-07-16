@@ -2045,6 +2045,18 @@ def test_source_form_has_local_path_field():
     assert "or a file on this machine" in html
 
 
+def test_pdf_picker_button_triggers_hidden_input():
+    # "Choose a PDF…" must be a button that explicitly clicks the hidden file
+    # input — a nested-label + display:none input fails to open the native picker
+    # in some browsers, so the explicit .click() is the fix. Guard it.
+    import sidekick.app as app
+    from starlette.testclient import TestClient
+    html = TestClient(app.app).get("/").text
+    assert 'id="pdfPick"' in html                       # the hidden file input
+    assert "getElementById('pdfPick').click()" in html  # button opens it
+    assert 'type="file"' in html and 'name="pdf"' in html
+
+
 def test_paper_open_refuses_path_outside_allowed_dir(monkeypatch, tmp_path):
     # S5: a server-side `path` outside home/cache/$SIDEKICK_PAPER_DIR is refused,
     # not opened — even when the file exists.
