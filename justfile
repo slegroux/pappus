@@ -13,6 +13,13 @@
 kernel_port := "5055"     # must match the `kernel` target's url in targets.yaml
 ui_port     := "8000"
 
+# Extras every app process runs with. `paper` (marker) is included by default so
+# opening a PDF gets real structure — headings/sections/equations — out of the box
+# (pypdf, the no-marker fallback, produces flat text with no sections). The kernel
+# and UI share one uv-managed venv, so BOTH must request the same set or `uv run`
+# re-syncs (uninstalls the other's extras) between launches.
+run_extras := "--extra kernel --extra paper"
+
 # Dialogs/papers/blog live IN the repo (data/) — this repo is private and doubles
 # as the cross-machine sync + backup channel for them (`just sync`). Secrets stay
 # outside (~/.config/solveit-sidekick/secrets.json, see .gitignore).
@@ -51,11 +58,11 @@ start reload="":
     if ! up {{kernel_port}}; then
         echo "▶ kernel server → :{{kernel_port}}  (logs: $LOG/kernel.log)"
         {{portkey_env}}
-        nohup env $PKENV uv run --extra kernel python -m server.kernel_server --port {{kernel_port}} >"$LOG/kernel.log" 2>&1 &
+        nohup env $PKENV uv run {{run_extras}} python -m server.kernel_server --port {{kernel_port}} >"$LOG/kernel.log" 2>&1 &
         for i in $(seq 1 120); do up {{kernel_port}} && break; sleep 0.5; done
     fi
     echo "▶ web UI → http://localhost:{{ui_port}}  (logs: $LOG/ui.log)"
-    nohup env $RELOAD_ENV SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run python -m sidekick.cli serve >"$LOG/ui.log" 2>&1 &
+    nohup env $RELOAD_ENV SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run {{run_extras}} python -m sidekick.cli serve >"$LOG/ui.log" 2>&1 &
     for i in $(seq 1 60); do up {{ui_port}} && break; sleep 0.5; done
     if up {{ui_port}}; then
         echo "✓ running in the background → http://localhost:{{ui_port}}   (stop with: just stop)"
@@ -70,7 +77,7 @@ dev:
     set -euo pipefail
     echo "▶ kernel server  → http://localhost:{{kernel_port}}  (--extra kernel: numpy/torch/…)"
     {{portkey_env}}
-    env $PKENV uv run --extra kernel python -m server.kernel_server --port {{kernel_port}} &
+    env $PKENV uv run {{run_extras}} python -m server.kernel_server --port {{kernel_port}} &
     KERNEL_PID=$!
     trap 'echo; echo "■ stopping…"; kill $KERNEL_PID 2>/dev/null || true; \
           lsof -ti:{{kernel_port}} | xargs kill 2>/dev/null || true' INT TERM EXIT
@@ -81,18 +88,18 @@ dev:
     done
     echo " ✓"
     echo "▶ web UI         → http://localhost:{{ui_port}}  (target: kernel)"
-    SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run python -m sidekick.cli serve
+    SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run {{run_extras}} python -m sidekick.cli serve
 
 # Just the kernel server (e.g. to run it on its own / on the H100).
 kernel:
     #!/usr/bin/env bash
     set -euo pipefail
     {{portkey_env}}
-    exec env $PKENV uv run --extra kernel python -m server.kernel_server --port {{kernel_port}}
+    exec env $PKENV uv run {{run_extras}} python -m server.kernel_server --port {{kernel_port}}
 
 # Just the web UI (assumes the kernel server is already running).
 ui:
-    SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run python -m sidekick.cli serve
+    SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run {{run_extras}} python -m sidekick.cli serve
 
 # Sync dialogs across machines: commit local dialog/paper changes, pull, push.
 # Run at session start (get the other machine's dialogs) and session end (share
@@ -167,13 +174,13 @@ app:
         PKENV="OPENAI_BASE_URL=https://api.portkey.ai/v1 OPENAI_API_KEY=$PORTKEY_API_KEY OPENAI_MODEL=${OPENAI_MODEL:-gpt-5.5}"
     fi
     if ! up 5055; then
-        nohup env $PKENV "$UV" run --extra kernel python -m server.kernel_server --port 5055 \
+        nohup env $PKENV "$UV" run {{run_extras}} python -m server.kernel_server --port 5055 \
             >"$LOG/kernel.log" 2>&1 & KPID=$!
         for i in $(seq 1 120); do up 5055 && break; sleep 0.5; done
     fi
     # 2) UI on :8000 — after the kernel, so it connects live (not the mock)
     if ! up 8000; then
-        nohup env SIDEKICK_TARGET=kernel SIDEKICK_PORT=8000 SIDEKICK_DATA="$PROJ/data" "$UV" run python -m sidekick.cli serve \
+        nohup env SIDEKICK_TARGET=kernel SIDEKICK_PORT=8000 SIDEKICK_DATA="$PROJ/data" "$UV" run {{run_extras}} python -m sidekick.cli serve \
             >"$LOG/ui.log" 2>&1 & UPID=$!
         for i in $(seq 1 60); do up 8000 && break; sleep 0.5; done
     fi
