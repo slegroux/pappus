@@ -38,6 +38,48 @@ The mock fallback means the UI runs **with no SolveIt server at all** — handy 
 trying the interface or developing it away from the H100. When a real target is
 reachable it talks to it directly.
 
+## Quick start
+
+The only prerequisite is [uv](https://docs.astral.sh/uv/) — it manages Python and
+every dependency for you, so you never touch `pip` or a venv by hand.
+
+```bash
+# 1. install uv (once)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 2. get the repo
+git clone <this-repo> solveit-sidekick && cd solveit-sidekick
+
+# 3. install EVERYTHING up front — the base app, the kernel's numpy/torch/… stack,
+#    `paper` (marker — REQUIRED to open PDFs: structure, sections, equations,
+#    figures), and `web` (trafilatura) for clean web-page → markdown. This is
+#    the step that's easy to skip: the app runs without it, but the kernel
+#    server won't start, the UI silently falls back to the in-memory mock (so
+#    your saved dialogs don't load), and PDFs won't open at all. torch is
+#    large — let it finish once.
+uv sync --extra kernel --extra paper --extra web
+
+# 4. run it (needs `just` — `brew install just`). Starts the kernel server AND the
+#    web UI in the background, then opens the browser:
+just start        # → kernel on :5055, UI on http://localhost:8000  (stop: just stop)
+```
+
+No `just`? Run the two processes yourself in two terminals:
+
+```bash
+# terminal 1 — the kernel server (executes your code)
+uv run --extra kernel python -m server.kernel_server --port 5055
+# terminal 2 — verify the connection, then launch the UI
+uv run python -m sidekick.cli doctor kernel     # every check should pass
+SIDEKICK_TARGET=kernel uv run python -m sidekick.cli serve   # → http://localhost:8000
+```
+
+**Is it live?** Look at the LED in the top-right: **green** = the UI reached the
+kernel (your dialogs load, code runs for real); **grey** = it fell back to the mock
+(only the `demo/welcome` dialog, nothing executes). Grey almost always means the
+kernel server on `:5055` isn't up — check `~/Library/Logs/SolveItSidekick/kernel.log`
+and run `uv run python -m sidekick.cli doctor kernel` to see exactly what's missing.
+
 ## Setup
 
 This project uses [uv](https://docs.astral.sh/uv/). Install it once
@@ -498,7 +540,10 @@ toolbar pops up:
   next question carries it as context.
 
 You can hide the paper text with the **▾** toggle (the header — name, controls —
-stays put) to give the notebook more room.
+stays put) to give the notebook more room. Closing the panel entirely (**✕**)
+isn't one-way either: once a paper's cells have been imported, its dialog
+remembers the source, and a **📖** button in the top bar **reopens the paper**
+whenever you're back in that dialog — the conversion is cached, so it's instant.
 
 ### Or step through it, the way Jeremy Howard does
 
@@ -508,16 +553,22 @@ the whole thing. Each click brings the **next section** into the notebook as a
 **note** + a focused **code cell** to reimplement, and a counter (`2/3`) tracks
 your progress (the AI sees everything above, so "is my version equivalent?" just
 works). Prefer it all at once? The **¶** / **§** buttons bulk-import every
-paragraph or section as notes.
+paragraph or section as notes — the paper stays open alongside, so you can keep
+highlighting passages into the same dialog (close it with **✕** when done).
 
 PDFs are converted to markdown and rendered with the same math/code pipeline as
-the rest of the app. The recommended reader is **marker** — install the **`paper`**
-extra (`uv pip install "solveit-sidekick[paper]"`, also in `[all]`) and it becomes
-the default engine: it preserves structure, tables, and **equations as LaTeX**
-(rendered via KaTeX), which is much nicer for ML papers. marker is heavier (torch
-+ model downloads, GPL-3.0) and slower, so conversions run in the background and
-are cached to disk. Without it, the panel falls back to lightweight **pypdf**
-text extraction with no extra setup.
+the rest of the app. The reader is **marker** — **required** for PDFs: install
+the **`paper`** extra (`uv pip install "solveit-sidekick[paper]"`, also in
+`[all]`). It preserves structure, tables, **equations as LaTeX** (rendered via
+KaTeX), and **figures/diagrams** — extracted images are saved next to the
+conversion cache and render inline, both in the reading panel and in the note
+cells you import (papers converted before figure support pick it up on
+re-conversion: delete their cached `.md` under the papers cache). marker is
+heavy (torch + model downloads, GPL-3.0) and slow, so conversions run in the
+background and are cached to disk. Without it, opening a PDF shows the install
+hint in the panel — there's deliberately no degraded text-only fallback —
+though already-converted papers still open from the cache. Web pages don't
+need it.
 
 ## Pain points this targets
 

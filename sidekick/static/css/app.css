@@ -191,6 +191,7 @@ select.tsel{appearance:none;background:var(--chip);border:1px solid var(--line);
 .sec-count{font-size:11px;color:var(--muted);background:var(--chip);border-radius:10px;padding:0 7px}
 #stream .row.sec-hidden{display:none}
 .bubble{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:8px 12px}
+.bubble img{max-width:100%;height:auto}  /* imported paper figures stay in the bubble */
 .bubble.user{background:var(--bubble-user);border-color:#EBD9CD}
 .bubble.note{background:transparent;border:none;padding:2px 0}
 /* AI "working" indicators: a spinning wheel while we wait for the first token,

@@ -1613,16 +1613,23 @@ def test_export_routes_set_download_headers():
 
 
 # ---- paper reading (PDF -> markdown) ----------------------------------------
-def test_paper_convert_caches_and_falls_back(monkeypatch, tmp_path):
+def test_paper_convert_requires_marker_but_cache_survives_it(monkeypatch, tmp_path):
+    import pytest
     monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
     from sidekick import paper as pl
     pdf = tmp_path / "x.pdf"; pdf.write_bytes(b"%PDF-1.4 fake")
-    monkeypatch.setattr(pl, "_marker_convert", lambda p: None)       # marker unavailable
-    monkeypatch.setattr(pl, "_pypdf_convert", lambda p: "# Extracted\ntext")
+
+    def no_marker(p):
+        raise RuntimeError("PDF conversion requires marker — install the `paper` extra")
+
+    monkeypatch.setattr(pl, "_marker_convert", no_marker)
+    with pytest.raises(RuntimeError, match="paper"):     # no pypdf fallback: hint surfaces
+        pl.convert(str(pdf))
+    monkeypatch.setattr(pl, "_marker_convert", lambda p: ("# Converted\ntext", {}))
     md, engine = pl.convert(str(pdf))
-    assert engine == "pypdf" and "Extracted" in md and pl.cache_path(pdf).exists()
-    monkeypatch.setattr(pl, "_pypdf_convert", lambda p: "SHOULD NOT RUN")
-    md2, engine2 = pl.convert(str(pdf))                              # second call hits cache
+    assert engine == "marker" and "Converted" in md and pl.cache_path(pdf).exists()
+    monkeypatch.setattr(pl, "_marker_convert", no_marker)
+    md2, engine2 = pl.convert(str(pdf))                  # cached paper opens without marker
     assert engine2 == "cache" and md2 == md
 
 
@@ -1643,7 +1650,7 @@ def test_paper_split_is_memoized_on_state(monkeypatch):
                         lambda md, blocks=None: (calls.__setitem__("sections", calls["sections"] + 1)
                                                  or real_s(md, blocks)))
     app.STATE["paper"] = {"name": "p.pdf", "status": "ready",
-                          "md": "# A\n\na\n\n# B\n\nb", "engine": "pypdf"}
+                          "md": "# A\n\na\n\n# B\n\nb", "engine": "marker"}
     from fasthtml.common import to_xml
     to_xml(app.PaperPanel()); to_xml(app.PaperPanel()); to_xml(app.PaperPanel())   # 3 renders
     assert calls["blocks"] == 1 and calls["sections"] == 1      # split once, not per render
@@ -1656,13 +1663,12 @@ def test_paper_empty_conversion_is_not_cached(monkeypatch, tmp_path):
     monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
     from sidekick import paper as pl
     pdf = tmp_path / "scan.pdf"; pdf.write_bytes(b"%PDF-1.4 fake")
-    monkeypatch.setattr(pl, "_marker_convert", lambda p: None)
-    monkeypatch.setattr(pl, "_pypdf_convert", lambda p: "   ")       # nothing extracted
+    monkeypatch.setattr(pl, "_marker_convert", lambda p: ("   ", {}))   # nothing extracted
     md, engine = pl.convert(str(pdf))
-    assert engine == "pypdf" and not pl.cache_path(pdf).exists()      # not poisoned
-    monkeypatch.setattr(pl, "_pypdf_convert", lambda p: "# Now it works")
+    assert engine == "marker" and not pl.cache_path(pdf).exists()     # not poisoned
+    monkeypatch.setattr(pl, "_marker_convert", lambda p: ("# Now it works", {}))
     md2, engine2 = pl.convert(str(pdf))                              # retried, not stuck blank
-    assert engine2 == "pypdf" and "Now it works" in md2
+    assert engine2 == "marker" and "Now it works" in md2
 
 
 def test_arxiv_url_rewrites_to_pdf():
@@ -1790,9 +1796,56 @@ def test_paper_uses_marker_when_available(monkeypatch, tmp_path):
     monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
     from sidekick import paper as pl
     pdf = tmp_path / "y.pdf"; pdf.write_bytes(b"%PDF-1.4 fake")
-    monkeypatch.setattr(pl, "_marker_convert", lambda p: r"$$E=mc^2$$")
+    monkeypatch.setattr(pl, "_marker_convert", lambda p: (r"$$E=mc^2$$", {}))
     md, engine = pl.convert(str(pdf))
     assert engine == "marker" and "E=mc^2" in md
+
+
+def test_paper_convert_saves_marker_figures_and_rewrites_refs(monkeypatch, tmp_path):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    from sidekick import paper as pl
+
+    class FakeImg:
+        def save(self, dst): Path(dst).write_bytes(b"jpegdata")
+
+    md = "# T\n\n![](_page_2_Figure_1.jpeg)\n\nbody"
+    images = {"_page_2_Figure_1.jpeg": FakeImg(), "../evil.jpeg": FakeImg()}
+    pdf = tmp_path / "f.pdf"; pdf.write_bytes(b"%PDF-1.4 fake")
+    monkeypatch.setattr(pl, "_marker_convert", lambda p: (md, images))
+    out, engine = pl.convert(str(pdf))
+    key = pl.cache_path(pdf).stem
+    assert engine == "marker"
+    assert f"![](/paper/asset/{key}/_page_2_Figure_1.jpeg)" in out    # ref rewritten…
+    assert (pl.assets_dir(key) / "_page_2_Figure_1.jpeg").read_bytes() == b"jpegdata"
+    assert not (pl.assets_dir(key) / "evil.jpeg").exists()   # path-shaped name refused
+    out2, engine2 = pl.convert(str(pdf))                     # cache round-trip
+    assert engine2 == "cache" and out2 == out                # …and persisted
+
+
+def test_split_blocks_keeps_live_figures_drops_dead_refs():
+    from sidekick import paper as pl
+    md = ("intro\n\n![](_page_1_Figure_0.jpeg)\n\n"
+          "![f](/paper/asset/abc/_page_1_Figure_0.jpeg)\n\n"
+          "![r](https://x.test/fig.png)\n\nend")
+    blocks = pl.split_blocks(md)
+    assert "![](_page_1_Figure_0.jpeg)" not in blocks         # dead relative ref dropped
+    assert "![f](/paper/asset/abc/_page_1_Figure_0.jpeg)" in blocks
+    assert "![r](https://x.test/fig.png)" in blocks
+
+
+def test_paper_asset_route_serves_and_guards(monkeypatch, tmp_path):
+    import sidekick.app as app
+    from starlette.testclient import TestClient
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    adir = tmp_path / "papers" / "assets" / "k1"
+    adir.mkdir(parents=True)
+    (adir / "fig.jpeg").write_bytes(b"imgbytes")
+    (tmp_path / "papers" / "secret.md").write_text("cache internals")
+    r = TestClient(app.app).get("/paper/asset/k1/fig.jpeg")
+    assert r.status_code == 200 and r.content == b"imgbytes"
+    assert app.paper_asset("k1", "../secret.md").status_code == 404   # traversal blocked
+    assert app.paper_asset("..", "secret.md").status_code == 404
+    assert app.paper_asset("k1", "missing.jpeg").status_code == 404
 
 
 def test_paper_panel_states():
@@ -1804,7 +1857,7 @@ def test_paper_panel_states():
     h = to_xml(app.PaperPanel())
     assert "Converting" in h and "/paper/status" in h               # polling spinner
     app.STATE["paper"] = {"name": "p.pdf", "status": "ready",
-                          "md": "# Title\n\nsome **bold** body", "engine": "pypdf"}
+                          "md": "# Title\n\nsome **bold** body", "engine": "marker"}
     h = to_xml(app.PaperPanel())
     assert "<h1>Title</h1>" in h and "paperBody" in h               # rendered markdown
     # blocks carry their source markdown so a highlight imports real md, not plain text
@@ -1815,7 +1868,7 @@ def test_paper_panel_states():
 def test_paper_step_brings_one_section_at_a_time():
     import sidekick.app as app
     md = "# A\n\nalpha body\n\n# B\n\nbeta body"     # split_sections -> 2 sections
-    app.STATE["paper"] = {"name": "x.pdf", "status": "ready", "md": md, "engine": "pypdf"}
+    app.STATE["paper"] = {"name": "x.pdf", "status": "ready", "md": md, "engine": "marker"}
 
     from fasthtml.common import to_xml
     page = to_xml(app.paper_step())                   # step 1
@@ -1842,7 +1895,7 @@ def test_paper_step_brings_one_section_at_a_time():
 def test_paper_import_selection_adds_note_and_code():
     import sidekick.app as app
     app.STATE["paper"] = {"name": "sel.pdf", "status": "ready", "md": "# whole\n\nbig paper",
-                          "engine": "pypdf"}
+                          "engine": "marker"}
     app.paper_import_selection(text="  just this bit I care about  ")
     dlg = app.STATE["paper"]["dialog"]
     cells = app.STATE["backend"].messages(dlg)
@@ -1888,13 +1941,21 @@ def test_paper_step_noop_when_not_ready_or_empty():
     app.STATE["paper"] = None
 
 
-def test_paper_toggle_only_shows_when_a_paper_is_loaded():
+def test_paper_toggle_only_shows_when_a_paper_is_loaded(monkeypatch, tmp_path):
     import sidekick.app as app
     from fasthtml.common import to_xml
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))         # empty → no recorded sources
     app.STATE["paper"] = None
-    assert 'id="tgl-paper"' not in to_xml(app.Page())          # no paper -> no 📖 toggle
-    app.STATE["paper"] = {"name": "p.pdf", "status": "ready", "md": "# A\n\nx", "engine": "pypdf"}
-    assert 'id="tgl-paper"' in to_xml(app.Page())              # paper loaded -> toggle appears
+    app.STATE["dialog"] = "plain/no-source"
+    assert 'id="tgl-paper"' not in to_xml(app.Page())          # no paper, no source -> no 📖
+    # a dialog with a recorded source but no open paper -> 📖 is a reopen link
+    app._record_paper_source("plain/no-source", {"source": "https://x.test/p", "name": "p"})
+    html = to_xml(app.Page())
+    assert 'id="tgl-paper"' in html and "/paper/reopen" in html
+    # a loaded paper -> 📖 is the show/hide toggle, not the reopen link
+    app.STATE["paper"] = {"name": "p.pdf", "status": "ready", "md": "# A\n\nx", "engine": "marker"}
+    html = to_xml(app.Page())
+    assert 'id="tgl-paper"' in html and "/paper/reopen" not in html
     app.STATE["paper"] = None
 
 
@@ -1965,7 +2026,7 @@ def test_paper_panel_shows_stepper_progress():
     import sidekick.app as app
     from fasthtml.common import to_xml
     md = "# A\n\na\n\n# B\n\nb\n\n# C\n\nc"            # 3 sections
-    app.STATE["paper"] = {"name": "p.pdf", "status": "ready", "md": md, "engine": "pypdf", "step": 1}
+    app.STATE["paper"] = {"name": "p.pdf", "status": "ready", "md": md, "engine": "marker", "step": 1}
     h = to_xml(app.PaperPanel())
     assert "/paper/step" in h and "Next section" in h and "1/3" in h
     assert "paper-collapsed" in h and "sidekick_paperhidden" in h   # show/hide text toggle
@@ -1979,7 +2040,7 @@ def test_paper_open_and_close_routes(monkeypatch, tmp_path):
     import time, sidekick.app as app
     monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
     monkeypatch.setenv("SIDEKICK_PAPER_DIR", str(tmp_path))   # allow the tmp path (S5)
-    monkeypatch.setattr(app.paperlib, "convert", lambda p: ("# Paper", "pypdf"))
+    monkeypatch.setattr(app.paperlib, "convert", lambda p: ("# Paper", "marker"))
     pdf = tmp_path / "a.pdf"; pdf.write_bytes(b"%PDF-1.4 fake")   # must exist now
     app.paper_open(path=str(pdf))
     for _ in range(100):
@@ -1995,7 +2056,7 @@ def test_paper_open_accepts_upload(monkeypatch, tmp_path):
     import time, sidekick.app as app
     from starlette.testclient import TestClient
     monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
-    monkeypatch.setattr(app.paperlib, "convert", lambda p: ("# Uploaded", "pypdf"))
+    monkeypatch.setattr(app.paperlib, "convert", lambda p: ("# Uploaded", "marker"))
     app.STATE["paper"] = None
     c = TestClient(app.app)
     c.post("/paper/open", files={"pdf": ("mypaper.pdf", b"%PDF-1.4 data", "application/pdf")})
@@ -2091,7 +2152,57 @@ def test_paper_import_creates_one_note_per_block(monkeypatch):
     cells = app.STATE["backend"].messages(dlg)
     assert [c.msg_type for c in cells] == ["note", "note", "note", "note"]
     assert cells[0].content == "# Attention" and cells[2].content == "## Heads"
-    assert app.STATE["paper"] is None                            # panel closed after import
+    assert app.STATE["paper"]["dialog"] == dlg   # panel stays open, linked to the dialog
+    app.STATE["paper"] = None
+
+
+def test_paper_bulk_import_close_then_reopen(monkeypatch, tmp_path):
+    import time, sidekick.app as app
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    monkeypatch.setenv("SIDEKICK_PAPER_DIR", str(tmp_path))   # path allowed for reopen
+    monkeypatch.setattr(app.paperlib, "convert", lambda p: ("# Reopened", "marker"))
+    pdf = tmp_path / "att.pdf"; pdf.write_bytes(b"%PDF-1.4 fake")
+    app.STATE["paper"] = {"name": "att.pdf", "status": "ready", "md": "# A\n\nx",
+                          "engine": "marker", "source": str(pdf)}
+    app.paper_import()                           # bulk import records dialog → source…
+    dlg = app.STATE["dialog"]
+    assert app.STATE["paper"] is not None        # …and keeps the panel open
+    assert app._paper_source_for(dlg)["source"] == str(pdf)
+    app.paper_close()
+    assert app.STATE["paper"] is None            # ✕ still closes it
+    app.paper_reopen()                           # 📖 brings it back from the source
+    for _ in range(100):
+        if (app.STATE["paper"] or {}).get("status") == "ready":
+            break
+        time.sleep(0.02)
+    p = app.STATE["paper"]
+    assert p["md"] == "# Reopened" and p["dialog"] == dlg    # re-linked to its dialog
+    app.STATE["paper"] = None
+
+
+def test_paper_reopen_noop_without_recorded_source(monkeypatch, tmp_path):
+    import sidekick.app as app
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))       # fresh dir → no sources.json
+    app.STATE["paper"] = None
+    app.STATE["dialog"] = "plain/no-paper"
+    app.paper_reopen()
+    assert app.STATE["paper"] is None
+
+
+def test_paper_import_dialog_named_after_paper_title():
+    import sidekick.app as app
+    # an arXiv-style source: the *name* is the id, the *title* is the first heading
+    app.STATE["paper"] = {"name": "1706.03762.pdf", "status": "ready",
+                          "md": "# Attention Is All *You* Need\n\nThe transformer."}
+    app.paper_import()
+    assert app.STATE["dialog"] == "paper/attention-is-all-you-need"
+    app.STATE["paper"] = None
+    # no heading in the conversion → fall back to the name
+    app.STATE["paper"] = {"name": "1706.03762.pdf", "status": "ready",
+                          "md": "plain extracted text\n\nmore text"}
+    app.paper_import()
+    assert app.STATE["dialog"] == "paper/1706-03762"     # arXiv id kept whole
+    app.STATE["paper"] = None
 
 
 def test_paper_import_unique_dialog_name():

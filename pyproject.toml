@@ -14,7 +14,6 @@ dependencies = [
     "pyyaml",
     "mistune",     # server-side markdown (notes + AI answers); offline, no CDN
     "pygments",    # server-side code syntax highlighting; offline, no CDN
-    "pypdf",       # lightweight PDF text extraction for the reading panel (fallback)
     "markdownify",      # web page → markdown (fallback when trafilatura isn't installed)
     "beautifulsoup4",   # strip page chrome (nav/ads/footer) before markdownify
     "anthropic",   # Ask AI → Claude (API key)
@@ -44,10 +43,11 @@ kernel = [
 ]
 ml = ["solveit-sidekick[kernel]"]   # back-compat alias for the former name
 
-# High-quality PDF → markdown for reading papers: marker preserves structure,
-# tables, and equations as LaTeX (rendered by our mistune + KaTeX). Heavy (uses
-# torch + downloads models on first use) and GPL-3.0, so opt-in; without it the
-# reading panel falls back to pypdf text extraction.
+# PDF → markdown for reading papers: marker preserves structure, tables,
+# figures, and equations as LaTeX (rendered by our mistune + KaTeX). Heavy
+# (uses torch + downloads models on first use) and GPL-3.0, so packaged as an
+# extra — but *required* to open PDFs: without it the reading panel shows the
+# install hint (no text-only fallback). Already-cached papers still open.
 #   uv pip install "solveit-sidekick[paper]"
 paper = ["marker-pdf"]
 

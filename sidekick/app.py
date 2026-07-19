@@ -1885,11 +1885,16 @@ def Page():
                 Div(Span("🗂", cls="gear tgl", id="tgl-side",
                          title="Show/hide the dialogs panel",
                          onclick="toggleCol('no-side','sidekick_noside')"),
-                    # only meaningful once a paper is loaded
+                    # paper open → show/hide toggle; closed but this dialog
+                    # remembers its source → reopen it (see /paper/reopen)
                     (Span("📖", cls="gear tgl", id="tgl-paper",
                           title="Show/hide the paper (PDF / markdown) viewer",
                           onclick="toggleCol('no-paper','sidekick_nopaper')")
-                     if STATE.get("paper") else None),
+                     if STATE.get("paper") else
+                     (A("📖", href="/paper/reopen", cls="gear tgl", id="tgl-paper",
+                        title="Reopen this dialog's paper",
+                        onclick="try{localStorage.removeItem('sidekick_nopaper')}catch(e){}")
+                      if _paper_source_for(cur("dialog")) else None)),
                     Span("☰", cls="gear tgl toc-toggle", id="tgl-toc",
                          title="Show/hide the table of contents",
                          onclick="toggleCol('toc-open','sidekick_toc')"),
@@ -3059,17 +3064,20 @@ def blog_site(path: str):
     return PlainTextResponse("not found", status_code=404)
 
 
-def _convert_paper_async(path: str, name: str | None = None):
+def _convert_paper_async(path: str, name: str | None = None, dialog: str | None = None):
     """Convert a PDF in a background thread (marker can take a while), updating
-    STATE['paper'] from 'converting' to 'ready'/'error'. The panel polls."""
+    STATE['paper'] from 'converting' to 'ready'/'error'. The panel polls.
+    `dialog` re-links a reopened paper to its dialog so imports continue there."""
     name = name or os.path.basename(path)
+    link = {"dialog": dialog} if dialog else {}
     with _STATE_LOCK:
-        STATE["paper"] = {"name": name, "status": "converting"}
+        STATE["paper"] = {"name": name, "status": "converting", "source": path, **link}
 
     def work():
         try:
             md, engine = paperlib.convert(path)
-            new = {"name": name, "status": "ready", "md": md, "engine": engine}
+            new = {"name": name, "status": "ready", "md": md, "engine": engine,
+                   "source": path, **link}
         except Exception as e:  # noqa: BLE001 — surface conversion failures in the panel
             _dbg(f"paper convert failed for {path!r}: {e}")
             new = {"name": name, "status": "ready", "md": f"Could not open: {e}",
@@ -3095,18 +3103,20 @@ def _url_name(url: str) -> str:
     return base or u.netloc or "page"
 
 
-def _convert_url_async(url: str, name: str):
+def _convert_url_async(url: str, name: str, dialog: str | None = None):
     """Fetch + convert a web page to markdown in a background thread (same panel
-    lifecycle as a PDF: 'converting' → 'ready'/'error', polled by the panel)."""
+    lifecycle as a PDF: 'converting' → 'ready'/'error', polled by the panel).
+    `dialog` re-links a reopened paper to its dialog so imports continue there."""
+    link = {"dialog": dialog} if dialog else {}
     with _STATE_LOCK:
-        STATE["paper"] = {"name": name, "status": "converting", "source": url}
+        STATE["paper"] = {"name": name, "status": "converting", "source": url, **link}
 
     def work():
         try:
             md, engine = paperlib.convert_url(url)
             if md.strip():
                 new = {"name": name, "status": "ready", "md": md,
-                       "engine": engine, "source": url}
+                       "engine": engine, "source": url, **link}
             else:
                 new = {"name": name, "status": "ready", "engine": "error",
                        "md": f"**Couldn't extract anything from** `{url}`"}
@@ -3162,6 +3172,40 @@ def _paper_path_allowed(src: str) -> bool:
     return False
 
 
+# ---- dialog → paper source ---------------------------------------------------
+# Remembered when a paper's cells are imported into a dialog, persisted next to
+# the conversion cache, so closing the panel (or restarting) isn't one-way: a
+# paper/* dialog can reopen its source later via /paper/reopen.
+
+def _paper_sources_file() -> Path:
+    return paperlib._cache_dir() / "sources.json"
+
+
+def _load_paper_sources() -> dict:
+    try:
+        return json.loads(_paper_sources_file().read_text())
+    except Exception:  # noqa: BLE001 — missing/corrupt file → simply no reopen links
+        return {}
+
+
+def _record_paper_source(dialog: str, p: dict) -> None:
+    src = (p or {}).get("source")
+    if not (dialog and src):
+        return
+    try:
+        f = _paper_sources_file()
+        f.parent.mkdir(parents=True, exist_ok=True)
+        srcs = _load_paper_sources()
+        srcs[dialog] = {"source": src, "name": p.get("name", "")}
+        f.write_text(json.dumps(srcs, indent=1))
+    except OSError as e:
+        _dbg(f"could not record paper source for {dialog!r}: {e}")
+
+
+def _paper_source_for(dialog: str) -> dict | None:
+    return _load_paper_sources().get(dialog)
+
+
 @rt("/paper/open", methods=["post"])
 def paper_open(pdf: UploadFile = None, path: str = "", url: str = ""):
     up = _save_upload(pdf)                       # an uploaded file takes precedence
@@ -3195,15 +3239,68 @@ def paper_status():
     return PaperPanel()
 
 
+@rt("/paper/asset/{key}/{name}")
+def paper_asset(key: str, name: str):
+    """Serve a converted paper's extracted figure (see paperlib._store_assets),
+    with the same resolve-and-contain traversal guard as /blog and /vendor."""
+    from starlette.responses import FileResponse, PlainTextResponse
+    base = (paperlib._cache_dir() / "assets").resolve()
+    p = (base / key / name).resolve()
+    if p.is_relative_to(base) and p.is_file():
+        return FileResponse(p)
+    return PlainTextResponse("not found", status_code=404)
+
+
 @rt("/paper/close")
 def paper_close():
     STATE["paper"] = None
     return Page()
 
 
+@rt("/paper/reopen")
+def paper_reopen():
+    """Reopen the current dialog's source paper in the reading panel. The source
+    was remembered when the paper's cells were imported (see _record_paper_source),
+    so ✕ or a restart isn't one-way. Conversion re-runs but hits the markdown
+    cache, so this is fast."""
+    rec = _paper_source_for(cur("dialog")) or {}
+    src = rec.get("source", "")
+    if src.startswith(("http://", "https://")):
+        _convert_url_async(src, rec.get("name") or _url_name(src), dialog=cur("dialog"))
+    elif src:
+        path = os.path.expanduser(src)
+        if _paper_path_allowed(path) and os.path.exists(path):
+            _convert_paper_async(path, rec.get("name") or None, dialog=cur("dialog"))
+    return Page()
+
+
 def _safe_name(s: str) -> str:
     s = "".join(c if (c.isalnum() or c in "-_") else "-" for c in s).strip("-").lower()
     return s or "paper"
+
+
+def _strip_doc_ext(name: str) -> str:
+    """Drop a trailing document extension from a paper name for the dialog slug —
+    but only a *real* extension, so an arXiv id like '1512.03385' keeps its full id
+    (os.path.splitext would chop it at the dot → 'paper/1512')."""
+    for ext in (".pdf", ".html", ".htm", ".md", ".txt"):
+        if name.lower().endswith(ext):
+            return name[:-len(ext)]
+    return name
+
+
+def _paper_title(p: dict) -> str:
+    """The dialog-name base for an imported paper: the paper's *title* (its first
+    markdown heading — marker/trafilatura put it first), so an arXiv upload becomes
+    `paper/attention-is-all-you-need`, not `paper/1706-03762`. Falls back to the
+    file/URL name when the conversion has no headings."""
+    for line in (p.get("md") or "").splitlines():
+        m = re.match(r"#{1,6}\s+(.+)", line.strip())
+        if m:
+            title = re.sub(r"[*_`]", "", m.group(1)).strip()
+            if title:
+                return title[:60]
+    return _strip_doc_ext(p.get("name", "paper"))
 
 
 def _unique_dialog(backend, base: str) -> str:
@@ -3221,10 +3318,10 @@ def _paper_dialog(backend, p: dict) -> str:
     dialog, created on first use and remembered on the paper state."""
     dialog = p.get("dialog")
     if not dialog:
-        base = os.path.splitext(p.get("name", "paper"))[0]
-        dialog = _unique_dialog(backend, f"paper/{_safe_name(base)}")
+        dialog = _unique_dialog(backend, f"paper/{_safe_name(_paper_title(p))}")
         backend.messages(dialog)
         p["dialog"] = dialog
+        _record_paper_source(dialog, p)
     return dialog
 
 
@@ -3280,13 +3377,13 @@ def paper_import(mode: str = "para"):
         return Page()
     chunks = (paperlib.split_sections if mode == "section" else paperlib.split_blocks)(p["md"])
     backend = STATE["backend"]
-    base = os.path.splitext(p.get("name", "paper"))[0]
-    name = _unique_dialog(backend, f"paper/{_safe_name(base)}")
+    name = _unique_dialog(backend, f"paper/{_safe_name(_paper_title(p))}")
     backend.messages(name)                       # create the dialog
     for c in chunks:
         backend.add(name, c, "note")
     _set_dialog(name)
-    STATE["paper"] = None                        # it's in the notebook now; close the panel
+    p.setdefault("dialog", name)                 # panel stays open — ✕ closes it, and
+    _record_paper_source(name, p)                # further highlight imports join this dialog
     return Page()
 
 
