@@ -1,4 +1,20 @@
 
+// Preserve the sidebar's scroll position across the full-page navigation that
+// opening a dialog triggers (/open returns a fresh Page(), so .side re-renders
+// from scrollTop 0 — which made clicking a dialog near the bottom jump the menu
+// back to the top). Save on scroll, restore on load, from sessionStorage.
+(function(){
+  var KEY = 'sk_side_scroll';
+  var side = document.querySelector('.side');
+  if(!side) return;
+  var y = sessionStorage.getItem(KEY);
+  if(y !== null) side.scrollTop = +y;   // this script tag is the last child of
+                                        // .side, so the list already exists here
+  side.addEventListener('scroll', function(){
+    sessionStorage.setItem(KEY, side.scrollTop);
+  }, {passive: true});
+})();
+
 (function(){
   if(window.__sidebarSel) return; window.__sidebarSel = true;
   var sel = new Set(), anchor = null;
