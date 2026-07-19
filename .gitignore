@@ -13,6 +13,10 @@ uv.lock
 artifact.html
 preview.html
 
+# ad-hoc README renders (quarto/pandoc output; README.md is the source)
+README.html
+README_files/
+
 # generated, machine-specific (built by `just app`)
 SolveIt Sidekick.app/
 .DS_Store
