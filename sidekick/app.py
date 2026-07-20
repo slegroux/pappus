@@ -1051,16 +1051,137 @@ STREAM_JS = """
     });
     return window.__mermaidLoading;
   }
+  function mermaidScope(el){
+    return document.getElementById('stream') || el;
+  }
   function renderMermaid(el){
     if(!el) return;
     // Cheap guard: only fetch the library when there's an unprocessed diagram.
-    if(!el.querySelector('pre.mermaid:not([data-processed])')) return;
-    ensureMermaid().then(function(){ drawMermaid(el); }).catch(function(){});
+    var scope = mermaidScope(el);
+    if(!scope || !scope.querySelector('pre.mermaid:not([data-processed])')) return;
+    window.__sidekickMermaidRenderQueued = true;
+    ensureMermaid().then(function(){ queueMermaidRender(scope); }).catch(function(err){
+      window.__sidekickMermaidRenderQueued = false;
+      if(window.console && console.warn) console.warn('Sidekick Mermaid load failed', err);
+    });
+  }
+  var MERMAID_MAX_TRIES = 3;
+  function mermaidWarn(err){
+    if(window.console && console.warn) console.warn('Sidekick Mermaid render failed', err);
+  }
+  // A node with no layout box (display:none ancestor / detached) can't be measured,
+  // so mermaid collapses it — but that's not a real failure: every #stream swap
+  // re-renders, so it gets another shot once it's visible. Don't judge/churn on it.
+  function mermaidNodeHidden(n){
+    return !(n.offsetWidth || n.offsetHeight || (n.getClientRects && n.getClientRects().length));
+  }
+  // Did this node actually render, or did it collapse? A diagram measured while its
+  // container was unmeasurable stacks every node onto one point — the tell is a
+  // ~zero-size svg. mermaid records the intrinsic size in the svg's viewBox
+  // (visibility-independent, unlike getBoundingClientRect), so read that. Treating a
+  // collapsed-but-present svg as success is exactly what made corrupted diagrams
+  // stick until a manual re-run; failing it here lets scheduleMermaidRetry recover.
+  function mermaidRenderOk(n){
+    var svg = n.querySelector('svg');
+    if(!svg) return false;
+    if(mermaidNodeHidden(n)) return true;    // can't fairly judge a hidden node
+    var vb = svg.getAttribute('viewBox');
+    if(vb){
+      var p = vb.split(/[ ,]+/);
+      var w = parseFloat(p[2]), h = parseFloat(p[3]);
+      if(isFinite(w) && isFinite(h) && (w < 4 || h < 4)) return false;
+    }
+    return true;
+  }
+  function releaseMermaidFailures(nodes, err){
+    if(err) mermaidWarn(err);
+    nodes.forEach(function(n){
+      if(mermaidRenderOk(n)) return;
+      if(n.__sidekickMermaidSource) n.textContent = n.__sidekickMermaidSource;
+      if((n.__sidekickMermaidTries || 0) < MERMAID_MAX_TRIES){
+        n.removeAttribute('data-processed');
+      } else {
+        n.setAttribute('data-mermaid-error', 'true');
+      }
+    });
+  }
+  function scheduleMermaidRetry(el){
+    setTimeout(function(){
+      if(!el || el.isConnected === false) return;
+      Array.prototype.forEach.call(el.querySelectorAll('pre.mermaid[data-processed]'), function(n){
+        if(mermaidRenderOk(n)) return;
+        // A collapsed render left its (bad) svg in place; drop it back to source so
+        // the re-render below starts clean rather than nesting svg-in-svg.
+        if((n.__sidekickMermaidTries || 0) < MERMAID_MAX_TRIES){
+          if(n.__sidekickMermaidSource) n.textContent = n.__sidekickMermaidSource;
+          n.removeAttribute('data-processed');
+        }
+      });
+      if(el.querySelector('pre.mermaid:not([data-processed])')) renderMermaid(el);
+    }, 120);
+  }
+  function mermaidNodeId(n){
+    var row = n.closest && n.closest('.row[id]');
+    var base = row ? row.id : 'stream';
+    var all = row ? row.querySelectorAll('pre.mermaid') : document.querySelectorAll('#stream pre.mermaid');
+    var idx = Array.prototype.indexOf.call(all, n);
+    if(idx < 0) idx = window.__sidekickMermaidAnonId = (window.__sidekickMermaidAnonId || 0) + 1;
+    return ('sidekick-mermaid-' + base + '-' + idx).replace(/[^A-Za-z0-9_-]/g, '-');
+  }
+  function renderMermaidNode(n){
+    if(!n || !window.mermaid) return Promise.resolve();
+    var src = n.__sidekickMermaidSource || n.textContent || '';
+    n.__sidekickMermaidSource = src;
+    n.__sidekickMermaidTries = (n.__sidekickMermaidTries || 0) + 1;
+    n.setAttribute('data-processed', 'true');
+    n.setAttribute('data-mermaid-id', mermaidNodeId(n));
+    try {
+      return window.mermaid.render(n.getAttribute('data-mermaid-id'), src, n).then(function(result){
+        n.innerHTML = result.svg;
+        if(result.bindFunctions) result.bindFunctions(n);
+      }).catch(function(err){
+        n.textContent = src;
+        releaseMermaidFailures([n], err);
+      });
+    } catch(err){
+      n.textContent = src;
+      releaseMermaidFailures([n], err);
+      return Promise.resolve();
+    }
+  }
+  function queueMermaidRender(el){
+    window.__sidekickMermaidRenderScope = mermaidScope(el);
+    if(window.__sidekickMermaidRenderActive) return;
+    window.__sidekickMermaidRenderActive = true;
+    var tick = window.requestAnimationFrame || function(fn){ setTimeout(fn, 0); };
+    tick(function(){
+      var scope = window.__sidekickMermaidRenderScope;
+      window.__sidekickMermaidRenderScope = null;
+      var chain = window.__sidekickMermaidRenderChain || Promise.resolve();
+      window.__sidekickMermaidRenderChain = chain.then(function(){
+        window.__sidekickMermaidRenderQueued = false;
+        if(!scope || scope.isConnected === false) scope = document.getElementById('stream');
+        if(!scope || !scope.querySelector('pre.mermaid:not([data-processed])')) return null;
+        return drawMermaid(scope);
+      }, function(){
+        window.__sidekickMermaidRenderQueued = false;
+        if(!scope || scope.isConnected === false) scope = document.getElementById('stream');
+        if(!scope || !scope.querySelector('pre.mermaid:not([data-processed])')) return null;
+        return drawMermaid(scope);
+      }).then(function(){
+        window.__sidekickMermaidRenderActive = false;
+        if(window.__sidekickMermaidRenderScope) queueMermaidRender(window.__sidekickMermaidRenderScope);
+      }, function(err){
+        window.__sidekickMermaidRenderActive = false;
+        mermaidWarn(err);
+        if(window.__sidekickMermaidRenderScope) queueMermaidRender(window.__sidekickMermaidRenderScope);
+      });
+    });
   }
   // Initialised once with manual start so we control *when* it runs (after a
   // render, never mid-stream on partial source).
   function drawMermaid(el){
-    if(!el || !window.mermaid) return;
+    if(!el || !window.mermaid) return Promise.resolve();
     if(!window.__mermaidInit){
       // Theme mermaid to the app's warm Claude palette (default theme is purple
       // and clashes with the cream/terracotta UI). 'base' + themeVariables lets us
@@ -1075,7 +1196,14 @@ STREAM_JS = """
         // sideways scroll. We lean on hard top-down (`flowchart TD`) generation — see
         // _DIAGRAM_GUIDANCE — to keep diagrams narrow, so the shrink rarely bites.
         // Moderate spacing — tighter than mermaid's defaults but not crowded.
-        flowchart:{ curve:'basis', htmlLabels:true, padding:12, nodeSpacing:40, rankSpacing:46, useMaxWidth:true },
+        // htmlLabels:false — node sizing then comes from SVG <text> getComputedTextLength
+        // rather than measuring a <foreignObject> HTML label. foreignObject measurement
+        // returns 0 whenever the node is rendered while its container isn't laid out
+        // (the transient state during a #stream swap, or a display:none collapsed
+        // section), which makes dagre pile every node onto one point — diagrams that
+        // had rendered fine "corrupt" into a stack of overlapping boxes on the next
+        // unrelated action. SVG text measurement is far more robust to that timing.
+        flowchart:{ curve:'basis', htmlLabels:false, padding:12, nodeSpacing:40, rankSpacing:46, useMaxWidth:true },
         sequence:{ useMaxWidth:true, boxMargin:10, mirrorActors:false, actorMargin:50, width:150, height:42 },
         themeVariables:{
           background:'#FAF9F5',
@@ -1097,10 +1225,12 @@ STREAM_JS = """
       }); } catch(e){}
       window.__mermaidInit = true;
     }
-    var nodes = el.querySelectorAll('pre.mermaid:not([data-processed])');
-    if(!nodes.length) return;
-    try { var p = window.mermaid.run({ nodes: nodes }); if(p && p.catch) p.catch(function(){}); }
-    catch(e){}
+    var nodes = Array.prototype.slice.call(el.querySelectorAll('pre.mermaid:not([data-processed])'))
+      .filter(function(n){ return (n.__sidekickMermaidTries || 0) < MERMAID_MAX_TRIES; });
+    if(!nodes.length) return Promise.resolve();
+    return nodes.reduce(function(p, n){
+      return p.then(function(){ return renderMermaidNode(n); });
+    }, Promise.resolve()).then(function(){ scheduleMermaidRetry(el); });
   }
 
   // Add a hover Copy button to each highlighted code block in answers/notes.

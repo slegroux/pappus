@@ -3023,6 +3023,40 @@ def test_stream_js_toggles_streaming_caret():
     assert "classList.remove('streaming')" in app.STREAM_JS
 
 
+def test_stream_js_retries_failed_mermaid_render():
+    # Mermaid marks a node data-processed before rendering; failed attempts must
+    # clear that marker or later htmx rescans will never retry the diagram.
+    import sidekick.app as app
+    assert "MERMAID_MAX_TRIES" in app.STREAM_JS
+    assert "__sidekickMermaidTries" in app.STREAM_JS
+    assert "removeAttribute('data-processed')" in app.STREAM_JS
+    assert "pre.mermaid[data-processed]" in app.STREAM_JS
+    assert "Sidekick Mermaid render failed" in app.STREAM_JS
+
+
+def test_stream_js_coalesces_mermaid_render_runs():
+    # A code-cell run refreshes all of #stream. Multiple markdown cells can then
+    # ask Mermaid to render at once; keep those calls serialized and scoped to the
+    # current stream so one rerender doesn't scramble existing diagrams.
+    import sidekick.app as app
+    assert "function queueMermaidRender" in app.STREAM_JS
+    assert "__sidekickMermaidRenderActive" in app.STREAM_JS
+    assert "__sidekickMermaidRenderChain" in app.STREAM_JS
+    assert "return drawMermaid(scope)" in app.STREAM_JS
+    assert "document.getElementById('stream') || el" in app.STREAM_JS
+
+
+def test_stream_js_renders_mermaid_with_unique_svg_ids():
+    # Rendering a later diagram must not reuse Mermaid's implicit per-run IDs and
+    # collide with earlier SVG defs/markers/styles.
+    import sidekick.app as app
+    assert "function mermaidNodeId" in app.STREAM_JS
+    assert "data-mermaid-id" in app.STREAM_JS
+    assert "window.mermaid.render(n.getAttribute('data-mermaid-id'), src, n)" in app.STREAM_JS
+    assert "window.mermaid.run" not in app.STREAM_JS
+    assert "n.textContent = src" in app.STREAM_JS
+
+
 # ---- latency reductions: htmx swap on send + fast model ---------------------
 def test_send_htmx_returns_stream_fragment_not_full_page():
     # The composer posts via htmx, so /send returns just #stream (fast swap) when
