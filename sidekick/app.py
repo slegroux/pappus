@@ -228,6 +228,7 @@ STATE = {
     "pending_run": {},        # {(dialog, msg_id): run_id} code cells whose exec is streaming
     "paper": None,            # {name, status, md, engine} for the reading panel
     "editing": None,          # cell id to render in edit mode once (just-inserted cell)
+    "focus_start": None,      # cell id whose editor should focus at the beginning once
     "scroll_to": None,        # cell id to scroll into view once (e.g. after a composer send)
     "cells_dirty": False,     # set when the AI's MCP tools edit cells mid-stream → reload
 }
@@ -254,7 +255,7 @@ _STATE_LOCK = threading.Lock()
 # else fall back to the module-global STATE. That fallback is what keeps the
 # existing suite working unchanged: tests call handlers directly (no request →
 # no session in scope) and keep seeing/setting global STATE exactly as before.
-PER_TAB = ("dialog", "editing", "scroll_to", "flash")
+PER_TAB = ("dialog", "editing", "focus_start", "scroll_to", "flash")
 SESSIONS: dict[str, dict] = {}
 # The current request's session id, or None when no request is in scope (import
 # time, background threads, direct test calls). Set by _SessionScope per request.
@@ -853,7 +854,7 @@ def _answer_edit(m):
     cancel = Button("Cancel", type="button", cls="cell-btn",
                     hx_get=f"/cell/answer/view?id={mid}",
                     hx_target=f"#answer-{mid}", hx_swap="outerHTML")
-    js = _FOCUS_JS.replace("__MID__", f"ans-{mid}")
+    js = _focus_js(f"ans-{mid}")
     return Div(Div(Span("Edit answer", cls="tag"), save, cancel, cls="who"),
                ta, Script(js), cls="answer", id=f"answer-{mid}")
 
@@ -931,7 +932,7 @@ def _fade_buttons(m):
         title="Turn this worked code into a fill-in-the-blank exercise below")]
 
 
-def _cell_edit(m, num=None):
+def _cell_edit(m, num=None, focus_start: bool = False):
     """A cell switched into edit mode: a raw editor + Save/Run/Ask + Cancel."""
     mid = m.id
     path = "/cell/save" if m.msg_type == "note" else "/cell/run"
@@ -946,7 +947,8 @@ def _cell_edit(m, num=None):
                hx_get=f"/cell/view?id={mid}", hx_target=f"#cell-{mid}", hx_swap="outerHTML"),
     ]
     # Code cells get CodeMirror (highlight-while-editing); notes/prompts just focus.
-    js = (_CODE_EDITOR_JS if m.msg_type == "code" else _FOCUS_JS).replace("__MID__", mid)
+    js = (_code_editor_js(mid, focus_start)
+          if m.msg_type == "code" else _focus_js(mid, focus_start))
     return Div(_head(m, primary, num=num, show_actions=True),
                _cell_textarea(m, code=(m.msg_type == "code")),
                *_output_views(m), Script(js),
@@ -960,6 +962,7 @@ _CODE_EDITOR_JS = """
 (function(){
   var ta = document.getElementById('ta-__MID__');
   if(!ta) return;
+  var focusStart = __FOCUS_START__;
   function runCell(){
     var row = ta.closest('.row');
     var btn = row && row.querySelector('.cell-btn.run');
@@ -978,9 +981,16 @@ _CODE_EDITOR_JS = """
     });
     cm.on('change', function(){ cm.save(); });   // keep textarea current for hx-include
     if(window.__autocompleteOnType) window.__autocompleteOnType(cm);   // dynamic completion
-    setTimeout(function(){ cm.refresh(); cm.focus(); cm.setCursor(cm.lineCount(), 0); }, 0);
+    setTimeout(function(){
+      cm.refresh(); cm.focus();
+      cm.setCursor(focusStart ? 0 : cm.lineCount(), 0);
+    }, 0);
   } else {
-    ta.focus(); var n = ta.value.length; ta.setSelectionRange(n, n);
+    setTimeout(function(){
+      ta.focus();
+      var n = focusStart ? 0 : ta.value.length;
+      ta.setSelectionRange(n, n);
+    }, 0);
   }
 })();
 """
@@ -988,9 +998,27 @@ _CODE_EDITOR_JS = """
 _FOCUS_JS = """
 (function(){
   var t = document.getElementById('ta-__MID__');
-  if(t){ t.focus(); var n = t.value.length; t.setSelectionRange(n, n); }
+  var focusStart = __FOCUS_START__;
+  if(t) setTimeout(function(){
+    t.focus();
+    var n = focusStart ? 0 : t.value.length;
+    t.setSelectionRange(n, n);
+  }, 0);
 })();
 """
+
+
+def _with_focus_options(js: str, mid: str, focus_start: bool = False) -> str:
+    return js.replace("__MID__", mid).replace(
+        "__FOCUS_START__", "true" if focus_start else "false")
+
+
+def _focus_js(mid: str, focus_start: bool = False) -> str:
+    return _with_focus_options(_FOCUS_JS, mid, focus_start)
+
+
+def _code_editor_js(mid: str, focus_start: bool = False) -> str:
+    return _with_focus_options(_CODE_EDITOR_JS, mid, focus_start)
 
 # Cmd/Ctrl+/ toggles Python line comments on the selected lines, the way Jupyter
 # (and most editors) do. Self-contained — we don't vendor CodeMirror's comment
@@ -1609,14 +1637,18 @@ def _ctx_meter(msgs):
 def Stream():
     msgs = STATE["backend"].messages(cur("dialog"))
     editing = pop_cur("editing", None)            # a just-inserted cell opens in edit mode (one-shot)
+    focus_start = pop_cur("focus_start", None)    # inserted cells put the cursor at the beginning
     scroll_to = pop_cur("scroll_to", None)        # scroll a just-added cell into view (one-shot)
     flash = pop_cur("flash", None)                # transient confirmation banner (one-shot)
     if not msgs:
         inner = Div("Start the conversation — write code, ask the AI, or jot a note.",
                     cls="empty")
     else:
-        rows = [_cell_edit(m, num=i) if m.id == editing else MsgRow(m, num=i)
-                for i, m in enumerate(msgs, 1)]
+        rows = [
+            _cell_edit(m, num=i, focus_start=(m.id == focus_start))
+            if m.id == editing else MsgRow(m, num=i)
+            for i, m in enumerate(msgs, 1)
+        ]
         inner = Div(*rows, _ctx_meter(msgs), cls="wrap")
     extra = ()
     if scroll_to:
@@ -2977,6 +3009,8 @@ def cell_insert(id: str, msg_type: str = "code", where: str = "below"):
         m = backend.insert(cur("dialog"), "", msg_type, anchor_id=id,
                            above=(where == "above"))
         set_cur("editing", m.id)
+        set_cur("focus_start", m.id)
+        set_cur("scroll_to", m.id)
     return Stream()
 
 

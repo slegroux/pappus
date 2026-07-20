@@ -2573,6 +2573,10 @@ def test_cell_insert_route_inserts_and_opens_editor():
     cells = bk.messages("ins/route")
     assert len(cells) == 2 and cells[1].msg_type == "code"
     assert f'id="ta-{cells[1].id}"' in html              # new cell rendered as an editor
+    # cursor starts at the top of the fresh cell
+    assert "focusStart = true" in html
+    assert f"cell-{cells[1].id}" in html and "scrollIntoView" in html
+    assert app.STATE.get("focus_start") is None           # one-shot (consumed by render)
 
 
 def test_split_sections_groups_under_headings():
