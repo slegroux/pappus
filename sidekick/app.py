@@ -1000,7 +1000,7 @@ _CODE_EDITOR_JS = """
     }, 0);
   } else {
     setTimeout(function(){
-      ta.focus();
+      ta.focus({preventScroll:true});   // let scroll_to own the scroll, not focus
       var n = focusStart ? 0 : ta.value.length;
       ta.setSelectionRange(n, n);
     }, 0);
@@ -1013,7 +1013,11 @@ _FOCUS_JS = """
   var t = document.getElementById('ta-__MID__');
   var focusStart = __FOCUS_START__;
   if(t) setTimeout(function(){
-    t.focus();
+    // preventScroll: the browser's own focus-scroll otherwise races the scroll_to
+    // scrollIntoView (setTimeout vs rAF ordering), landing the cell in a slightly
+    // different spot each time. Let scroll_to be the single source of truth so the
+    // beginning of a freshly inserted Ask-AI/note cell lands consistently.
+    t.focus({preventScroll:true});
     var n = focusStart ? 0 : t.value.length;
     t.setSelectionRange(n, n);
   }, 0);

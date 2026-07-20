@@ -2582,6 +2582,25 @@ def test_cell_insert_route_inserts_and_opens_editor():
     assert app.STATE.get("focus_start") is None           # one-shot (consumed by render)
 
 
+def test_inserted_prompt_cell_focuses_start_without_focus_scroll():
+    # An inserted Ask-AI (prompt) cell opens in edit mode with the caret at the
+    # beginning; focus must NOT scroll (it would race scroll_to's scrollIntoView
+    # and land the cell inconsistently) — scroll_to owns positioning.
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    app.STATE["dialog"] = "ins/prompt"
+    bk = app.STATE["backend"]
+    bk.messages("ins/prompt")
+    a = bk.add("ins/prompt", "para", "note")
+    html = to_xml(app.cell_insert(id=a.id, msg_type="prompt"))
+    new = bk.messages("ins/prompt")[1]
+    assert new.msg_type == "prompt"
+    assert f'id="ta-{new.id}"' in html                    # rendered as a textarea editor
+    assert "focusStart = true" in html                    # caret at the beginning
+    assert "focus({preventScroll:true})" in html          # focus doesn't fight the scroll
+    assert "block:'nearest'" in html                       # gentle scroll, beginning in view
+
+
 def test_split_sections_groups_under_headings():
     from sidekick import paper as pl
     md = "intro line\n\n# A\n\npara a1\n\npara a2\n\n## B\n\npara b1"
