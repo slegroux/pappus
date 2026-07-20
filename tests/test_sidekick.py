@@ -2575,7 +2575,10 @@ def test_cell_insert_route_inserts_and_opens_editor():
     assert f'id="ta-{cells[1].id}"' in html              # new cell rendered as an editor
     # cursor starts at the top of the fresh cell
     assert "focusStart = true" in html
+    # a freshly inserted cell scrolls into view gently (nearest, no over-scroll)
+    # so its beginning stays put — not centred mid-screen.
     assert f"cell-{cells[1].id}" in html and "scrollIntoView" in html
+    assert "block:'nearest'" in html and "block:'center'" not in html
     assert app.STATE.get("focus_start") is None           # one-shot (consumed by render)
 
 

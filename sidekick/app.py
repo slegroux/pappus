@@ -1669,9 +1669,16 @@ def Stream():
         # cell back into view. scrollIntoView (not scrollTop=scrollHeight) handles
         # both a just-added cell at the bottom (composer /send) and a re-run cell in
         # the middle (re-asking a prompt). rAF so it runs after layout settles.
+        #
+        # A freshly inserted/edited cell (scroll_to == focus_start) opens in edit
+        # mode with the cursor at the beginning, so align to keep that beginning in
+        # view with the *least* scroll ('nearest' → no jump if it's already visible)
+        # rather than 'center', which yanks the viewport down to mid-screen and
+        # buries the top of the cell the user just started typing in.
+        block = "nearest" if scroll_to == focus_start else "center"
         extra = (Script(f"requestAnimationFrame(function(){{var c="
                         f"document.getElementById('cell-{scroll_to}');"
-                        f"if(c)c.scrollIntoView({{block:'center'}});}});"),)
+                        f"if(c)c.scrollIntoView({{block:'{block}'}});}});"),)
     if flash:
         # A self-removing banner: fades after a couple seconds so a copy lands with
         # visible feedback even though the current dialog's cells don't change.
