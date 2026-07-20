@@ -131,6 +131,8 @@ _DIAGRAM_GUIDANCE = (
     "`flowchart TD` (top-down, data-flow order) — never `LR`/`RL`. Keep each rank to a "
     "single node where you can: stack stages vertically rather than placing sibling nodes "
     "side by side, and avoid wide rows. Wrap each stage or module in its own `subgraph`; "
+    "inside a subgraph, keep it vertical with `direction TB` (NOT `direction TD` — the "
+    "subgraph parser rejects the TD alias) or just omit the direction line; "
     "put the module's key hyperparameters inside its node (dims, heads, kernel, layer "
     "count) with `<br/>` for extra lines; show how shapes evolve by labelling the edge "
     "between blocks with the running tensor shape, e.g. `A -->|\"(B, N, 384)\"| B`; "

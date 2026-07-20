@@ -3061,6 +3061,29 @@ def test_stream_js_renders_mermaid_with_unique_svg_ids():
     assert "n.textContent = src" in app.STREAM_JS
 
 
+def test_mermaid_fence_rewrites_subgraph_direction_td_to_tb():
+    # `direction TD` inside a subgraph is a parse error (the subgraph grammar only
+    # takes TB/BT/LR/RL), so AI-drawn diagrams that use it render a syntax bomb.
+    # The fence renderer rewrites the equivalent TB in place; the top-level
+    # `flowchart TD` and TD inside labels must be left untouched.
+    import sidekick.app as app
+    src = (
+        "```mermaid\n"
+        "flowchart TD\n"
+        '  A["direction TD"] --> ENC\n'
+        '  subgraph ENC["Enc"]\n'
+        "    direction TD\n"
+        "    X --> Y\n"
+        "  end\n"
+        "```\n"
+    )
+    html = str(app.render_md(src))
+    assert "direction TB" in html                      # subgraph direction statement fixed
+    assert "\n    direction TD\n" not in html          # no bare TD statement line left
+    assert "flowchart TD" in html                      # top-level TD alias untouched
+    assert "direction TD" in html                      # TD *inside a label* left untouched
+
+
 # ---- latency reductions: htmx swap on send + fast model ---------------------
 def test_send_htmx_returns_stream_fragment_not_full_page():
     # The composer posts via htmx, so /send returns just #stream (fast swap) when

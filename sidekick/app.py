@@ -110,6 +110,19 @@ except Exception as e:  # noqa: BLE001 — degrade to a plain code block if pygm
         return Pre(src or "", cls="code")
 
 
+# A bare `direction TD` statement only ever appears *inside* a subgraph (the
+# top-level uses `flowchart TD`). mermaid's subgraph grammar accepts TB/BT/LR/RL
+# but NOT the `TD` alias, so an AI-drawn diagram that writes `direction TD` in a
+# subgraph fails to parse and renders the "Syntax error" bomb. TB is the exact
+# equivalent, so normalise it — this heals both already-cached dialogs and future
+# AI output regardless of whether the model follows the diagram guidance.
+_MERMAID_SUBGRAPH_TD = re.compile(r"(?im)^([ \t]*direction[ \t]+)TD([ \t]*)$")
+
+
+def _normalize_mermaid(src: str) -> str:
+    return _MERMAID_SUBGRAPH_TD.sub(r"\1TB\2", src)
+
+
 # ---- markdown (server-side; works offline, no CDN) --------------------------
 try:
     import mistune
@@ -125,7 +138,7 @@ try:
             if lang == "mermaid":
                 # mermaid reads the element's textContent, so escape the source
                 # rather than highlighting it; the browser decodes it back.
-                return f'<pre class="mermaid">{mistune.util.escape(code or "")}</pre>'
+                return f'<pre class="mermaid">{mistune.util.escape(_normalize_mermaid(code or ""))}</pre>'
             html = _highlight_md(code, lang)
             return html if html else super().block_code(code, info)
 
