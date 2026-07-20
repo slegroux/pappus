@@ -26,6 +26,7 @@ from .client import (connect, build_context, est_tokens, _InMemoryBackend, MockB
                      HttpKernelBackend)
 from .claude_cli import (stream as stream_claude, call as call_claude,
                          cost_for, CLI_MODELS, AI_MODES, DEFAULT_MODE)
+from .codex_cli import stream as stream_codex, CLI_MODELS as CODEX_CLI_MODELS
 from . import secrets_store, export, libraries, nbdev_export, scaffold
 from . import paper as paperlib
 # Shared allowlist sanitizer (drops <script>, event handlers, javascript: URLs
@@ -385,9 +386,10 @@ _init_cell_tools()
 
 
 def _can_stream(backend, model) -> bool:
-    """Stream a prompt's answer only for the subscription CLI model on an in-process
-    backend (mock/kernel) — its answer doesn't need the remote SolveIt server."""
-    return model in CLI_MODELS and isinstance(backend, _InMemoryBackend)
+    """Stream local CLI-backed prompt answers on in-process backends."""
+    local_cli = model in (CLI_MODELS | CODEX_CLI_MODELS) \
+        or (isinstance(model, str) and (model.startswith("codex-") or model.startswith("claude-")))
+    return local_cli and isinstance(backend, _InMemoryBackend)
 
 
 def use_target(name: str):
@@ -684,18 +686,22 @@ def _ctx_buttons(m):
     ]
 
 
-def _model_label(mid: str | None, default: str = "Claude (Max)") -> str:
-    """Friendly label for a model id (e.g. 'claude-cli' -> 'Claude (Max)'). Falls
-    back to the configured default's label so a model-less answer never mislabels."""
+def _model_label(mid: str | None, default: str | None = None) -> str:
+    """Friendly label for a model id. Model-less answers use the configured default."""
     if not mid:
-        return default
+        if default is not None:
+            return default
+        try:
+            mid = default_model()
+        except Exception:  # noqa: BLE001
+            return "Codex · GPT-5.5 high"
     try:
         for m in list_models():
             if m["id"] == mid:
                 return m["label"]
     except Exception as e:  # noqa: BLE001 — config issue: show the id rather than crash
         _dbg(f"_model_label({mid!r}) fell back to raw id: {e}")
-    return mid
+    return default or mid
 
 
 def _rich_view(item):
@@ -2273,6 +2279,11 @@ def rename_dialog(old: str, new: str):
     if new and new != old and hasattr(backend, "rename"):
         try:
             backend.rename(old, new)
+            try:
+                from . import codex_cli
+                codex_cli.rename(old, new)
+            except Exception:  # noqa: BLE001 — session carry is best-effort
+                _dbg(f"codex rename({old!r}, {new!r}) failed")
             _set_dialog(new)
         except ValueError as e:
             STATE["warning"] = str(e)          # surfaced as the banner
@@ -2309,6 +2320,11 @@ def _delete_dialogs(targets: list[str]):
             claude_cli.drop(d)
         except Exception:  # noqa: BLE001 — eviction is best-effort cleanup
             _dbg(f"drop({d!r}) failed during delete")
+        try:
+            from . import codex_cli
+            codex_cli.drop(d)
+        except Exception:  # noqa: BLE001 — eviction is best-effort cleanup
+            _dbg(f"codex drop({d!r}) failed during delete")
     if cur("dialog") in targets:
         remaining = backend.list_dialogs()
         _set_dialog(remaining[0] if remaining else "demo/welcome")
@@ -2437,7 +2453,7 @@ def stream_answer(dialog: str, id: str):
 
     The browser's EventSource (see STREAM_JS) connects here for a cell whose
     answer is pending. We build the notebook context up to that cell, stream the
-    deltas from the `claude` CLI, and emit cumulative rendered markdown as `msg`
+    deltas from the selected local CLI, and emit cumulative rendered markdown as `msg`
     events — finishing with a `done` event so the client closes the connection.
     """
     backend = STATE["backend"]
@@ -2454,7 +2470,8 @@ def stream_answer(dialog: str, id: str):
             return
         _reset_cells_dirty()                             # the AI's tools may flip this
         acc = ""
-        for delta in stream_claude(dialog, content, context, model=m.model, mode=m.ai_mode):
+        streamer = stream_codex if m.model in CODEX_CLI_MODELS else stream_claude
+        for delta in streamer(dialog, content, context, model=m.model, mode=m.ai_mode):
             acc += delta
             # str() unwraps NotStr -> raw (already-safe) markdown HTML for the data lines
             yield sse_message(str(render_md(acc)), event="msg")

@@ -43,6 +43,7 @@ from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 from sidekick import claude_cli   # CLI (subscription) Claude + shared notebook preamble
+from sidekick import codex_cli    # installed Codex CLI path (current local auth/config)
 
 # Request auth. main() sets _AUTH_TOKEN: when it's not None, every request must
 # carry a matching `_solveit` cookie (this is what makes binding off-loopback
@@ -480,14 +481,25 @@ MODEL_NAMES = {
 }
 
 
-# Subscription-backed Claude (the `claude` CLI) and the shared notebook-context
-# preamble both live in sidekick.claude_cli, so the web app's streaming path and
-# this server's blocking path share one session store + system prompt.
+# Subscription-backed Claude (the `claude` CLI), installed Codex CLI, and the
+# shared notebook-context preamble live in sidekick.*_cli modules, so the web
+# app's streaming path and this server's blocking path share the same prompt
+# contract.
 CLI_MODELS = claude_cli.CLI_MODELS
+CODEX_CLI_MODELS = codex_cli.CLI_MODELS
 CLI_SESSIONS = claude_cli.CLI_SESSIONS     # same dict the app's SSE path advances
+CODEX_SESSIONS = codex_cli.CODEX_SESSIONS
 _system = claude_cli.system                # preamble + context, used by the API callers
 _wants_diagram = claude_cli._wants_diagram # just-in-time diagram conventions — the CLI
 _DIAGRAM_GUIDANCE = claude_cli._DIAGRAM_GUIDANCE  # path attaches these in _build_cmd
+
+
+def _is_claude_cli_model(model: str | None) -> bool:
+    return model in CLI_MODELS or (isinstance(model, str) and model.startswith("claude-"))
+
+
+def _is_codex_cli_model(model: str | None) -> bool:
+    return model in CODEX_CLI_MODELS or (isinstance(model, str) and model.startswith("codex-"))
 
 
 def _call_claude(key: str, content: str, context: str = "", mode: str | None = None) -> str:
@@ -540,8 +552,10 @@ def run_prompt(dialog: str, content: str, model: str, context: str = "",
     keyed."""
     import importlib
 
-    if model in CLI_MODELS:               # subscription-backed Claude (no API key)
+    if _is_claude_cli_model(model):       # subscription-backed Claude (no API key)
         return claude_cli.call(dialog, content, context, model=model, mode=mode)
+    if _is_codex_cli_model(model):        # installed Codex CLI (no Sidekick API key)
+        return codex_cli.call(dialog, content, context, model=model, mode=mode)
 
     if _wants_diagram(content):           # mirror the CLI path: attach the diagram
         content += _DIAGRAM_GUIDANCE      # conventions to the turn that asks for one
@@ -668,6 +682,7 @@ class Handler(BaseHTTPRequestHandler):
             with _dialog_locks(d):            # don't drop a namespace mid-exec
                 KERNELS.pop(d, None)
                 CLI_SESSIONS.pop(d, None)     # drop the CLI session too
+                CODEX_SESSIONS.pop(d, None)
                 # The backing module still references the whole namespace via
                 # sys.modules — drop it too, or /reset frees nothing (slow leak).
                 sys.modules.pop(_modname(d), None)
@@ -683,6 +698,8 @@ class Handler(BaseHTTPRequestHandler):
                     KERNELS[new] = KERNELS.pop(old)
                 if old in CLI_SESSIONS and new:  # carry the session to the new name
                     CLI_SESSIONS[new] = CLI_SESSIONS.pop(old)
+                if old in CODEX_SESSIONS and new:
+                    CODEX_SESSIONS[new] = CODEX_SESSIONS.pop(old)
             return self._send(200, {"ok": True})
         return self._send(404, {"error": "not found"})
 

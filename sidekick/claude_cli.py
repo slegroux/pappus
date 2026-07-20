@@ -24,11 +24,12 @@ import uuid
 
 from . import tools_config
 
-CLI_MODELS = {"claude-cli", "claude-cli-fast"}
-# A CLI model id whose answer should use a faster, cheaper model. "fast" maps to
-# the Haiku tier — roughly half the time-to-first-token of the default, for quick
-# questions where you don't need the deepest model.
-_CLI_MODEL_FLAG = {"claude-cli-fast": "haiku"}
+_CLI_MODEL_CONFIG = {
+    f"claude-{model}-{effort}": (model, effort)
+    for model in ("fable", "sonnet", "opus")
+    for effort in ("low", "medium", "high", "xhigh", "max")
+}
+CLI_MODELS = set(_CLI_MODEL_CONFIG)
 CLI_SESSIONS: dict[str, dict] = {}
 # Running token/cost totals per dialog, folded in from each turn's terminal
 # `result` event (see _accrue). The `claude` CLI reports a usage breakdown — and,
@@ -162,15 +163,42 @@ _TOOLS_GUIDANCE = (
     "cell above carries n=\"<number>\" (matching the number the user sees) and "
     "id=\"<id>\"; the edit tools target a cell by its id. So when the user says "
     "\"fix cell 3\" or names a function, find that cell's id from the context and "
-    "edit it directly — only call list_cells if the id isn't already clear. After "
-    "editing, briefly say what you changed. For an ordinary question, answer in "
-    "text — never modify cells unasked.\n"
+    "edit it directly. When they say \"previous cell\", \"cell above\", \"last "
+    "cell\", or \"the cell before this Ask AI prompt\", they mean the immediately "
+    "preceding context cell: use that cell's id directly. Only call list_cells if "
+    "the target id isn't already clear. If the user explicitly asks for a cell "
+    "edit, actually call update_cell, str_replace, or insert_cell; do not merely "
+    "describe the edit. After editing, briefly say what you changed. For an "
+    "ordinary question, answer in text — never modify cells unasked.\n"
     "These tools don't change the small-steps contract: edit the one cell the user "
     "pointed at, in the smallest change that does the job, and stop so they can run "
     "it. Don't spray a finished multi-cell solution across the notebook with "
     "insert_cell — that's the autopilot behavior small steps exists to prevent. The "
     "user still runs every cell; you never execute code."
 )
+
+_CELL_EDIT_ACTION_RE = re.compile(
+    r"\b(change|fix|refactor|rewrite|update|modify|replace|insert|add|append|"
+    r"prepend|complete|fill\s+in|clean\s+up|rename|remove|delete|edit)\b",
+    re.IGNORECASE,
+)
+_CELL_EDIT_TARGET_RE = re.compile(
+    r"\b(cell|above|below|previous|prev|last|preceding|prior|earlier|notebook)\b",
+    re.IGNORECASE,
+)
+
+_CELL_EDIT_TURN_REMINDER = (
+    "\n\nNotebook-cell edit reminder: if this prompt explicitly asks for a visible "
+    "cell edit, call update_cell, str_replace, or insert_cell instead of only "
+    "describing the change. \"Previous cell\", \"cell above\", \"last cell\", and "
+    "\"the cell before this Ask AI prompt\" mean the immediately preceding context "
+    "cell; use that cell's id directly when it is clear."
+)
+
+
+def _wants_cell_edit(content: str) -> bool:
+    return bool(content) and bool(_CELL_EDIT_ACTION_RE.search(content)) \
+        and bool(_CELL_EDIT_TARGET_RE.search(content))
 
 # The MCP tool names Claude must be allowed to call non-interactively in `-p`
 # mode (server key "cells" + tool name → mcp__cells__<tool>).
@@ -245,6 +273,16 @@ def _env() -> dict:
     return env
 
 
+def _model_config(model_id: str | None) -> tuple[str | None, str | None]:
+    """Map Sidekick model ids to Claude Code --model/--effort flags."""
+    if model_id in _CLI_MODEL_CONFIG:
+        return _CLI_MODEL_CONFIG[model_id]
+    env_model = os.environ.get("SIDEKICK_CLAUDE_CLI_MODEL")
+    if env_model:
+        return env_model, os.environ.get("SIDEKICK_CLAUDE_CLI_EFFORT", "high")
+    return None, None
+
+
 def _build_cmd(dialog: str, content: str, context: str, stream: bool,
                model: str | None = None, mode: str | None = None):
     """Build the argv and the session id we'll record. Returns (cmd, sid), or
@@ -257,11 +295,13 @@ def _build_cmd(dialog: str, content: str, context: str, stream: bool,
     claude = claude_bin()
     if not claude:
         return None, None
+    model_flag, effort_flag = _model_config(model)
     st = CLI_SESSIONS.get(dialog)
     # Resume only while the context is still a prefix AND the mode is unchanged —
     # the mode directive lives in the session's system prompt, which a resume can't
     # rewrite, so switching mode must start a fresh session to actually take effect.
-    resume = bool(st) and context.startswith(st["sent"]) and st.get("mode") == mode
+    resume = bool(st) and context.startswith(st["sent"]) and st.get("mode") == mode \
+        and st.get("model") == model_flag and st.get("effort") == effort_flag
     fmt = "stream-json" if stream else "json"
     cmd = [claude, "-p", "--output-format", fmt, "--disable-slash-commands",
            # Lean mode: skip MCP servers and *user* settings (hooks, auto-memory,
@@ -285,6 +325,8 @@ def _build_cmd(dialog: str, content: str, context: str, stream: bool,
         delta = context[len(st["sent"]):].strip()
         user_msg = (f"New notebook cells since my last message:\n{delta}\n\n{content}"
                     if delta else content)
+        if tools and _wants_cell_edit(content):
+            user_msg += _CELL_EDIT_TURN_REMINDER
         cmd += ["--resume", sid]
     else:
         sid = str(uuid.uuid4())
@@ -300,11 +342,10 @@ def _build_cmd(dialog: str, content: str, context: str, stream: bool,
         allow += _ALLOWED_TOOLS
     if allow:
         cmd += ["--allowedTools", *allow]
-    # "fast" model selection wins; else an explicit env override; else the
-    # subscription default (no --model flag).
-    model_flag = _CLI_MODEL_FLAG.get(model) or os.environ.get("SIDEKICK_CLAUDE_CLI_MODEL")
     if model_flag:
         cmd += ["--model", model_flag]
+    if effort_flag:
+        cmd += ["--effort", effort_flag]
     if _wants_diagram(content):             # just-in-time: attach diagram conventions to
         user_msg += _DIAGRAM_GUIDANCE       # the turn that asks, not the global persona
     if allow:                               # `--allowedTools` is variadic; `--` stops
@@ -374,7 +415,10 @@ def call(dialog: str, content: str, context: str = "", model: str | None = None,
         return (r.stdout or "").strip() or "[Claude (Max plan): empty response]"
     if data.get("is_error"):
         return f"[Claude (Max plan) error: {data.get('result') or 'unknown'}]"
-    CLI_SESSIONS[dialog] = {"id": data.get("session_id") or sid, "sent": context, "mode": mode}
+    model_flag, effort_flag = _model_config(model)
+    CLI_SESSIONS[dialog] = {
+        "id": data.get("session_id") or sid, "sent": context, "mode": mode,
+        "model": model_flag, "effort": effort_flag}
     _accrue(dialog, data)
     return data.get("result", "")
 
@@ -435,7 +479,10 @@ def stream(dialog: str, content: str, context: str = "", model: str | None = Non
             pass
         # Advance the session: remember its id, the full context it now knows, and the
         # mode it was started with (a mode change forces a fresh session — see _build_cmd).
-        CLI_SESSIONS[dialog] = {"id": final_sid, "sent": context, "mode": mode}
+        model_flag, effort_flag = _model_config(model)
+        CLI_SESSIONS[dialog] = {
+            "id": final_sid, "sent": context, "mode": mode,
+            "model": model_flag, "effort": effort_flag}
         if final_result is not None and not final_result.get("is_error"):
             _accrue(dialog, final_result)            # running token/cost tally
     finally:

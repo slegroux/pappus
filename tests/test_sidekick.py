@@ -52,8 +52,16 @@ def test_token_from_env(monkeypatch):
 
 def test_models_and_default():
     ids = [m["id"] for m in targets.list_models()]
-    assert ids == ["claude", "claude-cli", "claude-cli-fast", "glm", "codex"]
-    assert targets.default_model() == "claude-cli"
+    assert ids == [
+        "codex-gpt-5.5-high", "codex-gpt-5.5-xhigh", "codex-gpt-5.6-luna-low",
+        "claude-fable-low", "claude-fable-medium", "claude-fable-high",
+        "claude-fable-xhigh", "claude-fable-max",
+        "claude-sonnet-low", "claude-sonnet-medium", "claude-sonnet-high",
+        "claude-sonnet-xhigh", "claude-sonnet-max",
+        "claude-opus-low", "claude-opus-medium", "claude-opus-high",
+        "claude-opus-xhigh", "claude-opus-max",
+        "claude", "glm"]
+    assert targets.default_model() == "codex-gpt-5.5-high"
 
 
 def test_unknown_target_raises():
@@ -289,22 +297,23 @@ def test_delete_removes_the_cell():
     assert a.id not in ids and keep.id in ids
 
 
-def test_fallback_model_is_subscription_not_api():
-    # A model-less prompt must default to the configured default (Claude Max via
-    # the CLI), never silently to the paid Anthropic API ('claude').
+def test_fallback_model_is_cli_not_api():
+    # A model-less prompt must default to the configured default (Codex via the
+    # installed CLI), never silently to a paid provider API key.
     from sidekick.client import _fallback_model
-    assert _fallback_model() == "claude-cli"
+    assert _fallback_model() == "codex-gpt-5.5-high"
 
 
 def test_model_label_resolves_id_to_friendly_name():
     import sidekick.app as app
-    assert app._model_label("claude-cli") == "Claude (Max)"
-    assert app._model_label("claude") == "Claude"
-    assert app._model_label(None) == "Claude (Max)"      # model-less -> default label
+    assert app._model_label("codex-gpt-5.5-high") == "Codex · GPT-5.5 high"
+    assert app._model_label("claude-opus-high") == "Claude · Opus high"
+    assert app._model_label("claude") == "Claude API"
+    assert app._model_label(None) == "Codex · GPT-5.5 high"  # model-less -> default label
     assert app._model_label("nope") == "nope"            # unknown id passes through
 
 
-def test_kernel_prompt_without_model_routes_to_subscription():
+def test_kernel_prompt_without_model_routes_to_cli_default():
     from sidekick.client import HttpKernelBackend, Msg
     b = HttpKernelBackend.__new__(HttpKernelBackend)     # skip __init__ (no live target)
     b._dialogs, b._undo, b._store_key = {}, [], None
@@ -318,7 +327,7 @@ def test_kernel_prompt_without_model_routes_to_subscription():
     b._dialogs["d"] = [Msg(id="_x", msg_type="prompt", content="hi", model=None)]
     b.exec("d", "_x")
     assert sent["path"] == "/prompt"
-    assert sent["body"]["model"] == "claude-cli"          # not "claude" (the API path)
+    assert sent["body"]["model"] == "codex-gpt-5.5-high"  # not a provider API path
 
 
 def test_set_type_converts_and_clears_stale_output():
@@ -443,7 +452,7 @@ def test_answer_save_route_edits_answer_without_touching_question():
     app.STATE["dialog"] = "ans/save"
     b = app.STATE["backend"]
     b.messages("ans/save")
-    m = b.add("ans/save", "what is 2+2?", "prompt", model="claude-cli")
+    m = b.add("ans/save", "what is 2+2?", "prompt", model="claude-opus-high")
     b.exec("ans/save", m.id)                      # gives it an answer to edit
     app.cell_answer_save(id=m.id, output="It is 4. (edited)")
     saved = b.messages("ans/save")[-1]
@@ -457,7 +466,7 @@ def test_answer_edit_route_returns_editor_with_output():
     app.STATE["dialog"] = "ans/edit"
     b = app.STATE["backend"]
     b.messages("ans/edit")
-    m = b.add("ans/edit", "q?", "prompt", model="claude-cli")
+    m = b.add("ans/edit", "q?", "prompt", model="claude-opus-high")
     b.update_output("ans/edit", m.id, "the answer text")
     html = to_xml(app.cell_answer_edit(id=m.id))
     assert "<textarea" in html and "the answer text" in html and "Save" in html
@@ -631,7 +640,7 @@ def test_cell_mute_route_toggles():
 
 # ---- Claude via the `claude` CLI (subscription / Max plan) -----------------
 # The CLI session/command logic lives in sidekick.claude_cli; the kernel server
-# routes the `claude-cli` model to it. Tests drive the module directly, plus one
+# routes Claude CLI models to it. Tests drive the module directly, plus one
 # that asserts run_prompt delegates.
 def _mk_cli_run(capture, result="ok", session_id="sid", returncode=0,
                 is_error=False, stdout=None, usage=None, cost=None):
@@ -708,7 +717,9 @@ def test_claude_cli_fresh_session_sends_full_context(monkeypatch):
     # lean mode: no MCP servers, no user settings (hooks/auto-memory) -> faster TTFT
     assert "--strict-mcp-config" in cmd
     assert cmd[cmd.index("--setting-sources") + 1] == "project"
-    assert cc.CLI_SESSIONS["cli/d1"] == {"id": "sid-1", "sent": "<code>x=1</code>", "mode": None}
+    assert cc.CLI_SESSIONS["cli/d1"] == {
+        "id": "sid-1", "sent": "<code>x=1</code>", "mode": None,
+        "model": None, "effort": None}
 
 
 def test_claude_cli_appended_cells_resume_with_only_the_delta(monkeypatch):
@@ -742,7 +753,9 @@ def test_claude_cli_edit_above_starts_a_fresh_session(monkeypatch):
     cc.call("cli/d3", "q", context=edited)
     cmd = cap[-1]["cmd"]
     assert "--session-id" in cmd and "--resume" not in cmd      # reset, not resumed
-    assert cc.CLI_SESSIONS["cli/d3"] == {"id": "sid-new", "sent": edited, "mode": None}
+    assert cc.CLI_SESSIONS["cli/d3"] == {
+        "id": "sid-new", "sent": edited, "mode": None,
+        "model": None, "effort": None}
 
 
 # ---- AI modes (learning / concise / standard personas) ---------------------
@@ -810,7 +823,7 @@ def test_send_route_stores_ai_mode_on_prompt():
     import sidekick.app as app
     app.STATE["dialog"] = "mode/route"
     app.STATE["backend"].messages("mode/route")
-    app.send(content="hello?", msg_type="prompt", model="claude-cli", ai_mode="concise")
+    app.send(content="hello?", msg_type="prompt", model="claude-opus-high", ai_mode="concise")
     assert app.STATE["ai_mode"] == "concise"                 # sticky selection
     assert app.STATE["backend"].messages("mode/route")[-1].ai_mode == "concise"
 
@@ -937,13 +950,279 @@ def test_claude_cli_surfaces_error_output(monkeypatch):
 
 
 def test_run_prompt_routes_claude_cli_to_the_module(monkeypatch):
-    # The kernel server delegates the `claude-cli` model to sidekick.claude_cli.
+    # The kernel server delegates Claude CLI models to sidekick.claude_cli.
     import server.kernel_server as ks
     import sidekick.claude_cli as cc
     monkeypatch.setattr(cc, "claude_bin", lambda: "/bin/claude")
     monkeypatch.setattr(cc, "_run_cli", _mk_cli_run([], result="routed", session_id="s"))
-    assert ks.run_prompt("cli/route", "q", "claude-cli", context="c") == "routed"
+    assert ks.run_prompt("cli/route", "q", "claude-opus-high", context="c") == "routed"
     assert ks.CLI_SESSIONS is cc.CLI_SESSIONS        # server shares the one session store
+
+
+def _mk_codex_run(cap, result="answer", session_id="thread-1", returncode=0, stderr=""):
+    import json as _json
+
+    def run(cmd, cwd, env, timeout):
+        cap.append({"cmd": cmd, "cwd": cwd, "env": env, "timeout": timeout})
+        stdout = "\n".join([
+            _json.dumps({"type": "thread.started", "thread_id": session_id}),
+            _json.dumps({"type": "item.completed", "item": {
+                "id": "i1", "type": "agent_message", "text": result}}),
+            _json.dumps({"type": "turn.completed", "usage": {}}),
+        ]) + "\n"
+        return type("R", (), {"returncode": returncode, "stdout": stdout, "stderr": stderr})()
+
+    return run
+
+
+def test_codex_cli_builds_read_only_exec_prompt(monkeypatch):
+    import sidekick.codex_cli as cx
+    cx.CODEX_SESSIONS.pop("codex/d", None)
+    monkeypatch.setattr(cx, "codex_bin", lambda: "/usr/bin/codex")
+    monkeypatch.delenv("SIDEKICK_CODEX_CLI_MODEL", raising=False)
+    monkeypatch.setenv("SIDEKICK_CELL_TOOLS", "0")
+
+    cmd = cx._build_cmd("codex/d", "what is x?", context="<code>x=1</code>", mode="concise")
+
+    assert cmd[:2] == ["/usr/bin/codex", "exec"]
+    assert "resume" not in cmd
+    assert "--ephemeral" not in cmd
+    assert cmd[cmd.index("--sandbox") + 1] == "read-only"
+    assert "--skip-git-repo-check" in cmd
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.5"
+    assert 'model_reasoning_effort="high"' in cmd
+    assert "MODE — Concise" in cmd[-1]
+    assert "<code>x=1</code>" in cmd[-1]
+    assert "Do not run shell commands" in cmd[-1]
+
+
+def test_codex_cli_selected_model_maps_to_cli_flags(monkeypatch):
+    import sidekick.codex_cli as cx
+    cx.CODEX_SESSIONS.pop("codex/d", None)
+    monkeypatch.setattr(cx, "codex_bin", lambda: "/usr/bin/codex")
+    monkeypatch.delenv("SIDEKICK_CODEX_CLI_MODEL", raising=False)
+    monkeypatch.setenv("SIDEKICK_CELL_TOOLS", "0")
+
+    cmd = cx._build_cmd("codex/d", "hi", model="codex-gpt-5.5-xhigh")
+
+    assert cmd[cmd.index("--model") + 1] == "gpt-5.5"
+    assert 'model_reasoning_effort="xhigh"' in cmd
+
+
+def test_codex_cli_env_model_override_fallback(monkeypatch):
+    import sidekick.codex_cli as cx
+    cx.CODEX_SESSIONS.pop("codex/d", None)
+    monkeypatch.setattr(cx, "codex_bin", lambda: "/usr/bin/codex")
+    monkeypatch.setenv("SIDEKICK_CODEX_CLI_MODEL", "gpt-test")
+    monkeypatch.setenv("SIDEKICK_CODEX_CLI_REASONING", "low")
+    monkeypatch.setenv("SIDEKICK_CELL_TOOLS", "0")
+
+    cmd = cx._build_cmd("codex/d", "hi", model="custom-codex")
+
+    assert cmd[cmd.index("--model") + 1] == "gpt-test"
+    assert 'model_reasoning_effort="low"' in cmd
+
+
+def test_codex_cli_registers_cell_mcp_tools(monkeypatch):
+    import sidekick.codex_cli as cx
+    cx.CODEX_SESSIONS.pop("codex/d", None)
+    monkeypatch.setattr(cx, "codex_bin", lambda: "/usr/bin/codex")
+    monkeypatch.setenv("SIDEKICK_CELL_TOOLS", "1")
+    monkeypatch.setenv("SIDEKICK_APP_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("SIDEKICK_MCP_TOKEN", "tok")
+
+    cmd = cx._build_cmd("codex/d", "fix cell 1", context="<code>bad()</code>", stream=True)
+
+    assert "--json" in cmd
+    joined = "\n".join(cmd)
+    assert 'mcp_servers.cells.command=' in joined
+    assert 'mcp_servers.cells.env.SIDEKICK_DIALOG="codex/d"' in joined
+    assert 'mcp_servers.cells.default_tools_approval_mode="approve"' in joined
+    assert "You also have MCP tools to edit this notebook directly" in cmd[-1]
+
+
+def test_codex_cli_resume_edit_previous_cell_reminds_tool_use(monkeypatch):
+    import sidekick.codex_cli as cx
+    context = '<code n="1" id="_prev">x = 1</code>'
+    cx.CODEX_SESSIONS["codex/edit-prev"] = {
+        "id": "thread-9", "sent": context, "mode": None,
+        "model": "gpt-5.5", "effort": "high", "tools": True, "version": 1}
+    monkeypatch.setattr(cx, "codex_bin", lambda: "/usr/bin/codex")
+    monkeypatch.delenv("SIDEKICK_CODEX_CLI_MODEL", raising=False)
+    monkeypatch.setenv("SIDEKICK_CELL_TOOLS", "1")
+    monkeypatch.setenv("SIDEKICK_APP_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("SIDEKICK_MCP_TOKEN", "tok")
+
+    cmd = cx._build_cmd("codex/edit-prev", "edit the previous cell", context=context)
+
+    assert cmd[:3] == ["/usr/bin/codex", "exec", "resume"]
+    assert "Notebook-cell edit reminder" in cmd[-1]
+    assert "immediately preceding context cell" in cmd[-1]
+
+
+def test_codex_cli_call_surfaces_stdout_and_errors(monkeypatch):
+    from types import SimpleNamespace
+    import sidekick.codex_cli as cx
+    cx.CODEX_SESSIONS.pop("d", None)
+    monkeypatch.setattr(cx, "codex_bin", lambda: "/usr/bin/codex")
+    monkeypatch.setenv("SIDEKICK_CELL_TOOLS", "0")
+    cap = []
+
+    def run(cmd, cwd, env, timeout):
+        cap.append({"cmd": cmd, "cwd": cwd, "env": env, "timeout": timeout})
+        return SimpleNamespace(returncode=0, stdout="answer\n", stderr="")
+
+    monkeypatch.setattr(cx, "_run_cli", run)
+    assert cx.call("d", "q", context="ctx") == "answer"
+    assert cap[-1]["timeout"] == 180
+    assert "--json" in cap[-1]["cmd"]                   # call parses JSON to learn session ids
+
+    monkeypatch.setattr(cx, "_run_cli",
+                        lambda *a, **k: SimpleNamespace(returncode=1, stdout="", stderr="boom"))
+    assert "boom" in cx.call("d", "q")
+
+
+def test_codex_cli_records_session_after_success(monkeypatch):
+    import sidekick.codex_cli as cx
+    cx.CODEX_SESSIONS.pop("codex/s1", None)
+    monkeypatch.setattr(cx, "codex_bin", lambda: "/usr/bin/codex")
+    monkeypatch.delenv("SIDEKICK_CODEX_CLI_MODEL", raising=False)
+    monkeypatch.setenv("SIDEKICK_CELL_TOOLS", "0")
+    cap = []
+    monkeypatch.setattr(cx, "_run_cli", _mk_codex_run(cap, result="ok", session_id="thread-1"))
+
+    assert cx.call("codex/s1", "q", context="<code>x=1</code>", mode="concise") == "ok"
+    cmd = cap[-1]["cmd"]
+    assert cmd[:2] == ["/usr/bin/codex", "exec"]
+    assert "resume" not in cmd
+    assert cx.CODEX_SESSIONS["codex/s1"] == {
+        "id": "thread-1", "sent": "<code>x=1</code>", "mode": "concise",
+        "model": "gpt-5.5", "effort": "high", "tools": False, "version": 1}
+
+
+def test_codex_cli_appended_cells_resume_with_delta(monkeypatch):
+    import sidekick.codex_cli as cx
+    cx.CODEX_SESSIONS["codex/s2"] = {
+        "id": "thread-9", "sent": "<code>x=1</code>", "mode": None,
+        "model": "gpt-5.5", "effort": "high", "tools": False, "version": 1}
+    monkeypatch.setattr(cx, "codex_bin", lambda: "/usr/bin/codex")
+    monkeypatch.delenv("SIDEKICK_CODEX_CLI_MODEL", raising=False)
+    monkeypatch.setenv("SIDEKICK_CELL_TOOLS", "0")
+    cap = []
+    monkeypatch.setattr(cx, "_run_cli", _mk_codex_run(cap, result="ok", session_id="thread-9"))
+
+    new_ctx = "<code>x=1</code>\n<code>y=2</code>"
+    assert cx.call("codex/s2", "and y?", context=new_ctx) == "ok"
+    cmd = cap[-1]["cmd"]
+    assert cmd[:3] == ["/usr/bin/codex", "exec", "resume"]
+    assert "thread-9" in cmd
+    assert 'sandbox_mode="read-only"' in cmd
+    user_msg = cmd[-1]
+    assert "y=2" in user_msg and "and y?" in user_msg
+    assert "x=1" not in user_msg
+    assert cx.CODEX_SESSIONS["codex/s2"]["sent"] == new_ctx
+
+
+def test_codex_cli_edit_above_starts_fresh_session(monkeypatch):
+    import sidekick.codex_cli as cx
+    cx.CODEX_SESSIONS["codex/s3"] = {
+        "id": "thread-old", "sent": "<code>x=1</code>\n<code>y=2</code>",
+        "mode": None, "model": "gpt-5.5", "effort": "high", "tools": False,
+        "version": 1}
+    monkeypatch.setattr(cx, "codex_bin", lambda: "/usr/bin/codex")
+    monkeypatch.delenv("SIDEKICK_CODEX_CLI_MODEL", raising=False)
+    monkeypatch.setenv("SIDEKICK_CELL_TOOLS", "0")
+    cap = []
+    monkeypatch.setattr(cx, "_run_cli", _mk_codex_run(cap, result="ok", session_id="thread-new"))
+
+    edited = "<code>x=99</code>\n<code>y=2</code>"
+    cx.call("codex/s3", "q", context=edited)
+    cmd = cap[-1]["cmd"]
+    assert cmd[:2] == ["/usr/bin/codex", "exec"] and "resume" not in cmd
+    assert "x=99" in cmd[-1] and "y=2" in cmd[-1]
+    assert cx.CODEX_SESSIONS["codex/s3"]["id"] == "thread-new"
+    assert cx.CODEX_SESSIONS["codex/s3"]["sent"] == edited
+
+
+def test_codex_cli_mode_model_or_tools_change_forces_fresh(monkeypatch):
+    import sidekick.codex_cli as cx
+    cx.CODEX_SESSIONS["codex/s4"] = {
+        "id": "thread-old", "sent": "<code>x=1</code>", "mode": "learning",
+        "model": "gpt-5.5", "effort": "high", "tools": False, "version": 1}
+    monkeypatch.setattr(cx, "codex_bin", lambda: "/usr/bin/codex")
+    monkeypatch.setenv("SIDEKICK_CELL_TOOLS", "0")
+    monkeypatch.delenv("SIDEKICK_CODEX_CLI_MODEL", raising=False)
+
+    cmd = cx._build_cmd("codex/s4", "q", context="<code>x=1</code>\n<code>y=2</code>",
+                        mode="standard")
+    assert cmd[:2] == ["/usr/bin/codex", "exec"] and "resume" not in cmd
+
+    cx.CODEX_SESSIONS["codex/s4"]["mode"] = "standard"
+    cmd = cx._build_cmd("codex/s4", "q", context="<code>x=1</code>\n<code>y=2</code>",
+                        mode="standard", model="codex-gpt-5.5-xhigh")
+    assert cmd[:2] == ["/usr/bin/codex", "exec"] and "resume" not in cmd
+
+    cx.CODEX_SESSIONS["codex/s4"]["effort"] = "xhigh"
+    monkeypatch.setenv("SIDEKICK_CELL_TOOLS", "1")
+    monkeypatch.setenv("SIDEKICK_APP_URL", "http://127.0.0.1:8000")
+    monkeypatch.setenv("SIDEKICK_MCP_TOKEN", "tok")
+    cmd = cx._build_cmd("codex/s4", "q", context="<code>x=1</code>\n<code>y=2</code>",
+                        mode="standard", model="codex-gpt-5.5-xhigh")
+    assert cmd[:2] == ["/usr/bin/codex", "exec"] and "resume" not in cmd
+
+
+def test_run_prompt_routes_codex_cli_to_the_module(monkeypatch):
+    import server.kernel_server as ks
+    import sidekick.codex_cli as cx
+    cx.CODEX_SESSIONS.pop("codex/route", None)
+    monkeypatch.setattr(cx, "codex_bin", lambda: "/usr/bin/codex")
+    monkeypatch.setenv("SIDEKICK_CELL_TOOLS", "0")
+    monkeypatch.setattr(cx, "_run_cli",
+                        lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "routed", "stderr": ""})())
+
+    assert ks.run_prompt("codex/route", "q", "codex-gpt-5.5-high", context="c") == "routed"
+
+
+def test_run_prompt_routes_codex_prefix_models_to_cli(monkeypatch):
+    import server.kernel_server as ks
+    import sidekick.codex_cli as cx
+    monkeypatch.setattr(cx, "codex_bin", lambda: "/usr/bin/codex")
+    monkeypatch.setenv("SIDEKICK_CELL_TOOLS", "0")
+    monkeypatch.setattr(cx, "_run_cli",
+                        lambda *a, **k: type("R", (), {"returncode": 0, "stdout": "routed", "stderr": ""})())
+
+    assert ks.run_prompt("codex/route2", "q", "codex-new-choice", context="c") == "routed"
+
+
+def test_codex_cli_stream_yields_agent_message_deltas(monkeypatch):
+    import json as _json
+    from types import SimpleNamespace
+    import sidekick.codex_cli as cx
+    cx.CODEX_SESSIONS.pop("codex/s", None)
+    monkeypatch.setattr(cx, "codex_bin", lambda: "/usr/bin/codex")
+    monkeypatch.setenv("SIDEKICK_CELL_TOOLS", "0")
+    cap = []
+
+    def popen(cmd, cwd, env):
+        cap.append({"cmd": cmd, "cwd": cwd, "env": env})
+        lines = [
+            _json.dumps({"type": "thread.started", "thread_id": "t"}) + "\n",
+            _json.dumps({"type": "item.completed", "item": {
+                "id": "i1", "type": "agent_message", "text": "Hel"}}) + "\n",
+            _json.dumps({"type": "item.completed", "item": {
+                "id": "i1", "type": "agent_message", "text": "Hello"}}) + "\n",
+            _json.dumps({"type": "turn.completed", "usage": {}}) + "\n",
+        ]
+        it = iter(lines)
+        return SimpleNamespace(stdout=SimpleNamespace(readline=lambda: next(it, "")),
+                               wait=lambda timeout=None: 0)
+
+    monkeypatch.setattr(cx, "_popen", popen)
+
+    assert list(cx.stream("codex/s", "hi?", context="<note>ctx</note>")) == ["Hel", "lo"]
+    assert "--json" in cap[-1]["cmd"]
+    assert cx.CODEX_SESSIONS["codex/s"]["id"] == "t"
+    assert cx.CODEX_SESSIONS["codex/s"]["sent"] == "<note>ctx</note>"
 
 
 def test_claude_cli_stream_yields_deltas_and_records_session(monkeypatch):
@@ -958,7 +1237,9 @@ def test_claude_cli_stream_yields_deltas_and_records_session(monkeypatch):
     assert chunks == ["Hel", "lo ", "world"]               # streamed in order
     cmd = cap[-1]["cmd"]
     assert "stream-json" in cmd and "--session-id" in cmd   # streaming, fresh session
-    assert cc.CLI_SESSIONS["cli/s1"] == {"id": "sid-s1", "sent": "<code>x=1</code>", "mode": None}
+    assert cc.CLI_SESSIONS["cli/s1"] == {
+        "id": "sid-s1", "sent": "<code>x=1</code>", "mode": None,
+        "model": None, "effort": None}
 
 
 def test_claude_cli_stream_resumes_on_append(monkeypatch):
@@ -1189,7 +1470,7 @@ def test_stream_path_resolves_injection_before_reaching_ai(monkeypatch):
     b._dialogs = {}
     b._post = lambda path, body: {"content": body["content"].replace("$`x`", "42"),
                                   "warnings": []} if path == "/eval" else {}
-    m = b.add("inj/stream", "what is $`x`?", "prompt", model="claude-cli")
+    m = b.add("inj/stream", "what is $`x`?", "prompt", model="claude-opus-high")
 
     seen = {}
     def fake_stream(dialog, content, context, model=None, mode=None):
@@ -1361,18 +1642,40 @@ def test_ctx_meter_reports_token_estimate():
 
 
 # ---- secrets store ----------------------------------------------------------
-# ---- streaming AI answers (claude-cli + SSE) -------------------------------
+# ---- streaming AI answers (local CLI + SSE) --------------------------------
 def test_send_prompt_with_claude_cli_defers_to_stream():
     import sidekick.app as app
     app.STATE["dialog"] = "stream/send"
     app.STATE["backend"].messages("stream/send")
     app.STATE["pending_stream"] = None
-    app.send(content="hello?", msg_type="prompt", model="claude-cli")
+    app.send(content="hello?", msg_type="prompt", model="claude-opus-high")
     m = app.STATE["backend"].messages("stream/send")[-1]
-    assert m.model == "claude-cli"
+    assert m.model == "claude-opus-high"
     assert m.output == ""                                 # NOT executed inline
     assert app.STATE["pending_stream"] == ("stream/send", m.id)
     app.STATE["pending_stream"] = None
+
+
+def test_send_prompt_with_codex_cli_defers_to_stream():
+    import sidekick.app as app
+    app.STATE["dialog"] = "stream/codex-send"
+    app.STATE["backend"].messages("stream/codex-send")
+    app.STATE["pending_stream"] = None
+    app.send(content="hello?", msg_type="prompt", model="codex-gpt-5.5-high")
+    m = app.STATE["backend"].messages("stream/codex-send")[-1]
+    assert m.model == "codex-gpt-5.5-high"
+    assert m.output == ""
+    assert app.STATE["pending_stream"] == ("stream/codex-send", m.id)
+    app.STATE["pending_stream"] = None
+
+
+def test_can_stream_accepts_explicit_local_cli_prefix_models():
+    import sidekick.app as app
+    from sidekick.client import MockBackend
+
+    assert app._can_stream(MockBackend(), "codex-new-choice")
+    assert app._can_stream(MockBackend(), "claude-new-choice")
+    assert not app._can_stream(MockBackend(), "claude")     # API provider, not local CLI
 
 
 def test_msgrow_renders_sse_placeholder_for_pending_prompt():
@@ -1381,7 +1684,7 @@ def test_msgrow_renders_sse_placeholder_for_pending_prompt():
     app.STATE["dialog"] = "stream/row"
     b = app.STATE["backend"]
     b.messages("stream/row")
-    m = b.add("stream/row", "q?", "prompt", model="claude-cli")
+    m = b.add("stream/row", "q?", "prompt", model="claude-opus-high")
     app.STATE["pending_stream"] = ("stream/row", m.id)
     html = to_xml(app.MsgRow(m))
     assert "data-stream-url" in html and "/stream?dialog=" in html
@@ -1394,7 +1697,7 @@ def test_stream_route_emits_deltas_and_persists_output(monkeypatch):
     app.STATE["dialog"] = "stream/route"
     b = app.STATE["backend"]
     b.messages("stream/route")
-    m = b.add("stream/route", "add x and y?", "prompt", model="claude-cli")
+    m = b.add("stream/route", "add x and y?", "prompt", model="claude-opus-high")
     app.STATE["pending_stream"] = ("stream/route", m.id)
     monkeypatch.setattr(app, "stream_claude", lambda d, c, ctx, model=None, mode=None: iter(["4", "2"]))
 
@@ -1412,6 +1715,29 @@ def test_stream_route_emits_deltas_and_persists_output(monkeypatch):
     assert app.STATE["pending_stream"] is None           # cleared on completion
 
 
+def test_stream_route_uses_codex_streamer(monkeypatch):
+    import asyncio
+    import sidekick.app as app
+    app.STATE["dialog"] = "stream/codex-route"
+    b = app.STATE["backend"]
+    b.messages("stream/codex-route")
+    m = b.add("stream/codex-route", "add x and y?", "prompt", model="codex-gpt-5.5-high")
+    app.STATE["pending_stream"] = ("stream/codex-route", m.id)
+    monkeypatch.setattr(app, "stream_codex", lambda d, c, ctx, model=None, mode=None: iter(["C", "X"]))
+
+    resp = app.stream_answer(dialog="stream/codex-route", id=m.id)
+
+    async def collect():
+        out = []
+        async for chunk in resp.body_iterator:
+            out.append(chunk.decode() if isinstance(chunk, bytes) else chunk)
+        return "".join(out)
+    body = asyncio.run(collect())
+    assert "CX" in body
+    assert m.output == "CX"
+    assert app.STATE["pending_stream"] is None
+
+
 def test_secrets_save_load_and_status(tmp_path, monkeypatch):
     from sidekick import secrets_store
     monkeypatch.setenv("SIDEKICK_SECRETS", str(tmp_path / "s.json"))
@@ -1420,6 +1746,7 @@ def test_secrets_save_load_and_status(tmp_path, monkeypatch):
     assert secrets_store.key_for_model("claude") == "sk-ant-123456789"
     row = next(r for r in secrets_store.status() if r["model"] == "claude")
     assert row["set"] and row["masked"].startswith("sk-")
+    assert "codex" not in [r["model"] for r in secrets_store.status()]
     # secret file is locked down
     assert oct((tmp_path / "s.json").stat().st_mode)[-3:] == "600"
 
@@ -2328,6 +2655,35 @@ def test_build_cmd_registers_mcp_and_keeps_prompt_last(monkeypatch):
     assert "list_cells" in sysmsg                          # tool guidance taught once
 
 
+def test_tools_guidance_resolves_previous_cell():
+    from sidekick import claude_cli as cc
+    assert "previous cell" in cc._TOOLS_GUIDANCE
+    assert "immediately preceding context cell" in cc._TOOLS_GUIDANCE
+    assert "actually call update_cell" in cc._TOOLS_GUIDANCE
+    assert cc._wants_cell_edit("edit the previous cell")
+    assert not cc._wants_cell_edit("add x and y?")
+
+
+def test_build_cmd_resume_edit_previous_cell_reminds_tool_use(monkeypatch):
+    from sidekick import claude_cli as cc
+    context = '<code n="1" id="_prev">x = 1</code>'
+    cc.CLI_SESSIONS["mcp/edit-prev"] = {
+        "id": "sid-9", "sent": context, "mode": None,
+        "model": None, "effort": None}
+    monkeypatch.setenv("SIDEKICK_MCP_TOKEN", "t")
+    monkeypatch.setenv("SIDEKICK_APP_URL", "http://127.0.0.1:8000")
+    monkeypatch.delenv("SIDEKICK_CELL_TOOLS", raising=False)
+    monkeypatch.delenv("SIDEKICK_CLAUDE_CLI_MODEL", raising=False)
+    monkeypatch.setattr(cc, "claude_bin", lambda: "/usr/bin/claude")
+
+    cmd, _ = cc._build_cmd("mcp/edit-prev", "edit the previous cell", context, stream=True)
+
+    assert "--resume" in cmd and "sid-9" in cmd
+    assert "--append-system-prompt" not in cmd
+    assert "Notebook-cell edit reminder" in cmd[-1]
+    assert "immediately preceding context cell" in cmd[-1]
+
+
 def test_build_cmd_no_mcp_when_disabled(monkeypatch):
     from sidekick import claude_cli as cc
     monkeypatch.delenv("SIDEKICK_MCP_TOKEN", raising=False)
@@ -2652,7 +3008,7 @@ def test_pending_prompt_shows_thinking_spinner():
     from fasthtml.common import to_xml
     from sidekick.client import MockBackend
     b = MockBackend(); app.STATE["backend"] = b; app.STATE["dialog"] = "spin/d"
-    b.messages("spin/d"); m = b.add("spin/d", "q?", "prompt", model="claude-cli")
+    b.messages("spin/d"); m = b.add("spin/d", "q?", "prompt", model="claude-opus-high")
     app.STATE["pending_stream"] = ("spin/d", m.id)
     html = to_xml(app._output_views(m)[0])
     app.STATE["pending_stream"] = None                 # reset shared state
@@ -2683,18 +3039,21 @@ def test_send_htmx_returns_stream_fragment_not_full_page():
     assert "<html" in full.lower()
 
 
-def test_claude_cli_fast_model_uses_haiku(monkeypatch):
+def test_claude_cli_model_ids_set_model_and_effort(monkeypatch):
     from sidekick import claude_cli as cc
     monkeypatch.setattr(cc, "claude_bin", lambda: "/usr/bin/claude")
     monkeypatch.delenv("SIDEKICK_CLAUDE_CLI_MODEL", raising=False)
-    cc.CLI_SESSIONS.pop("fast/d", None)
-    cmd, _ = cc._build_cmd("fast/d", "hi", "", stream=True, model="claude-cli-fast")
-    assert cmd[cmd.index("--model") + 1] == "haiku"
-    # the default CLI model adds no --model flag (inherits the subscription default)
-    cc.CLI_SESSIONS.pop("norm/d", None)
-    cmd2, _ = cc._build_cmd("norm/d", "hi", "", stream=True, model="claude-cli")
-    assert "--model" not in cmd2
-    assert "claude-cli-fast" in cc.CLI_MODELS          # routes through the streaming path
+    cc.CLI_SESSIONS.pop("opus/d", None)
+    cmd, _ = cc._build_cmd("opus/d", "hi", "", stream=True, model="claude-opus-high")
+    assert cmd[cmd.index("--model") + 1] == "opus"
+    assert cmd[cmd.index("--effort") + 1] == "high"
+
+    cc.CLI_SESSIONS.pop("fable/d", None)
+    cmd2, _ = cc._build_cmd("fable/d", "hi", "", stream=True, model="claude-fable-low")
+    assert cmd2[cmd2.index("--model") + 1] == "fable"
+    assert cmd2[cmd2.index("--effort") + 1] == "low"
+    assert "claude-opus-high" in cc.CLI_MODELS
+    assert "claude-fable-low" in cc.CLI_MODELS
 
 
 def test_answer_code_blocks_extracts_fenced_code_in_order():

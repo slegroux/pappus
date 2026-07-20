@@ -118,10 +118,16 @@ def test_stream_abandon_kills_subprocess(monkeypatch):
 # ---- evict-sessions: drop() clears in-memory session/cost -------------------
 def test_drop_evicts_session():
     import sidekick.claude_cli as cc
+    import sidekick.codex_cli as cx
 
     cc.CLI_SESSIONS["dlg/drop"] = {"id": "s", "sent": "", "mode": None}
     cc.CLI_COST["dlg/drop"] = {"usd": 0.5, "turns": 2}
+    cx.CODEX_SESSIONS["dlg/drop"] = {"id": "c", "sent": "", "mode": None,
+                                     "model": None, "tools": False, "version": 1}
     cc.drop("dlg/drop")
+    cx.drop("dlg/drop")
     assert "dlg/drop" not in cc.CLI_SESSIONS
     assert "dlg/drop" not in cc.CLI_COST
+    assert "dlg/drop" not in cx.CODEX_SESSIONS
     cc.drop("dlg/never-ran")                              # absent -> best-effort no-op
+    cx.drop("dlg/never-ran")

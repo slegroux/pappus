@@ -18,18 +18,48 @@ default: local
 
 # Models the "Ask AI" composer can route a prompt to. `id` is what we pass to
 # the SolveIt server; `label` is what the UI shows. Reorder/extend freely.
-default_model: claude-cli   # Claude via your subscription (Max) — streams, no API credits
+default_model: codex-gpt-5.5-high    # Codex via local CLI, explicit model/effort
 models:
+  - id: codex-gpt-5.5-high   # Codex via local CLI; strong default for notebook help
+    label: Codex · GPT-5.5 high
+  - id: codex-gpt-5.5-xhigh  # deeper reasoning for harder questions
+    label: Codex · GPT-5.5 xhigh
+  - id: codex-gpt-5.6-luna-low  # fast/lighter Codex option
+    label: Codex · GPT-5.6 Luna low
+  - id: claude-fable-low   # Claude Code subscription, fast/light
+    label: Claude · Fable low
+  - id: claude-fable-medium
+    label: Claude · Fable medium
+  - id: claude-fable-high  # Claude Code subscription, fast but more deliberate
+    label: Claude · Fable high
+  - id: claude-fable-xhigh
+    label: Claude · Fable xhigh
+  - id: claude-fable-max
+    label: Claude · Fable max
+  - id: claude-sonnet-low
+    label: Claude · Sonnet low
+  - id: claude-sonnet-medium
+    label: Claude · Sonnet medium
+  - id: claude-sonnet-high # Claude Code subscription, balanced
+    label: Claude · Sonnet high
+  - id: claude-sonnet-xhigh # Claude Code subscription, deeper balanced reasoning
+    label: Claude · Sonnet xhigh
+  - id: claude-sonnet-max
+    label: Claude · Sonnet max
+  - id: claude-opus-low
+    label: Claude · Opus low
+  - id: claude-opus-medium
+    label: Claude · Opus medium
+  - id: claude-opus-high   # Claude Code subscription, strongest default
+    label: Claude · Opus high
+  - id: claude-opus-xhigh  # Claude Code subscription, deepest routine option
+    label: Claude · Opus xhigh
+  - id: claude-opus-max
+    label: Claude · Opus max
   - id: claude        # Anthropic API (uses ANTHROPIC_API_KEY / prepaid credits)
-    label: Claude
-  - id: claude-cli    # Claude via the `claude` CLI — your subscription (Max), no API credits
-    label: Claude (Max)
-  - id: claude-cli-fast   # same subscription, Haiku tier — faster, lighter answers
-    label: Claude (Max · fast)
+    label: Claude API
   - id: glm           # Zhipu GLM
     label: GLM
-  - id: codex         # OpenAI Codex
-    label: Codex
 
 # `backend` picks how the client talks to a target:
 #   solveit (default) -> via solveit_client (Answer.AI's hosted/real server)

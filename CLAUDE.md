@@ -71,10 +71,15 @@ AI SDKs — light) from **the coding environment** (`kernel` extra: numpy/pandas
 venvs/machines. Other extras: `paper` (marker-pdf), `web` (trafilatura), `solveit`,
 `nbdev`, `all`. When adding a dep, put it in the group that matches where it runs.
 
-### Ask AI — two routes
+### Ask AI — three routes
 
 - **API providers** (`claude`/`glm`/`codex`) go through the SDKs in `client.py`.
-- **Subscription** (`claude-cli`, the default) shells out via `sidekick/claude_cli.py`
+- **Codex CLI** (`codex-cli`, the default) shells out via `sidekick/codex_cli.py`
+  to the user's installed `codex` command and current local auth/config. It runs a
+  fresh conservative read-only `codex exec` turn from a neutral scratch directory,
+  streams `--json` events in the web UI, and can use the same loopback cell MCP
+  tools for explicit visible notebook edits.
+- **Claude subscription** (`claude-cli`) shells out via `sidekick/claude_cli.py`
   to `claude -p` on the user's Max plan. It is the full Claude Code agent, so it is
   launched with `--disallowed-tools Write Edit Bash`: the AI may make visible,
   in-notebook edits (via the cell MCP tools) but never runs code or works off-screen.

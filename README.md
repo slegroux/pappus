@@ -186,17 +186,20 @@ matplotlib defaults to the headless `Agg` backend on the server, so
 
 ## Models & API keys
 
-Open the **⚙ Settings** page (gear, top-right) to paste API keys for each
-provider — Anthropic (Claude), OpenAI (Codex), Zhipu (GLM). Keys are stored in
+The default **Codex CLI** model uses your installed `codex` command with an
+explicit Sidekick choice of `gpt-5.5` at `high` reasoning, so it needs no
+Sidekick API key. Open the **⚙ Settings** page (gear, top-right) to paste API
+keys for the direct SDK providers — Anthropic (Claude) and Zhipu (GLM). Keys are stored in
 `~/.config/solveit-sidekick/secrets.json` (chmod 600, gitignored); an environment
-variable of the same name always overrides the file. Claude is the default model,
-so once your Anthropic key is set, "Ask AI" talks to your Claude account.
+variable of the same name always overrides the file.
 
 ### Which tools the AI may use
 
-Ask AI runs as a `claude` agent, so it *could* have the full tool set. What it may
-and may not do is declarative — one file, `~/.config/solveit-sidekick/tools.json`
-(override with `SIDEKICK_TOOLS`):
+The Claude CLI Ask AI routes run as a `claude` agent, so they *could* have the
+full tool set. What they may and may not do is declarative — one file,
+`~/.config/solveit-sidekick/tools.json` (override with `SIDEKICK_TOOLS`). The
+Codex CLI route stays read-only at the filesystem/shell layer and gets only the
+notebook-cell MCP tools described below.
 
 ```json
 {
@@ -374,10 +377,17 @@ small-steps persona is always on underneath; the mode layers a directive on top:
 
 The chosen mode is remembered and stored on each prompt (like the model), so a
 re-ask uses the mode it was sent with. Switching mode mid-dialog takes effect on
-the next turn — on the subscription (`claude-cli`) path a mode change starts a
+the next turn. On the subscription Claude CLI path a mode change starts a
 fresh session so the new directive actually applies (a resumed session can't
-rewrite its own system prompt). Works on every backend: the persona/mode is built
-app-side and sent as the model's system preamble.
+rewrite its own system prompt). The Codex CLI path also keeps a conservative
+read-only session per dialog when the notebook is append-only; if earlier cells
+change, mode/model/tool settings change, or the session can't be resumed safely,
+Sidekick starts a fresh `codex exec --json` turn and re-sends the full notebook
+context. The notebook stays the source of truth. Works on every backend: the
+persona/mode is built app-side and sent as the model's system preamble or prompt
+envelope. After installing or changing Codex addons/plugins, start a new dialog
+or otherwise force a fresh Codex session if the current dialog is still
+resuming.
 
 #### The AI can edit cells (Max plan)
 
@@ -385,10 +395,11 @@ Ask AI doesn't only *answer* — it can **edit the notebook for you**. Ask it to
 "fix the bug in **cell 3**," "vectorise this loop," or "add a test below," and it
 rewrites the target cell (or inserts a new one) in place; the notebook refreshes
 to show the change. This is the same idea as SolveIt's `dialoghelper`, which
-gives its AI tools to manipulate the dialog — here it runs on your **Claude Max
-subscription** (no API credits) via the `claude` CLI plus a tiny, local
+gives its AI tools to manipulate the dialog — here it runs through the local
 [MCP server](server/mcp_cells.py) exposing `list_cells` / `update_cell` /
-`str_replace` / `insert_cell`.
+`str_replace` / `insert_cell`. The tools are available to the Codex and Claude
+CLI model choices; Codex uses the installed `codex` CLI, while Claude uses your
+**Claude Max subscription** (no API credits) via the `claude` CLI.
 
 **Pointing it at a cell.** Each cell shows a small **number** in its gutter, and
 the AI sees that same number — every cell reaches it tagged `n="3" id="…"`. So
@@ -398,8 +409,8 @@ they renumber when you insert, delete, or reorder cells.
 
 It only touches cells when you **explicitly ask**; an ordinary question is still
 answered in text. The tools are loopback-only and token-guarded, and active only
-on the `claude-cli` (subscription) model. Set `SIDEKICK_CELL_TOOLS=0` to turn
-them off (e.g. for the leanest time-to-first-token).
+on local CLI models (Codex and Claude CLI choices). Set `SIDEKICK_CELL_TOOLS=0`
+to turn them off (e.g. for the leanest time-to-first-token).
 
 #### …but the right hands, not a free-roaming agent
 

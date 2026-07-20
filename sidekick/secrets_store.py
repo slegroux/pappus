@@ -22,6 +22,11 @@ PROVIDERS: dict[str, tuple[str, str]] = {
     "codex": ("OpenAI", "OPENAI_API_KEY"),
 }
 
+# Providers shown in Settings. The OpenAI SDK route remains internally supported
+# as `codex` for explicit calls/tests, but the UI keeps only Codex CLI to avoid
+# presenting two "Codex" choices.
+SETTINGS_PROVIDERS = {k: PROVIDERS[k] for k in ("claude", "glm")}
+
 
 def secrets_path() -> Path:
     env = os.environ.get("SIDEKICK_SECRETS")
@@ -79,7 +84,7 @@ def key_for_model(model_id: str) -> str | None:
 def status() -> list[dict]:
     """For the Settings UI: one row per provider with whether a key is set."""
     out = []
-    for model_id, (label, env) in PROVIDERS.items():
+    for model_id, (label, env) in SETTINGS_PROVIDERS.items():
         key = get_key(env)
         out.append({
             "model": model_id,

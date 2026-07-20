@@ -29,12 +29,12 @@ def _dbg(msg):
 
 def _fallback_model() -> str:
     """The model to assume for a prompt cell that has none recorded. Follows the
-    user's configured default (Claude Max via the CLI, out of the box) so a
-    model-less cell never silently routes to the paid Anthropic API."""
+    user's configured default (Codex CLI, out of the box) so a model-less cell
+    never silently routes to a paid provider API key."""
     try:
         return default_model()
-    except Exception:  # noqa: BLE001 — no/unreadable config: keep the subscription default
-        return "claude-cli"
+    except Exception:  # noqa: BLE001 — no/unreadable config: keep the CLI default
+        return "codex-gpt-5.5-high"
 
 
 @dataclass
