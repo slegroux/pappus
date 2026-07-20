@@ -1453,7 +1453,14 @@ STREAM_JS = """
   // (The inline reapply runs too early on script-bearing swaps, so the class
   // gets dropped; afterSettle reliably lands after the new DOM is in place.)
   document.addEventListener('htmx:afterSettle', function(){
-    if(window.__selCell && window.__selectCell) window.__selectCell(window.__selCell, false);
+    if(window.__escToCell && window.__selectCell){
+      // Esc out of an editor: keep the escaped cell in view (scroll:true) instead
+      // of letting the post-swap scroll settle at the bottom / composer.
+      window.__selectCell(window.__escToCell, true);
+      window.__escToCell = null;
+    } else if(window.__selCell && window.__selectCell){
+      window.__selectCell(window.__selCell, false);
+    }
     if(window.__applyCollapsed) window.__applyCollapsed();     // re-fold sections after a swap
     // Partial swaps (answer save/cancel, single-cell view) replace a fragment
     // without re-running STREAM_JS, so the line-1198 render loop never touches
@@ -1522,17 +1529,22 @@ STREAM_JS = """
       // An AI answer is just another markdown view: Esc renders it (clicks the
       // answer's OWN Save), same as a note — scoped to .answer so it doesn't hit
       // the prompt row's Ask button. Mirrors the Cmd+Enter handler above.
+      // __escToCell: the Esc-triggered Save below swaps all of #stream, and the
+      // synchronous scroll-restore can land at the bottom (near the composer)
+      // when the freshly-swapped content isn't laid out yet. Re-assert this cell
+      // into view once the swap settles (see htmx:afterSettle) so Esc keeps you
+      // exactly where you were editing, never yanked down to the composer.
       var ans = e.target.closest('.answer');
       if(ans){
         var asave = ans.querySelector('.cell-btn.run');
-        if(asave){ window.__selCell = cid; asave.click(); return; }
+        if(asave){ window.__selCell = cid; window.__escToCell = cid; asave.click(); return; }
       }
       // A note (markdown) cell renders on Esc — same as Save — instead of just
       // dropping focus while it keeps showing the raw source. Code/prompt cells
       // only fall back to command mode (Jupyter never runs code on Esc).
       if(row.classList.contains('note')){
         var save = row.querySelector('.cell-btn.run');
-        if(save){ window.__selCell = cid; save.click(); return; }  // keep it selected across the swap
+        if(save){ window.__selCell = cid; window.__escToCell = cid; save.click(); return; }
       }
       if(e.target.blur) e.target.blur();
       window.__selectCell(cid, false);

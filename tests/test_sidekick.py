@@ -3049,6 +3049,18 @@ def test_stream_js_toggles_streaming_caret():
     assert "classList.remove('streaming')" in app.STREAM_JS
 
 
+def test_stream_js_esc_keeps_escaped_cell_in_view():
+    # Esc out of a note/answer editor swaps #stream; the escaped cell is recorded
+    # and re-scrolled into view on afterSettle so the viewport stays at that cell
+    # instead of landing at the bottom (the composer). Both the Esc handler and
+    # the afterSettle re-assert must reference the same __escToCell hand-off.
+    import sidekick.app as app
+    js = app.STREAM_JS
+    assert "window.__escToCell = cid" in js                 # recorded on Esc-save
+    assert "window.__selectCell(window.__escToCell, true)" in js   # re-scrolled after swap
+    assert "window.__escToCell = null" in js                # one-shot, cleared after use
+
+
 def test_stream_js_retries_failed_mermaid_render():
     # Mermaid marks a node data-processed before rendering; failed attempts must
     # clear that marker or later htmx rescans will never retry the diagram.
