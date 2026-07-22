@@ -26,3 +26,14 @@ SolveIt Sidekick.app/
 # save-backups out of it; API keys live in ~/.config/solveit-sidekick/secrets.json.
 data/secrets.json
 data/*.bak
+
+# private/local dialog overlays (configured by data/dialogs-<target>.private)
+data/dialogs-*.private
+data/dialogs-*.local.json
+data/dialogs-*.local.json.bak
+data/dialogs-*.local.json.tmp
+
+# private Shield/AP paper cache
+data/papers/99503bdf2461b921.md
+data/papers/assets/99503bdf2461b921/
+data/papers/uploads/dbac2df646b8613c.pdf

@@ -131,3 +131,65 @@ def test_drop_evicts_session():
     assert "dlg/drop" not in cx.CODEX_SESSIONS
     cc.drop("dlg/never-ran")                              # absent -> best-effort no-op
     cx.drop("dlg/never-ran")
+
+
+# ---- selective sync: per-dialog local-only toggle ---------------------------
+def test_set_private_moves_dialog_between_stores(tmp_path, monkeypatch):
+    """set_private(dialog) moves a dialog out of the committed store and into the
+    gitignored .local.json overlay (and back), and is_private tracks state."""
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    from sidekick.client import (_InMemoryBackend, _read_private_dialogs,
+                                 _store_path, _local_store_path)
+
+    b = _InMemoryBackend(store_key="kernel")
+    b.add("keep", "public cell", "note")
+    b.add("secret", "local-only cell", "note")
+
+    # Both public initially.
+    assert not b.is_private("secret")
+    public = json.loads(_store_path("kernel").read_text())
+    assert {"keep", "secret"} <= set(public)
+    assert not _local_store_path("kernel").exists()
+
+    # Flag "secret" local-only: it leaves the committed store for the overlay.
+    assert b.set_private("secret") is True
+    assert b.is_private("secret")
+    assert _read_private_dialogs("kernel") == {"secret"}
+    public = json.loads(_store_path("kernel").read_text())
+    assert "secret" not in public and "keep" in public
+    local = json.loads(_local_store_path("kernel").read_text())
+    assert "secret" in local
+
+    # A fresh backend still loads both (public + overlay merged).
+    assert set(_InMemoryBackend(store_key="kernel").list_dialogs()) == {"keep", "secret"}
+
+    # Toggle back: "secret" returns to the committed store, overlay is emptied.
+    assert b.set_private("secret") is False
+    assert not b.is_private("secret")
+    assert _read_private_dialogs("kernel") == set()
+    assert "secret" in json.loads(_store_path("kernel").read_text())
+    assert not _local_store_path("kernel").exists()
+
+
+def test_private_flag_follows_rename_and_delete(tmp_path, monkeypatch):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    from sidekick.client import _InMemoryBackend, _read_private_dialogs
+
+    b = _InMemoryBackend(store_key="kernel")
+    b.add("draft", "x", "note")
+    b.set_private("draft")
+
+    b.rename("draft", "draft/final")                      # rename carries the flag
+    assert _read_private_dialogs("kernel") == {"draft/final"}
+    assert b.is_private("draft/final")
+
+    b.delete_dialog("draft/final")                        # delete cleans it up
+    assert _read_private_dialogs("kernel") == set()
+
+
+def test_set_private_noops_without_store():
+    from sidekick.client import _InMemoryBackend
+
+    b = _InMemoryBackend()                                # ephemeral, no store_key
+    assert b.set_private("whatever") is False
+    assert b.is_private("whatever") is False

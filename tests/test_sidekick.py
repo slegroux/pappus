@@ -1795,6 +1795,24 @@ def test_persistence_preserves_rich_and_flags(monkeypatch, tmp_path):
     assert m.muted is True and m.output == "ok"
 
 
+def test_private_dialogs_save_to_gitignored_local_overlay(monkeypatch, tmp_path):
+    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
+    from sidekick.client import _load_dialogs, _save_dialogs, Msg
+
+    (tmp_path / "dialogs-kernel.private").write_text("paper/private-ap\n")
+    _save_dialogs("kernel", {
+        "paper/private-ap": [Msg("m1", "note", "private")],
+        "paper/public": [Msg("m2", "note", "public")],
+    })
+
+    assert "paper/public" in (tmp_path / "dialogs-kernel.json").read_text()
+    assert "paper/private-ap" not in (tmp_path / "dialogs-kernel.json").read_text()
+    assert "paper/private-ap" in (tmp_path / "dialogs-kernel.local.json").read_text()
+    loaded = _load_dialogs("kernel")
+    assert loaded["paper/private-ap"][0].content == "private"
+    assert loaded["paper/public"][0].content == "public"
+
+
 # ---- kernel server auth -----------------------------------------------------
 def test_kernel_auth_open_when_no_token():
     import server.kernel_server as ks

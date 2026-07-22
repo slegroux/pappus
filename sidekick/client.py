@@ -51,45 +51,121 @@ class Msg:
 
 
 # ---- on-disk persistence for the in-memory backends -------------------------
+def _data_dir() -> Path:
+    base = os.environ.get("SIDEKICK_DATA")
+    return Path(base).expanduser() if base else Path.home() / ".config" / "solveit-sidekick"
+
+
 # Dialogs are saved per store key (the target name) as one JSON file, so your
 # notebook survives a restart — and survives the backend being rebuilt when you
 # save Settings or switch targets. Override the directory with SIDEKICK_DATA.
+#
+# Private dialogs can be kept out of the main store by listing their dialog names
+# in dialogs-<key>.private. Those cells are saved in dialogs-<key>.local.json;
+# both files are meant to be gitignored for machine/private notes.
 def _store_path(key: str) -> Path:
-    base = os.environ.get("SIDEKICK_DATA")
-    base = Path(base).expanduser() if base else Path.home() / ".config" / "solveit-sidekick"
-    return base / f"dialogs-{key.replace('/', '_')}.json"
+    return _data_dir() / f"dialogs-{key.replace('/', '_')}.json"
 
 
-def _load_dialogs(key: str) -> dict[str, list[Msg]]:
+def _local_store_path(key: str) -> Path:
     p = _store_path(key)
+    return p.with_name(f"{p.stem}.local.json")
+
+
+def _private_dialogs_path(key: str) -> Path:
+    p = _store_path(key)
+    return p.with_name(f"{p.stem}.private")
+
+
+def _read_raw_dialogs(p: Path) -> dict:
     if not p.exists():
         return {}
     try:
-        raw = json.loads(p.read_text())
+        return json.loads(p.read_text())
     except (json.JSONDecodeError, OSError):
+        return {}
+
+
+def _read_private_dialogs(key: str) -> set[str]:
+    p = _private_dialogs_path(key)
+    try:
+        return {
+            line.strip() for line in p.read_text().splitlines()
+            if line.strip() and not line.lstrip().startswith("#")
+        }
+    except OSError:
+        return set()
+
+
+# Header preserved atop the machine-managed .private file so a human who opens it
+# understands what the (otherwise bare) list of names does.
+_PRIVATE_HEADER = (
+    "# Dialogs listed here are kept out of the committed store (dialogs-<key>.json)\n"
+    "# and saved to dialogs-<key>.local.json instead — both gitignored, so these\n"
+    "# stay on this machine and never sync. Toggle via the dialog's ⋯ menu.\n")
+
+
+def _write_private_dialogs(key: str, names: set[str]) -> None:
+    """Persist the set of local-only dialog names. Removing the last name drops the
+    file entirely so an empty list leaves no trace."""
+    p = _private_dialogs_path(key)
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        if not names:
+            p.unlink(missing_ok=True)
+            return
+        body = _PRIVATE_HEADER + "".join(f"{n}\n" for n in sorted(names))
+        tmp = p.with_suffix(f"{p.suffix}.tmp")
+        tmp.write_text(body)
+        tmp.replace(p)                 # atomic
+    except OSError:
+        pass                           # never let a disk hiccup break the toggle
+
+
+def _load_dialogs(key: str) -> dict[str, list[Msg]]:
+    raw = _read_raw_dialogs(_store_path(key))
+    raw.update(_read_raw_dialogs(_local_store_path(key)))  # local/private wins
+    if not raw:
         return {}
     fields = Msg.__dataclass_fields__
     return {name: [Msg(**{k: v for k, v in m.items() if k in fields}) for m in msgs]
             for name, msgs in raw.items()}
 
 
+def _write_dialog_store(p: Path, raw: dict) -> None:
+    # Poor-man's history guard: snapshot the prior store to a single rolling
+    # <name>.bak before we overwrite it, so a destructive edit is recoverable.
+    # Best-effort — never let a failed backup block the actual save.
+    if p.exists():
+        try:
+            import shutil
+            shutil.copy2(p, p.with_suffix(f"{p.suffix}.bak"))
+        except OSError:
+            pass
+    tmp = p.with_suffix(f"{p.suffix}.tmp")
+    tmp.write_text(json.dumps(raw, indent=2))
+    tmp.replace(p)                 # atomic write
+
+
 def _save_dialogs(key: str, dialogs: dict[str, list[Msg]]) -> None:
     p = _store_path(key)
+    local = _local_store_path(key)
     try:
         p.parent.mkdir(parents=True, exist_ok=True)
-        raw = {name: [asdict(m) for m in msgs] for name, msgs in dialogs.items()}
-        # Poor-man's history guard: snapshot the prior store to a single rolling
-        # <name>.bak before we overwrite it, so a destructive edit is recoverable.
-        # Best-effort — never let a failed backup block the actual save.
-        if p.exists():
-            try:
-                import shutil
-                shutil.copy2(p, p.with_suffix(".json.bak"))
-            except OSError:
-                pass
-        tmp = p.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(raw, indent=2))
-        tmp.replace(p)                 # atomic write
+        private_names = _read_private_dialogs(key)
+        public = {}
+        private = {}
+        for name, msgs in dialogs.items():
+            raw_msgs = [asdict(m) for m in msgs]
+            if name in private_names:
+                private[name] = raw_msgs
+            else:
+                public[name] = raw_msgs
+        _write_dialog_store(p, public)
+        if private:
+            _write_dialog_store(local, private)
+        elif local.exists():
+            local.unlink()
     except OSError:
         pass                           # never let a disk hiccup break the app
 
@@ -341,15 +417,55 @@ class _InMemoryBackend:
 
     def rename(self, old: str, new: str) -> None:
         _rename_in(self._dialogs, old, new)
+        # Carry the local-only flag across a rename — otherwise a renamed private
+        # dialog silently becomes public and lands in the committed store.
+        key = getattr(self, "_store_key", None)
+        new = (new or "").strip()
+        if key and new and new != old:
+            names = _read_private_dialogs(key)
+            if old in names:
+                names.discard(old)
+                names.add(new)
+                _write_private_dialogs(key, names)
         self._save()
 
     def delete_dialog(self, dialog: str) -> bool:
         """Remove a whole dialog (and its cells). Returns whether it existed."""
         if dialog in self._dialogs:
             del self._dialogs[dialog]
+            key = getattr(self, "_store_key", None)      # drop any stale private entry
+            if key:
+                names = _read_private_dialogs(key)
+                if dialog in names:
+                    names.discard(dialog)
+                    _write_private_dialogs(key, names)
             self._save()
             return True
         return False
+
+    def is_private(self, dialog: str) -> bool:
+        """Whether `dialog` is kept local-only (out of the committed/synced store)."""
+        key = getattr(self, "_store_key", None)
+        return bool(key) and dialog in _read_private_dialogs(key)
+
+    def set_private(self, dialog: str, private: bool | None = None) -> bool:
+        """Toggle (or set) whether `dialog` stays on this machine. Updates the
+        .private list, then re-saves so the dialog moves between the committed store
+        and the local overlay. Returns the resulting local-only state.
+
+        No-ops (returns False) on ephemeral backends with no on-disk store."""
+        key = getattr(self, "_store_key", None)
+        if not key:
+            return False
+        names = _read_private_dialogs(key)
+        new = (dialog not in names) if private is None else bool(private)
+        if new:
+            names.add(dialog)
+        else:
+            names.discard(dialog)
+        _write_private_dialogs(key, names)
+        self._save()                  # re-split public/local per the updated list
+        return new
 
     def reorder(self, dialog: str, ordered_ids: list[str]) -> None:
         """Reorder a dialog's cells to match `ordered_ids` (from a drag). Any id

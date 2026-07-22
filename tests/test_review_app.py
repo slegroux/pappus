@@ -124,3 +124,20 @@ def test_lan_bind_refused(monkeypatch):
     monkeypatch.setenv("SIDEKICK_APP_TOKEN", "anything")
     with pytest.raises(SystemExit):
         cli.cmd_serve(None)
+
+
+# ---- convert-in-place opens the cell inline in edit mode (not the composer) --
+def test_cell_type_convert_opens_edit_mode():
+    """`i` (convert to Ask AI) must open the converted cell in edit mode right
+    there — like insert — so `Esc i` lands the cursor in the cell inline instead
+    of leaving it read-only and drifting focus down to the bottom composer."""
+    app, client = _client()
+    m = app.STATE["backend"].add("guard/test", "a note", "note")
+    r = client.post("/cell/type", data={"id": m.id, "msg_type": "prompt"})
+    assert r.status_code == 200
+    html = r.text
+    assert app.STATE["backend"].messages("guard/test")[-1].msg_type == "prompt"
+    assert f"ta-{m.id}" in html                       # inline editor textarea present
+    assert ">Ask<" in html and "Cancel" in html       # edit-mode buttons, not read-only
+    assert f"getElementById('cell-{m.id}')" in html   # scrolls the cell into view
+    assert "block:'nearest'" in html                  # minimal scroll, no jump to composer

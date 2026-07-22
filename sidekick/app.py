@@ -491,16 +491,35 @@ def _dialog_tree(names):
 
 
 def _dialog_leaf(label, full, active):
-    """A dialog row: the open link + a ⋯ menu (currently just Delete)."""
+    """A dialog row: the open link + a ⋯ menu (Sync-toggle, Duplicate, Delete)."""
+    backend = STATE["backend"]
+    private = bool(getattr(backend, "is_private", lambda _d: False)(full))
+    # Only meaningful when the store is on disk (has an is_private that can be True/
+    # False and a store to move between); hidden for ephemeral/live backends.
+    sync_item = None
+    if hasattr(backend, "set_private") and getattr(backend, "_store_key", None):
+        priv_label = "☁  Sync this dialog" if private else "🔒  Keep local only"
+        priv_title = ("Currently local-only — click to include it in the committed/"
+                      "synced store" if private
+                      else "Currently synced — click to keep it on this machine only "
+                      "(out of git)")
+        sync_item = Form(Input(type="hidden", name="dialog", value=full),
+                         Button(priv_label, type="submit", cls="conv-priv",
+                                title=priv_title),
+                         method="post", action="/dialog/private", style="margin:0")
     return Div(
         A(label, href=f"/open?dialog={quote(full)}",
           cls=f"conv{' active' if full == active else ''}"),
+        Span("🔒", cls="conv-priv-dot", title="Local only — not synced") if private else None,
         Details(
             Summary("⋯", cls="conv-dots", title="Dialog actions"),
-            Div(Form(Input(type="hidden", name="dialog", value=full),
+            Div(sync_item,
+                Form(Input(type="hidden", name="dialog", value=full),
                      Button("⧉  Duplicate", type="submit", cls="conv-dup",
                             title="Copy all cells into a new '<name> copy' dialog"),
                      method="post", action="/dialog/duplicate", style="margin:0"),
+                A("⬇  Export .ipynb", href=f"/dialog/export/ipynb?dialog={quote(full)}",
+                  cls="conv-dup", title="Download this dialog as a Jupyter notebook"),
                 Button("🗑  Delete", type="button", cls="conv-del", **{"data-dialog": full}),
                 cls="conv-menu"),
             cls="conv-actions"),
@@ -2536,6 +2555,16 @@ def dialog_delete(dialog: str):
     return Page()
 
 
+@rt("/dialog/private", methods=["post"])
+def dialog_private(dialog: str):
+    """Toggle whether a dialog stays local-only (out of the committed/synced store).
+    Moves its cells between dialogs-<key>.json and the gitignored .local.json."""
+    backend = STATE["backend"]
+    if hasattr(backend, "set_private"):
+        backend.set_private(dialog)
+    return Page()
+
+
 @rt("/dialog/duplicate", methods=["post"])
 def dialog_duplicate(dialog: str):
     """Copy an entire dialog's cells into a fresh '<name> copy' dialog, then open
@@ -2941,10 +2970,18 @@ def cell_delete(id: str):
 
 @rt("/cell/type", methods=["post"])
 def cell_type(id: str, msg_type: str = "code"):
-    """Convert a cell to another type in place (y=code, m=note, i=prompt)."""
+    """Convert a cell to another type in place (y=code, m=note, i=prompt), then
+    open it in edit mode right there. Without this, a keyboard convert (`Esc i` to
+    turn a just-inserted note into an Ask-AI cell) left the cell read-only, dropped
+    focus out of the stream, and drifted the view down to the composer. Mirror
+    `/cell/insert`: land the cursor in the converted cell, in view, inline."""
     backend = STATE["backend"]
     if hasattr(backend, "set_type"):
-        backend.set_type(cur("dialog"), id, msg_type)
+        m = backend.set_type(cur("dialog"), id, msg_type)
+        if m is not None:
+            set_cur("editing", m.id)
+            set_cur("focus_start", m.id)     # cursor at the start; 'nearest' scroll (no jump)
+            set_cur("scroll_to", m.id)
     return Stream()
 
 
@@ -3213,6 +3250,15 @@ def export_md():
     msgs = STATE["backend"].messages(cur("dialog"))
     fname = cur("dialog").replace("/", "-") + ".md"
     return _download(to_markdown(msgs), fname, "text/markdown; charset=utf-8")
+
+
+@rt("/dialog/export/ipynb")
+def dialog_export_ipynb(dialog: str):
+    """Export any named dialog to a notebook without opening it first (the sidebar
+    ⋯ menu). Same serializer as /export/ipynb, but keyed by `dialog`."""
+    msgs = STATE["backend"].messages(dialog)
+    fname = dialog.replace("/", "-") + ".ipynb"
+    return _download(json.dumps(to_ipynb(msgs), indent=1), fname, "application/x-ipynb+json")
 
 
 @rt("/publish/blog")
