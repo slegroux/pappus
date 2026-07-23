@@ -1373,10 +1373,18 @@ STREAM_JS = """
     if(el.__streaming) return; el.__streaming = true;
     var es = new EventSource(el.getAttribute('data-stream-url'));
     es.addEventListener('msg', function(e){
+      var s = el.closest('.stream');
+      // Follow the stream ONLY when the viewport is already at the bottom (a
+      // composer send / last-cell ask, where the answer really is the newest
+      // thing). For a re-ask in the middle of the notebook, pinning to
+      // scrollHeight would yank the viewport all the way down past the answer —
+      // the "incomprehensible scroll down" — so leave the scroll position alone.
+      // Measured BEFORE innerHTML grows the container.
+      var stick = s && (s.scrollHeight - s.scrollTop - s.clientHeight) < 80;
       el.innerHTML = e.data;
       el.classList.add('streaming');                   // blinking caret while tokens arrive
       renderMath(el); addCopyButtons(el);              // typeset math + copy buttons as it streams
-      var s = el.closest('.stream'); if(s) s.scrollTop = s.scrollHeight;
+      if(stick) s.scrollTop = s.scrollHeight;
     });
     es.addEventListener('cost', function(e){
       // Turn finished: refresh the foot-of-stream meter's running cost in place.
@@ -1403,8 +1411,10 @@ STREAM_JS = """
     if(el.__execing) return; el.__execing = true;
     var es = new EventSource(el.getAttribute('data-exec-url'));
     es.addEventListener('msg', function(e){
+      var s = el.closest('.stream');                   // stick to bottom only if already there
+      var stick = s && (s.scrollHeight - s.scrollTop - s.clientHeight) < 80;
       el.innerHTML = e.data;                           // cumulative output snapshot
-      var s = el.closest('.stream'); if(s) s.scrollTop = s.scrollHeight;
+      if(stick) s.scrollTop = s.scrollHeight;
     });
     es.addEventListener('done', function(e){
       es.close(); el.removeAttribute('data-exec-url'); el.__execing = false;
@@ -1480,6 +1490,23 @@ STREAM_JS = """
 
   if(window.__sidekickCells) return;                            // bind document listeners once
   window.__sidekickCells = true;
+  // Highlighting text is for copy/paste — it must NOT open the editor. A drag to
+  // select ends with a click, which htmx's click-to-edit (.clickedit hx-get)
+  // would fire, swapping in the editor and discarding the selection. Guard it in
+  // the CAPTURE phase (before the element's own htmx listener) and cancel the
+  // click when a non-empty text selection lives inside the very cell being
+  // clicked. A plain click collapses the selection on mousedown, so it passes
+  // through and still opens the editor; a stray selection in another cell doesn't
+  // block editing this one (anchorNode must be within the clicked view).
+  document.addEventListener('click', function(e){
+    var ce = e.target.closest && e.target.closest('.clickedit');
+    if(!ce) return;
+    var sel = window.getSelection && window.getSelection();
+    if(sel && !sel.isCollapsed && sel.toString() && ce.contains(sel.anchorNode)){
+      e.preventDefault();
+      e.stopImmediatePropagation();     // keep htmx (and the row-select click) from firing
+    }
+  }, true);
   // Remember the notebook's scroll position right before htmx replaces #stream,
   // so the fresh render (above) can restore it instead of jumping to the top.
   document.addEventListener('htmx:beforeSwap', function(){
@@ -1490,11 +1517,15 @@ STREAM_JS = """
   // (The inline reapply runs too early on script-bearing swaps, so the class
   // gets dropped; afterSettle reliably lands after the new DOM is in place.)
   document.addEventListener('htmx:afterSettle', function(){
-    if(window.__escToCell && window.__selectCell){
-      // Esc out of an editor: keep the escaped cell in view (scroll:true) instead
-      // of letting the post-swap scroll settle at the bottom / composer.
-      window.__selectCell(window.__escToCell, true);
-      window.__escToCell = null;
+    // __escToCell (Esc out of an editor) and __viewCell (e.g. the neighbor a `dd`
+    // delete lands on) both mean "keep this cell in view after the swap" — select
+    // it AND scroll it into view (scroll:true → block:'nearest', so no jump when
+    // it's already visible), instead of letting the raw scroll-restore settle the
+    // viewport somewhere else (the bottom / composer, or drifting on a delete).
+    var view = window.__escToCell || window.__viewCell;
+    if(view && window.__selectCell){
+      window.__selectCell(view, true);
+      window.__escToCell = null; window.__viewCell = null;
     } else if(window.__selCell && window.__selectCell){
       window.__selectCell(window.__selCell, false);
     }
@@ -1607,7 +1638,10 @@ STREAM_JS = """
       if(e.shiftKey || e.metaKey || e.ctrlKey){    // Jupyter: run the cell, don't edit it
         var rb = row && row.querySelector('.cell-btn.run');
         if(rb) rb.click();                         // code/prompt run; a note is already rendered
-        if(e.shiftKey && !e.metaKey && !e.ctrlKey) // Shift+Enter also advances to the next cell
+        // Shift+Enter advances to the next cell (Jupyter) — but a prompt streams
+        // its answer in below, so stay on it and watch instead of jumping to the
+        // next section. Only code/note cells advance.
+        if(e.shiftKey && !e.metaKey && !e.ctrlKey && row && !row.classList.contains('prompt'))
           window.__selectCell(ids[Math.min(ids.length - 1, idx + 1)], true);
         return;
       }
@@ -1632,7 +1666,11 @@ STREAM_JS = """
         window.__lastD = 0;
         if(idx < 0 || !window.htmx) return;
         e.preventDefault();
-        window.__selCell = ids[idx + 1] || ids[idx - 1] || null;   // land on a neighbor
+        // Land on the cell directly following the deleted one (or the previous one
+        // if it was last) and bring it into view with minimal scroll — no drifting
+        // down to the composer, focus stays right where the deleted cell was.
+        window.__selCell = ids[idx + 1] || ids[idx - 1] || null;
+        window.__viewCell = window.__selCell;
         htmx.ajax('POST', '/cell/delete', {target: '#stream', swap: 'outerHTML',
           values: {id: ids[idx]}});
       } else { window.__lastD = now; }
@@ -1723,15 +1761,16 @@ def Stream():
         # both a just-added cell at the bottom (composer /send) and a re-run cell in
         # the middle (re-asking a prompt). rAF so it runs after layout settles.
         #
-        # A freshly inserted/edited cell (scroll_to == focus_start) opens in edit
-        # mode with the cursor at the beginning, so align to keep that beginning in
-        # view with the *least* scroll ('nearest' → no jump if it's already visible)
-        # rather than 'center', which yanks the viewport down to mid-screen and
-        # buries the top of the cell the user just started typing in.
-        block = "nearest" if scroll_to == focus_start else "center"
-        extra = (Script(f"requestAnimationFrame(function(){{var c="
+        # Always 'nearest' — the LEAST scroll that makes the cell visible: no
+        # movement at all when it's already on screen (the common case for a
+        # re-run), and only a minimal nudge otherwise. Never 'center': in a long
+        # notebook centering yanks a top cell halfway down for no reason, and can't
+        # center a bottom cell so it scrolls unpredictably. The streaming answer
+        # follows tokens only when already at the bottom (see STREAM_JS), so a
+        # mid-notebook re-ask stays exactly where the user left it.
+        extra = (Script("requestAnimationFrame(function(){var c="
                         f"document.getElementById('cell-{scroll_to}');"
-                        f"if(c)c.scrollIntoView({{block:'{block}'}});}});"),)
+                        "if(c)c.scrollIntoView({block:'nearest'});});"),)
     if flash:
         # A self-removing banner: fades after a couple seconds so a copy lands with
         # visible feedback even though the current dialog's cells don't change.

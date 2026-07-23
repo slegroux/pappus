@@ -3116,8 +3116,73 @@ def test_stream_js_esc_keeps_escaped_cell_in_view():
     import sidekick.app as app
     js = app.STREAM_JS
     assert "window.__escToCell = cid" in js                 # recorded on Esc-save
-    assert "window.__selectCell(window.__escToCell, true)" in js   # re-scrolled after swap
+    assert "window.__escToCell || window.__viewCell" in js  # view target derived from it
+    assert "window.__selectCell(view, true)" in js          # re-scrolled after swap
     assert "window.__escToCell = null" in js                # one-shot, cleared after use
+
+
+def test_stream_js_delete_lands_on_following_cell_in_view():
+    # `dd` deletes the selected cell; focus must land on the cell directly
+    # following it (or the previous one if it was last) and that cell must be
+    # scrolled into view on afterSettle — no drifting down to the composer.
+    import sidekick.app as app
+    js = app.STREAM_JS
+    assert "window.__selCell = ids[idx + 1] || ids[idx - 1] || null" in js  # following cell
+    assert "window.__viewCell = window.__selCell" in js     # request it into view
+    assert "window.__viewCell = null" in js                 # one-shot, cleared after use
+
+
+def test_scroll_to_uses_nearest_never_center():
+    # scroll_to (bring a re-run / just-added cell into view) must align with the
+    # least scroll — 'nearest', which doesn't move an already-visible cell — never
+    # 'center', which in a long notebook yanks a top cell halfway down the page.
+    import sidekick.app as app
+    from fasthtml.common import to_xml
+    app.STATE["dialog"] = "scroll/near"
+    bk = app.STATE["backend"]
+    bk.messages("scroll/near")
+    m = bk.add("scroll/near", "a note", "note")
+    app.set_cur("scroll_to", m.id)                 # simulate a re-run / send target
+    html = to_xml(app.Stream())
+    assert "block:'nearest'" in html
+    assert "block:'center'" not in html
+
+
+def test_stream_js_selection_does_not_open_editor():
+    # Highlighting text in a read-only cell view is for copy/paste and must NOT
+    # trigger click-to-edit. A capture-phase click guard cancels the click when a
+    # non-empty selection lives inside the clicked .clickedit view; a plain click
+    # (collapsed selection) still opens the editor.
+    import sidekick.app as app
+    js = app.STREAM_JS
+    assert "closest('.clickedit')" in js
+    assert "!sel.isCollapsed" in js                 # only a real (non-empty) selection
+    assert "ce.contains(sel.anchorNode)" in js      # selection must be inside THIS view
+    assert "stopImmediatePropagation()" in js       # keep htmx's click-to-edit from firing
+    # bound in the capture phase so it beats the element's own htmx listener
+    assert "}, true);" in js
+
+
+def test_stream_js_answer_stream_does_not_yank_to_bottom():
+    # A streaming AI answer (and code output) must NOT force the notebook to the
+    # bottom on every token — that yanked the viewport down past a mid-notebook
+    # re-ask. It should stick to the bottom ONLY when already there (composer send
+    # / last cell). The unconditional scrollHeight pin must be gone from both the
+    # answer and the code-exec msg handlers.
+    import sidekick.app as app
+    js = app.STREAM_JS
+    assert "if(s) s.scrollTop = s.scrollHeight;" not in js   # old unconditional yank removed
+    # gated on an already-at-bottom check, applied in both stream handlers
+    assert "s.scrollHeight - s.scrollTop - s.clientHeight" in js
+    assert js.count("if(stick) s.scrollTop = s.scrollHeight;") == 2
+
+
+def test_stream_js_shift_enter_does_not_advance_past_a_prompt():
+    # Shift+Enter runs + advances to the next cell (Jupyter) for code/note, but a
+    # prompt streams its answer in below — advancing would scroll the viewport off
+    # to the next section instead of the answer. Prompts must stay put.
+    import sidekick.app as app
+    assert "!row.classList.contains('prompt')" in app.STREAM_JS
 
 
 def test_stream_js_retries_failed_mermaid_render():
