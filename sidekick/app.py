@@ -12,6 +12,7 @@ from __future__ import annotations
 import contextvars
 import hmac
 import html
+import ipaddress
 import json
 import os
 import re
@@ -2318,11 +2319,42 @@ app.routes[:] = [r for r in app.routes if getattr(r, "path", "") != "/{fname:pat
 # malicious local web page driving the POST routes cross-origin; they are NOT the
 # authentication (the Host header is client-controlled and must never be trusted
 # for that — the reason this gate exists).
-_ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "testserver"})
+# Extra Host values accepted for the defense-in-depth Host check, e.g. a Tailscale
+# MagicDNS name when the UI is fronted by `tailscale serve` (see SIDEKICK_TRUST_TAILNET
+# below for why the peer gate also has to be widened). Comma-separated.
+_EXTRA_ALLOWED_HOSTS = frozenset(
+    h.strip().lower() for h in os.environ.get("SIDEKICK_ALLOWED_HOSTS", "").split(",") if h.strip()
+)
+_ALLOWED_HOSTS = frozenset({"127.0.0.1", "localhost", "::1", "testserver"}) | _EXTRA_ALLOWED_HOSTS
 # Real peer addresses that count as loopback. "testclient" is what Starlette's
 # in-process TestClient reports; no network peer can present it (the OS sets the
 # source address), so allowlisting it is safe and keeps the test suite working.
 _LOOPBACK_PEERS = frozenset({"127.0.0.1", "::1", "testclient"})
+
+# Opt-in: also trust peers inside Tailscale's address ranges (CGNAT 100.64.0.0/10 and
+# the ULA 6 range fd7a:115c:a1e0::/48). Needed because on macOS `tailscale serve` runs
+# in userspace-networking mode and forwards each request to the loopback-bound app
+# WITH THE ORIGINATING TAILNET IP as the peer (not 127.0.0.1) — so the primary peer
+# gate would otherwise 403 every tailnet request. Enabling this extends "allowed to
+# drive the code-executing app" from loopback-only to any node on your tailnet, so it
+# is OFF by default; Tailscale ACLs then govern who is on the tailnet. The app still
+# binds to 127.0.0.1, so a tailnet peer can only ever arrive via `tailscale serve`.
+_TRUST_TAILNET = os.environ.get("SIDEKICK_TRUST_TAILNET", "").strip().lower() in ("1", "true", "yes", "on")
+_TAILNET_NETS = (ipaddress.ip_network("100.64.0.0/10"), ipaddress.ip_network("fd7a:115c:a1e0::/48"))
+
+
+def _peer_ok(peer: str | None) -> bool:
+    """True if this TCP peer may drive the app: always loopback; tailnet ranges too
+    when SIDEKICK_TRUST_TAILNET is set (for `tailscale serve` on macOS)."""
+    if peer in _LOOPBACK_PEERS:
+        return True
+    if not _TRUST_TAILNET or not peer:
+        return False
+    try:
+        addr = ipaddress.ip_address(peer)
+    except ValueError:
+        return False
+    return any(addr in net for net in _TAILNET_NETS)
 
 
 def _host_only(raw: str) -> str:
@@ -2349,7 +2381,7 @@ class _LocalGuard:
         # PRIMARY auth: the unforgeable TCP peer address. Fail closed if unknown.
         client = scope.get("client")
         peer = client[0] if client else None
-        if peer not in _LOOPBACK_PEERS:
+        if not _peer_ok(peer):
             await self._forbid(scope, receive, send, "non-loopback peer")
             return
         headers = {k.decode("latin-1").lower(): v.decode("latin-1")

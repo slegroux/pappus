@@ -25,6 +25,20 @@ run_extras := "--extra kernel --extra paper"
 # outside (~/.config/solveit-sidekick/secrets.json, see .gitignore).
 data_dir := justfile_directory() / "data"
 
+# This machine's own Tailscale MagicDNS name (empty when off-tailnet or Tailscale
+# isn't installed). Passed to the UI as SIDEKICK_ALLOWED_HOSTS so `tailscale serve`
+# can front the UI for other tailnet devices — the app still only accepts LOOPBACK
+# peers (see _LocalGuard in app.py), so this just lets the Host-header check pass.
+# Derived per-machine, never hardcoded (the justfile is shared across machines).
+tailnet_host := `tailscale status --json 2>/dev/null | python3 -c "import sys,json;print(json.load(sys.stdin).get('Self',{}).get('DNSName','').rstrip('.'))" 2>/dev/null || true`
+
+# On a tailnet machine, trust the tailnet so `tailscale serve` works: on macOS it
+# forwards each request to the loopback-bound UI carrying the ORIGINATING tailnet IP
+# as the peer, which the UI's primary peer gate would otherwise reject. Off-tailnet
+# this is "0" (loopback-only, unchanged). The UI still binds to 127.0.0.1, so the
+# only way a tailnet peer reaches it is through `tailscale serve`.
+trust_tailnet := if tailnet_host != "" { "1" } else { "0" }
+
 # Codex-via-Portkey: when PORTKEY_API_KEY is set, the kernel's "Codex" model is
 # routed through the Portkey gateway (Azure OpenAI behind it) instead of hitting
 # api.openai.com with the global OPENAI_API_KEY. Scoped to the kernel process
@@ -62,7 +76,7 @@ start reload="":
         for i in $(seq 1 120); do up {{kernel_port}} && break; sleep 0.5; done
     fi
     echo "▶ web UI → http://localhost:{{ui_port}}  (logs: $LOG/ui.log)"
-    nohup env $RELOAD_ENV SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run {{run_extras}} python -m sidekick.cli serve >"$LOG/ui.log" 2>&1 &
+    nohup env $RELOAD_ENV SIDEKICK_ALLOWED_HOSTS="{{tailnet_host}}" SIDEKICK_TRUST_TAILNET="{{trust_tailnet}}" SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run {{run_extras}} python -m sidekick.cli serve >"$LOG/ui.log" 2>&1 &
     for i in $(seq 1 60); do up {{ui_port}} && break; sleep 0.5; done
     if up {{ui_port}}; then
         echo "✓ running in the background → http://localhost:{{ui_port}}   (stop with: just stop)"
@@ -88,7 +102,7 @@ dev:
     done
     echo " ✓"
     echo "▶ web UI         → http://localhost:{{ui_port}}  (target: kernel)"
-    SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run {{run_extras}} python -m sidekick.cli serve
+    SIDEKICK_ALLOWED_HOSTS="{{tailnet_host}}" SIDEKICK_TRUST_TAILNET="{{trust_tailnet}}" SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run {{run_extras}} python -m sidekick.cli serve
 
 # Just the kernel server (e.g. to run it on its own / on the H100).
 kernel:
@@ -99,7 +113,7 @@ kernel:
 
 # Just the web UI (assumes the kernel server is already running).
 ui:
-    SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run {{run_extras}} python -m sidekick.cli serve
+    SIDEKICK_ALLOWED_HOSTS="{{tailnet_host}}" SIDEKICK_TRUST_TAILNET="{{trust_tailnet}}" SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run {{run_extras}} python -m sidekick.cli serve
 
 # Sync dialogs across machines: commit local dialog/paper changes, pull, push.
 # Run at session start (get the other machine's dialogs) and session end (share

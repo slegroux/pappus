@@ -126,6 +126,35 @@ def test_lan_bind_refused(monkeypatch):
         cli.cmd_serve(None)
 
 
+# ---- tailnet peer trust: `tailscale serve` on macOS forwards the tailnet IP -----
+def test_peer_gate_loopback_always_ok():
+    import sidekick.app as app
+    for p in ("127.0.0.1", "::1", "testclient"):
+        assert app._peer_ok(p)
+
+
+def test_peer_gate_rejects_non_loopback_by_default(monkeypatch):
+    import sidekick.app as app
+    monkeypatch.setattr(app, "_TRUST_TAILNET", False)
+    # Off by default: a tailnet IP is treated like any other remote peer → rejected.
+    assert not app._peer_ok("100.125.88.8")
+    assert not app._peer_ok("fd7a:115c:a1e0::1")
+
+
+def test_peer_gate_trusts_tailnet_when_enabled(monkeypatch):
+    import sidekick.app as app
+    monkeypatch.setattr(app, "_TRUST_TAILNET", True)
+    # Tailscale CGNAT (v4) and ULA (v6) ranges pass; loopback still passes …
+    assert app._peer_ok("100.125.88.8")
+    assert app._peer_ok("fd7a:115c:a1e0::1")
+    assert app._peer_ok("127.0.0.1")
+    # … but public, LAN, garbage and missing peers never do, even with trust on.
+    assert not app._peer_ok("8.8.8.8")
+    assert not app._peer_ok("192.168.1.50")
+    assert not app._peer_ok("not-an-ip")
+    assert not app._peer_ok(None)
+
+
 # ---- convert-in-place opens the cell inline in edit mode (not the composer) --
 def test_cell_type_convert_opens_edit_mode():
     """`i` (convert to Ask AI) must open the converted cell in edit mode right
