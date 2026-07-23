@@ -42,7 +42,7 @@ _CLI_CWD: str | None = None
 CODEX_SESSIONS: dict[str, dict] = {}
 _SESSION_VERSION = 1
 
-_ALLOWED_TOOLS = ["list_cells", "update_cell", "str_replace", "insert_cell"]
+_ALLOWED_TOOLS = ["list_cells", "read_cell", "update_cell", "str_replace", "insert_cell"]
 
 
 @dataclass(frozen=True)

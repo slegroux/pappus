@@ -160,8 +160,10 @@ def _wants_diagram(content: str) -> bool:
 # request — like SolveIt's dialoghelper, which acts only when you ask it to.
 _TOOLS_GUIDANCE = (
     "\n\nYou also have MCP tools to edit this notebook directly: list_cells, "
-    "update_cell, str_replace, and insert_cell. Use them ONLY when the user "
-    "explicitly asks you to change, fix, refactor, complete, or add a cell. Every "
+    "read_cell, update_cell, str_replace, and insert_cell. Use them ONLY when the "
+    "user explicitly asks you to change, fix, refactor, complete, or add a cell. "
+    "list_cells truncates very long cells; call read_cell for a single cell's full "
+    "source (e.g. before a str_replace on a long cell). Every "
     "cell above carries n=\"<number>\" (matching the number the user sees) and "
     "id=\"<id>\"; the edit tools target a cell by its id. So when the user says "
     "\"fix cell 3\" or names a function, find that cell's id from the context and "
@@ -205,7 +207,8 @@ def _wants_cell_edit(content: str) -> bool:
 # The MCP tool names Claude must be allowed to call non-interactively in `-p`
 # mode (server key "cells" + tool name → mcp__cells__<tool>).
 _ALLOWED_TOOLS = [f"mcp__cells__{t}"
-                  for t in ("list_cells", "update_cell", "str_replace", "insert_cell")]
+                  for t in ("list_cells", "read_cell", "update_cell",
+                            "str_replace", "insert_cell")]
 
 # Which tools the agent may/may not use is declarative — see sidekick.tools_config
 # (allow: web research etc.; deny: the executor's hands Write/Edit/Bash). The

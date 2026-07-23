@@ -2901,6 +2901,39 @@ def test_mcp_server_dispatches_tools(monkeypatch):
     assert calls[-1][1] == "/internal/cell/update"
 
 
+def test_mcp_list_truncates_but_read_cell_returns_full(monkeypatch):
+    # list_cells caps a long cell (bounding the overview payload) and the notice
+    # points at read_cell; read_cell returns that same cell's COMPLETE source.
+    import server.mcp_cells as mc
+    big = "X" * (mc._LIST_CELL_CAP + 500)
+    cells = [{"id": "_a", "type": "note", "content": "short"},
+             {"id": "_big", "type": "note", "content": big}]
+    monkeypatch.setattr(mc, "_request", lambda *a, **k: {"ok": True, "cells": cells})
+
+    listed = mc._call_tool("list_cells", {})
+    assert "…(truncated" in listed and "read_cell" in listed   # actionable notice
+    assert big not in listed                                   # long cell NOT dumped whole
+    assert "short" in listed                                   # short cell shown in full
+
+    full = mc._call_tool("read_cell", {"cell_id": "_big"})
+    assert big in full and "truncated" not in full             # complete, uncapped
+    assert "cell 2  id=_big" in full                           # keeps the 1-based number
+
+
+def test_mcp_read_cell_unknown_id_raises(monkeypatch):
+    import server.mcp_cells as mc
+    monkeypatch.setattr(mc, "_request", lambda *a, **k: {"ok": True, "cells": []})
+    with pytest.raises(RuntimeError):
+        mc._call_tool("read_cell", {"cell_id": "nope"})
+
+
+def test_mcp_read_cell_is_allowed_for_both_clis():
+    # The new tool must be in both CLIs' allow-lists or the model can't call it.
+    from sidekick import claude_cli, codex_cli
+    assert "mcp__cells__read_cell" in claude_cli._ALLOWED_TOOLS
+    assert "read_cell" in codex_cli._ALLOWED_TOOLS
+
+
 def test_mcp_server_tool_error_raises(monkeypatch):
     import server.mcp_cells as mc
     monkeypatch.setattr(mc, "_request", lambda *a: {"ok": False, "error": "no cell"})

@@ -38,9 +38,24 @@ TOOLS = [
         "description": (
             "List the notebook's cells in order with their id, type (code/note/"
             "prompt), and current source. Call this first to get the exact cell "
-            "id and text before editing."
+            "id and text before editing. Very long cells are truncated in this "
+            "overview — use read_cell to get one cell's complete source."
         ),
         "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+    },
+    {
+        "name": "read_cell",
+        "description": (
+            "Return ONE cell's complete, untruncated source. Use this when a cell "
+            "shows '…(truncated)' in list_cells and you need its full text — e.g. "
+            "before a str_replace on a long cell."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"cell_id": {"type": "string", "description": "id from list_cells"}},
+            "required": ["cell_id"],
+            "additionalProperties": False,
+        },
     },
     {
         "name": "update_cell",
@@ -107,23 +122,44 @@ def _request(method: str, path: str, params: dict) -> dict:
         return json.loads(r.read().decode())
 
 
+# Per-cell cap in the list_cells overview. list_cells dumps EVERY cell's source
+# in one payload, so an uncapped list would balloon the model's context (and cost)
+# on a long notebook. 4000 chars (~1k tokens) fits ordinary prose/code/JD cells
+# whole; genuinely long cells are truncated here but readable in full via
+# read_cell, so the overview stays bounded without ever losing access to content.
+_LIST_CELL_CAP = 4000
+
+
+def _cell_block(i: int, c: dict, cap: int | None = None) -> str:
+    """Render one cell as `cell N  id=…  type=…` + source, optionally capped."""
+    src = (c.get("content") or "").rstrip()
+    if cap is not None and len(src) > cap:
+        src = src[:cap] + f"\n…(truncated at {cap} chars — call read_cell with " \
+                          f"id={c.get('id')} for the full source)"
+    head = f"cell {i}  id={c.get('id')}  type={c.get('type')}"
+    return f"{head}\n{src}" if src else f"{head}\n(empty)"
+
+
 def _fmt_cells(cells: list) -> str:
     if not cells:
         return "(the notebook is empty)"
-    out = []
-    for i, c in enumerate(cells, 1):           # 1-based: matches the UI cell number
-        src = (c.get("content") or "").rstrip()
-        if len(src) > 1200:
-            src = src[:1200] + "\n…(truncated)"
-        head = f"cell {i}  id={c.get('id')}  type={c.get('type')}"
-        out.append(f"{head}\n{src}" if src else f"{head}\n(empty)")
-    return "\n\n".join(out)
+    # 1-based index matches the UI cell number.
+    return "\n\n".join(_cell_block(i, c, _LIST_CELL_CAP) for i, c in enumerate(cells, 1))
 
 
 def _call_tool(name: str, args: dict) -> str:
     if name == "list_cells":
         r = _request("GET", "/internal/cells", {})
         return _fmt_cells(r.get("cells", []))
+    if name == "read_cell":
+        # The list payload already carries full content (the app never truncates);
+        # only the overview does. Fetch it, return the requested cell uncapped.
+        r = _request("GET", "/internal/cells", {})
+        cid = args["cell_id"]
+        for i, c in enumerate(r.get("cells", []), 1):
+            if c.get("id") == cid:
+                return _cell_block(i, c)            # no cap -> full source
+        raise RuntimeError(f"no cell {cid}")
     if name == "update_cell":
         r = _request("POST", "/internal/cell/update",
                      {"id": args["cell_id"], "content": args.get("content", "")})
