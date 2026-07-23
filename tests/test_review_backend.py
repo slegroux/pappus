@@ -18,6 +18,23 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 
+def test_effective_default_model_falls_back_when_codex_missing():
+    """A Codex default stays configured, but resolves to Claude Opus high when the
+    `codex` binary isn't installed on this machine — so a fresh session never
+    starts on a model that can't run here. When codex IS present, keep the codex
+    default untouched."""
+    from unittest.mock import patch
+    from sidekick import targets
+
+    if not targets.default_model().startswith("codex-"):
+        import pytest
+        pytest.skip("configured default is not a codex model")
+    with patch("sidekick.codex_cli.codex_bin", return_value=None):
+        assert targets.effective_default_model() == "claude-opus-high"
+    with patch("sidekick.codex_cli.codex_bin", return_value="/bin/codex"):
+        assert targets.effective_default_model() == targets.default_model()
+
+
 # ---- W1: exec degrades when the kernel is down ------------------------------
 def test_exec_kernel_down_degrades():
     from sidekick.client import HttpKernelBackend

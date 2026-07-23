@@ -15,7 +15,7 @@ import uuid
 from dataclasses import asdict, dataclass, field, replace
 from pathlib import Path
 
-from .targets import Target, default_model
+from .targets import Target, effective_default_model
 
 
 def _dbg(msg):
@@ -30,9 +30,11 @@ def _dbg(msg):
 def _fallback_model() -> str:
     """The model to assume for a prompt cell that has none recorded. Follows the
     user's configured default (Codex CLI, out of the box) so a model-less cell
-    never silently routes to a paid provider API key."""
+    never silently routes to a paid provider API key — but resolves through
+    effective_default_model, so a machine without the codex binary falls back to
+    Claude Opus high instead of erroring."""
     try:
-        return default_model()
+        return effective_default_model()
     except Exception:  # noqa: BLE001 — no/unreadable config: keep the CLI default
         return "codex-gpt-5.5-high"
 
@@ -339,6 +341,16 @@ class _InMemoryBackend:
             m.content = content
             m.output = ""
             m.rich = []
+            self._save()
+        return m
+
+    def set_model(self, dialog: str, msg_id: str, model: str) -> Msg | None:
+        """Stamp a prompt cell's AI model. Used when a model-less cell adopts the
+        currently selected model at run time, so routing, the answer's byline, and
+        future re-runs all agree instead of silently falling back to the default."""
+        m = self._find(dialog, msg_id)
+        if m is not None and m.model != model:
+            m.model = model
             self._save()
         return m
 

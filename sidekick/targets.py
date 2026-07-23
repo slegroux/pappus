@@ -79,6 +79,30 @@ def default_model(path: str | os.PathLike | None = None) -> str:
     return cfg.get("default_model") or list_models(path)[0]["id"]
 
 
+# Where a Codex default falls back to when the `codex` binary is missing.
+_CODEX_MISSING_FALLBACK = "claude-opus-high"
+
+
+def effective_default_model(path: str | os.PathLike | None = None) -> str:
+    """The configured `default_model`, made resilient to a missing Codex CLI.
+
+    Codex stays the committed default (it works on machines that have it), but if
+    the default routes to the Codex CLI and the `codex` binary isn't installed on
+    THIS machine, fall back to Claude Opus high — so a fresh session lands on a
+    model that actually runs here instead of erroring on every prompt. The probe
+    is best-effort and only substitutes when the fallback is itself a known model."""
+    mid = default_model(path)
+    if isinstance(mid, str) and mid.startswith("codex-"):
+        try:
+            from .codex_cli import codex_bin
+            if codex_bin() is None and any(
+                    m["id"] == _CODEX_MISSING_FALLBACK for m in list_models(path)):
+                return _CODEX_MISSING_FALLBACK
+        except Exception:  # noqa: BLE001 — availability probe never blocks resolution
+            pass
+    return mid
+
+
 def get_target(name: str | None = None, path: str | os.PathLike | None = None) -> Target:
     cfg = load_config(path)
     targets = cfg.get("targets", {})

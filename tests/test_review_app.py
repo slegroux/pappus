@@ -141,3 +141,36 @@ def test_cell_type_convert_opens_edit_mode():
     assert ">Ask<" in html and "Cancel" in html       # edit-mode buttons, not read-only
     assert f"getElementById('cell-{m.id}')" in html   # scrolls the cell into view
     assert "block:'nearest'" in html                  # minimal scroll, no jump to composer
+
+
+def test_prompt_run_uses_selected_picker_model():
+    """An explicit run must use the model the AI-picker shows — the picker is
+    authoritative. That covers both a model-less cell (note→Ask-AI convert, older
+    dialog) AND a cell carrying a STALE model: e.g. one stamped `codex-…` from the
+    default before the user switched the picker to Opus. Only overriding on run
+    keeps 'the selector decides' true; filling a blank alone would freeze the cell
+    on the stale (possibly uninstalled) provider and keep erroring."""
+    app, client = _client()
+    app.STATE["model"] = "claude-opus-high"            # picker selection
+
+    def model_of(mid):
+        return [x for x in app.STATE["backend"].messages("guard/test") if x.id == mid][0].model
+
+    # model-less cell adopts the picker
+    m = app.STATE["backend"].add("guard/test", "explain DDPM vs DDIM", "prompt", model=None)
+    client.post("/cell/run", data={"id": m.id, "content": m.content})
+    assert model_of(m.id) == "claude-opus-high"
+
+    # a cell stamped with a stale/uninstalled model is overridden to the picker
+    m2 = app.STATE["backend"].add("guard/test", "q2", "prompt", model="codex-gpt-5.5-high")
+    client.post("/cell/run", data={"id": m2.id, "content": m2.content})
+    assert model_of(m2.id) == "claude-opus-high"
+
+
+def test_model_select_persists_without_send():
+    """Changing the picker must update server state on its own — a later re-run
+    reads STATE['model'], not the composer form."""
+    app, client = _client()
+    r = client.post("/model/select", data={"model": "claude-sonnet-xhigh"})
+    assert r.status_code == 200
+    assert app.STATE["model"] == "claude-sonnet-xhigh"

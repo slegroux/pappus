@@ -21,7 +21,8 @@ from urllib.parse import quote
 from fasthtml.common import *
 from starlette.datastructures import UploadFile
 
-from .targets import get_target, list_targets, list_models, default_model
+from .targets import (get_target, list_targets, list_models,
+                      effective_default_model)
 from .client import (connect, build_context, est_tokens, _InMemoryBackend, MockBackend,
                      HttpKernelBackend)
 from .claude_cli import (stream as stream_claude, call as call_claude,
@@ -234,7 +235,7 @@ STATE = {
     "backend": None,
     "warning": None,
     "dialog": "demo/welcome",
-    "model": default_model(),
+    "model": effective_default_model(),   # codex default, but Opus high if codex isn't installed
     "ai_mode": DEFAULT_MODE,   # AI persona for Ask AI: learning/concise/standard
     "msg_type": "prompt",
     "pending_stream": None,   # (dialog, msg_id) whose answer is being streamed live
@@ -404,6 +405,23 @@ def _can_stream(backend, model) -> bool:
     local_cli = model in (CLI_MODELS | CODEX_CLI_MODELS) \
         or (isinstance(model, str) and (model.startswith("codex-") or model.startswith("claude-")))
     return local_cli and isinstance(backend, _InMemoryBackend)
+
+
+def _apply_selected_model(backend, dialog, m) -> None:
+    """Make the AI-model picker authoritative for an explicit run: stamp the
+    currently selected model onto the prompt cell being run, overriding whatever
+    it recorded before.
+
+    A prompt cell carries the model that last answered it (or None). Filling only
+    a blank isn't enough — a cell stamped once (e.g. from the default model before
+    the user switched the picker) would freeze on that stale value, so selecting
+    Opus and re-running would still route to the old provider and error if its CLI
+    isn't installed. Overriding on every run means the visible picker always wins,
+    exactly as a composer-sent cell uses it. No-op on backends with no set_model
+    (the live SolveIt server picks the model itself)."""
+    if m is not None and m.msg_type == "prompt" and hasattr(backend, "set_model") \
+            and m.model != STATE["model"]:
+        backend.set_model(dialog, m.id, STATE["model"])
 
 
 def use_target(name: str):
@@ -725,7 +743,7 @@ def _model_label(mid: str | None, default: str | None = None) -> str:
         if default is not None:
             return default
         try:
-            mid = default_model()
+            mid = effective_default_model()
         except Exception:  # noqa: BLE001
             return "Codex · GPT-5.5 high"
     try:
@@ -1738,8 +1756,11 @@ def ModelSelect():
         Option(m["label"], value=m["id"], selected=(m["id"] == STATE["model"]))
         for m in list_models()
     ]
-    # The chosen model is submitted with the send form (name="model").
-    return Select(*opts, name="model", cls="msel", title="AI model for Ask AI")
+    # Submitted with the send form (name="model"); also persisted on change via
+    # hx_post so the picker is authoritative even without sending — a re-run of an
+    # existing cell reads STATE["model"], not the composer form.
+    return Select(*opts, name="model", cls="msel", title="AI model for Ask AI",
+                  hx_post="/model/select", hx_trigger="change", hx_swap="none")
 
 
 def ModeSelect():
@@ -2595,6 +2616,16 @@ def dialog_delete_bulk(names: str = "[]"):
     return Page()
 
 
+@rt("/model/select", methods=["post"])
+def model_select(model: str = None):
+    """Persist the AI-model picker's selection without sending. Keeps STATE the
+    single source of truth so re-running an existing cell (which doesn't submit the
+    composer form) honors the picker. Returns nothing (hx_swap="none")."""
+    if model:
+        STATE["model"] = model
+    return ""
+
+
 @rt("/send", methods=["post"])
 def send(content: str, msg_type: str = "prompt", model: str = None,
          ai_mode: str = None, htmx=None):
@@ -2661,6 +2692,7 @@ def cell_run(id: str, content: str = ""):
     if hasattr(backend, "update"):
         backend.update(cur("dialog"), id, content)
     m = _msg_by_id(backend, cur("dialog"), id)
+    _apply_selected_model(backend, cur("dialog"), m)    # picker is authoritative on run
     if m is not None and m.msg_type == "prompt" and _can_stream(backend, m.model):
         _set_pending_stream(cur("dialog"), id)          # re-ask, streamed live
         # The #stream swap resets the scroll container to the top, so bring the
@@ -3058,6 +3090,7 @@ def cell_exec(id: str):
     """Re-run a cell's stored source without editing (the rendered-view Run/Ask)."""
     backend = STATE["backend"]
     m = _msg_by_id(backend, cur("dialog"), id)
+    _apply_selected_model(backend, cur("dialog"), m)    # picker is authoritative on run
     if m is not None and m.msg_type == "prompt" and _can_stream(backend, m.model):
         m.output = ""                                     # clear stale answer to re-stream
         _set_pending_stream(cur("dialog"), id)          # re-ask, streamed live

@@ -299,17 +299,23 @@ def test_delete_removes_the_cell():
 
 def test_fallback_model_is_cli_not_api():
     # A model-less prompt must default to the configured default (Codex via the
-    # installed CLI), never silently to a paid provider API key.
+    # installed CLI), never silently to a paid provider API key. Pin codex as
+    # installed so the resilient fallback (Opus high when it's missing) doesn't
+    # make this depend on the test machine's PATH.
+    from unittest.mock import patch
     from sidekick.client import _fallback_model
-    assert _fallback_model() == "codex-gpt-5.5-high"
+    with patch("sidekick.codex_cli.codex_bin", return_value="/bin/codex"):
+        assert _fallback_model() == "codex-gpt-5.5-high"
 
 
 def test_model_label_resolves_id_to_friendly_name():
+    from unittest.mock import patch
     import sidekick.app as app
     assert app._model_label("codex-gpt-5.5-high") == "Codex · GPT-5.5 high"
     assert app._model_label("claude-opus-high") == "Claude · Opus high"
     assert app._model_label("claude") == "Claude API"
-    assert app._model_label(None) == "Codex · GPT-5.5 high"  # model-less -> default label
+    with patch("sidekick.codex_cli.codex_bin", return_value="/bin/codex"):
+        assert app._model_label(None) == "Codex · GPT-5.5 high"  # model-less -> default label
     assert app._model_label("nope") == "nope"            # unknown id passes through
 
 
@@ -325,7 +331,9 @@ def test_kernel_prompt_without_model_routes_to_cli_default():
 
     b._post, b._save = fake_post, lambda: None
     b._dialogs["d"] = [Msg(id="_x", msg_type="prompt", content="hi", model=None)]
-    b.exec("d", "_x")
+    from unittest.mock import patch
+    with patch("sidekick.codex_cli.codex_bin", return_value="/bin/codex"):
+        b.exec("d", "_x")                                # codex present -> codex default
     assert sent["path"] == "/prompt"
     assert sent["body"]["model"] == "codex-gpt-5.5-high"  # not a provider API path
 
