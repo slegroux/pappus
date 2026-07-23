@@ -1591,7 +1591,7 @@ STREAM_JS = """
              (window.__activeRow && window.__activeRow.id.replace('cell-', ''));
     if(!id || !window.htmx) return;
     htmx.ajax('POST', '/cell/insert', {target: '#stream', swap: 'outerHTML',
-      values: {id: id, msg_type: 'note', where: where}});   // a/b default to a note
+      values: {id: id, where: where}});   // no type -> server inherits the anchor's
   }
   document.addEventListener('keydown', function(e){
     if((e.metaKey || e.ctrlKey) && e.key !== 'Enter') return;   // allow Cmd/Ctrl+Enter through
@@ -3185,9 +3185,17 @@ def cell_exec(id: str):
 
 
 @rt("/cell/insert", methods=["post"])
-def cell_insert(id: str, msg_type: str = "code", where: str = "below"):
-    """Insert a new (empty) cell above/below `id` and open it in edit mode."""
+def cell_insert(id: str, msg_type: str = "", where: str = "below"):
+    """Insert a new (empty) cell above/below `id` and open it in edit mode.
+
+    With no `msg_type` the new cell inherits the anchor cell's type — the a/b
+    shortcuts, where the user picked a position but not a kind, so working in a
+    run of code cells keeps making code cells. The ＋ menu always names a type
+    explicitly; a named-but-invalid type still falls back to code."""
     backend = STATE["backend"]
+    if not msg_type:
+        anchor = _msg_by_id(backend, cur("dialog"), id)
+        msg_type = anchor.msg_type if anchor else "code"
     if msg_type not in ("code", "note", "prompt"):
         msg_type = "code"
     if hasattr(backend, "insert"):

@@ -2664,6 +2664,42 @@ def test_cell_insert_route_above_and_below_with_type():
     assert cells[1].id == anchor.id
 
 
+def test_cell_insert_without_type_inherits_anchor_type():
+    """a/b send no msg_type, so a new cell matches the one it's anchored to."""
+    import sidekick.app as app
+    app.STATE["dialog"] = "ins/inherit"
+    bk = app.STATE["backend"]
+    bk.messages("ins/inherit")
+    note = bk.add("ins/inherit", "a note", "note")
+    app.cell_insert(id=note.id, where="below")
+    app.cell_insert(id=note.id, where="above")
+    assert [c.msg_type for c in bk.messages("ins/inherit")] == ["note", "note", "note"]
+
+    prompt = bk.add("ins/inherit", "ask", "prompt")
+    app.cell_insert(id=prompt.id, where="below")
+    assert bk.messages("ins/inherit")[-1].msg_type == "prompt"
+
+
+def test_cell_insert_without_type_falls_back_to_code_for_unknown_anchor():
+    import sidekick.app as app
+    app.STATE["dialog"] = "ins/noanchor"
+    bk = app.STATE["backend"]
+    bk.messages("ins/noanchor")
+    app.cell_insert(id="_nope", where="below")
+    assert bk.messages("ins/noanchor")[0].msg_type == "code"
+
+
+def test_cell_insert_menu_type_still_wins_over_anchor():
+    """The ＋ menu names a type explicitly; inheritance must not override it."""
+    import sidekick.app as app
+    app.STATE["dialog"] = "ins/explicit"
+    bk = app.STATE["backend"]
+    bk.messages("ins/explicit")
+    a = bk.add("ins/explicit", "x", "code")
+    app.cell_insert(id=a.id, msg_type="note", where="below")
+    assert bk.messages("ins/explicit")[1].msg_type == "note"
+
+
 def test_cell_insert_route_rejects_bad_type():
     import sidekick.app as app
     app.STATE["dialog"] = "ins/bad"
@@ -2984,12 +3020,11 @@ def test_msgrow_shows_cell_number_badge():
     assert 'class="cell-num"' in html and ">4<" in html
 
 
-def test_ab_shortcut_inserts_a_note_cell():
-    # the a/b keyboard shortcut posts msg_type:'note' so a quick insert is a
-    # markdown note (use the ＋ menu for code / Ask AI).
+def test_ab_shortcut_sends_no_type_so_the_server_inherits():
+    # the a/b keyboard shortcut posts no msg_type at all, so cell_insert inherits
+    # the anchor cell's type (use the ＋ menu to pick a type explicitly).
     import sidekick.app as app
-    assert "msg_type: 'note'" in app.STREAM_JS
-    assert "msg_type: 'code'" not in app.STREAM_JS
+    assert "values: {id: id, where: where}" in app.STREAM_JS
 
 
 def test_cell_insert_route_creates_note_when_asked():

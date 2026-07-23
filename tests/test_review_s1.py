@@ -82,7 +82,7 @@ def test_interpolated_and_swapped_blocks_kept_inline():
     assert "__MID__" in app._FOCUS_JS
     assert "__MID__" in app._CODE_EDITOR_JS
     # Re-delivered inside htmx #stream / #paperPanel partial swaps.
-    assert "msg_type: 'note'" in app.STREAM_JS
+    assert "/cell/insert" in app.STREAM_JS and len(app.STREAM_JS) > 100
     assert len(app.PAPER_JS) > 100
     # None of these leaked out to a /static file.
     client = _client()
