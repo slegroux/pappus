@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import contextvars
 import hmac
+import html
 import json
 import os
 import re
@@ -121,6 +122,13 @@ _MERMAID_SUBGRAPH_TD = re.compile(r"(?im)^([ \t]*direction[ \t]+)TD([ \t]*)$")
 
 
 def _normalize_mermaid(src: str) -> str:
+    # Decode any HTML entities the model emitted in the source (some models write
+    # `--&gt;` or `-&gt;` in a mermaid block, thinking markdown needs it escaped).
+    # Left as-is, the later mistune.util.escape re-escapes the `&` to `&amp;gt;`,
+    # so the browser's textContent decodes it back to the literal `&gt;` and
+    # mermaid draws that text verbatim instead of an arrow. Unescaping first means
+    # the single downstream escape round-trips cleanly to a real `>`.
+    src = html.unescape(src)
     return _MERMAID_SUBGRAPH_TD.sub(r"\1TB\2", src)
 
 

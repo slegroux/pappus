@@ -3242,6 +3242,25 @@ def test_mermaid_fence_rewrites_subgraph_direction_td_to_tb():
     assert "direction TD" in html                      # TD *inside a label* left untouched
 
 
+def test_mermaid_fence_decodes_entities_so_arrows_render():
+    # Some models emit HTML entities inside a mermaid block (`-&gt;` / `--&gt;`).
+    # Without decoding, the downstream escape double-escapes the `&`, so the
+    # browser's textContent decodes back to a literal `-&gt;` and mermaid draws
+    # that text instead of an arrow. The fence must decode entities first so the
+    # single escape round-trips to a real `>`.
+    import sidekick.app as app
+    src = (
+        "```mermaid\n"
+        "flowchart TD\n"
+        '  A["256 -&gt; K"] --&gt; B\n'
+        "```\n"
+    )
+    html = str(app.render_md(src))
+    assert "&amp;gt;" not in html          # never double-escaped (would show literal -&gt;)
+    assert "256 -&gt; K" in html           # single-escaped -> textContent decodes to "256 -> K"
+    assert "--&gt; B" in html              # arrow edge survives as a decodable -->
+
+
 # ---- latency reductions: htmx swap on send + fast model ---------------------
 def test_send_htmx_returns_stream_fragment_not_full_page():
     # The composer posts via htmx, so /send returns just #stream (fast swap) when
