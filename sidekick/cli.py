@@ -132,7 +132,11 @@ def cmd_restore(args):
     if not rest:
         print("usage: sidekick restore <archive> [--force]", file=sys.stderr)
         return 2
-    restored, skipped = datadir.restore(rest[0], force=force)
+    try:
+        restored, skipped = datadir.restore(rest[0], force=force)
+    except datadir.AppRunning as e:
+        print(f"restore refused: {e}", file=sys.stderr)
+        return 1
     print(f"Restored {len(restored)} files into {datadir.data_root()}")
     if skipped:
         print(f"Skipped {len(skipped)}: {', '.join(skipped[:8])}{' …' if len(skipped) > 8 else ''}")
@@ -164,6 +168,8 @@ def cmd_serve(_):
             "expose unauthenticated code execution and your stored API keys. "
             "Use an SSH tunnel for remote access (see the comment in cli.py).")
     _move_out_of_repo()
+    from .datadir import mark_serving
+    mark_serving()
     if reload:
         uvicorn.run("sidekick.app:app", host=host, port=port,
                     reload=True, reload_dirs=[os.path.dirname(__file__)])

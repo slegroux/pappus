@@ -32,7 +32,7 @@ REPO_DATA = Path(__file__).resolve().parent.parent / "data"
 
 # rolling save-backups and half-written temp files are not worth carrying over
 _SKIP_SUFFIXES = (".bak", ".tmp", ".restore-tmp", ".tar.gz")   # .tar.gz: older backups
-_SKIP_NAMES = {".DS_Store"}
+_SKIP_NAMES = {".DS_Store", ".serve.pid"}
 _SKIP_DIRS = {".git", "__pycache__", ".ipynb_checkpoints", ".quarto"}
 
 
@@ -92,6 +92,58 @@ def leftovers(old: Path | None = None) -> list[str]:
     return out
 
 
+# ---- is the app running? -------------------------------------------------------
+def _pidfile() -> Path:
+    return data_root() / ".serve.pid"
+
+
+def mark_serving() -> None:
+    """Record this `sidekick serve` process, so restore can refuse to run under it."""
+    import atexit
+    f = _pidfile()
+    if running_server_pid():
+        return                         # don't clobber a live server's record; if
+    try:                               # this serve then fails to bind, it's intact
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text(str(os.getpid()))
+    except OSError:
+        return
+    me = os.getpid()
+
+    def _clear():
+        try:
+            if f.read_text().strip() == str(me):
+                f.unlink()
+        except OSError:
+            pass
+    atexit.register(_clear)
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def running_server_pid() -> int | None:
+    """PID of a live `sidekick serve` using this data root, else None."""
+    try:
+        pid = int(_pidfile().read_text().strip())
+    except (OSError, ValueError):
+        return None
+    return pid if pid != os.getpid() and _pid_alive(pid) else None
+
+
+class AppRunning(RuntimeError):
+    pass
+
+
 # ---- backup / restore --------------------------------------------------------
 _INDEX = "meta/paper-keys.json"   # upload name -> markdown cache key at backup time
 
@@ -107,6 +159,10 @@ def _walk(base: Path, prefix: str, special: list[Path],
         rel = p.relative_to(base)
         if _SKIP_DIRS.intersection(rel.parts[:-1]):
             continue
+        if prefix == "data/" and rel.parts[0] == "backups":
+            continue                             # the store's own snapshots
+        if ".corrupt-" in p.name:
+            continue                             # damaged stores set aside
         if p.name in _SKIP_NAMES or p.name.endswith(_SKIP_SUFFIXES):
             continue
         if p.name == "secrets.json" and not with_secrets:
@@ -195,6 +251,12 @@ def restore(archive: str | Path, force: bool = False) -> tuple[list[str], list[s
     import json
     from .paper import _cache_dir, _md_key
     from .secrets_store import secrets_path
+    pid = running_server_pid()
+    if pid:
+        # the app holds notebooks in memory and rewrites the store on every
+        # edit, so restoring under it would be silently undone
+        raise AppRunning(f"the app is running (pid {pid}); stop it first (just stop). "
+                         f"If it isn't, delete {_pidfile()}")
     secret = secrets_path()
     restored, skipped, index = [], [], {}
     with tarfile.open(Path(archive).expanduser(), "r:gz") as tar:

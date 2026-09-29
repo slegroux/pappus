@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import json
 import os
+import threading
+import time
 import urllib.error
 import uuid
 from dataclasses import asdict, dataclass, field, replace
@@ -79,13 +81,92 @@ def _private_dialogs_path(key: str) -> Path:
     return p.with_name(f"{p.stem}.private")
 
 
-def _read_raw_dialogs(p: Path) -> dict:
-    if not p.exists():
-        return {}
+# ---- store safety -------------------------------------------------------------
+# One lock for every write to the dialog store: the UI's request threads, the
+# streaming worker and the MCP cell-edit route can all save at once.
+_SAVE_LOCK = threading.RLock()
+
+# Timestamped copies of the store in <data root>/backups/, taken at most every
+# SNAPSHOT_MINUTES while you work, newest SNAPSHOT_KEEP kept. The rolling .bak
+# (previous save) alone can't help once a bad file has been saved over it.
+SNAPSHOT_MINUTES = float(os.environ.get("SIDEKICK_SNAPSHOT_MINUTES", "15"))
+SNAPSHOT_KEEP = int(os.environ.get("SIDEKICK_SNAPSHOT_KEEP", "20"))
+
+# Human-readable notes about recoveries, shown as a banner by the app.
+STORE_NOTICES: list[str] = []
+
+
+class StoreUnreadable(RuntimeError):
+    """The store exists but can't be read or set aside, so saving would destroy it."""
+
+
+def _snapshot_dir(p: Path) -> Path:
+    return p.parent / "backups"
+
+
+def _snapshots(p: Path) -> list[Path]:
+    """This store's snapshots, newest first. Matched exactly, so target `kernel`
+    never picks up `kernel-h100`'s snapshots (target names are user-defined)."""
+    import re
+    d = _snapshot_dir(p)
+    if not d.is_dir():
+        return []
+    pat = re.compile(re.escape(p.stem) + r"-\d{8}-\d{6}-\d{6}\.json")
+    return sorted((f for f in d.iterdir() if pat.fullmatch(f.name)), reverse=True)
+
+
+def _parse_store(p: Path) -> dict | None:
+    """The store's dict, or None if the file isn't a readable JSON object."""
     try:
-        return json.loads(p.read_text())
-    except (json.JSONDecodeError, OSError):
-        return {}
+        v = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    return v if isinstance(v, dict) else None
+
+
+def _read_raw_dialogs(p: Path) -> dict:
+    """Load a store file. A missing file is an empty store. A corrupt one is
+    never treated as empty (the next save would overwrite it): it is moved
+    aside to <name>.corrupt-<time>, and the newest good copy (.bak, then the
+    snapshots) is restored in its place, with a notice for the UI."""
+    # Loads are rare (startup, target switch), so the whole read takes the lock:
+    # no loader can see the file mid-recovery (moved aside) and read it as empty.
+    with _SAVE_LOCK:
+        if not p.exists():
+            return {}
+        return _recover_store(p)
+
+
+def _recover_store(p: Path) -> dict:
+    v = _parse_store(p) if p.exists() else {}
+    if v is not None:
+        return v                       # another thread already recovered it
+    from datetime import datetime
+    aside = p.with_name(f"{p.name}.corrupt-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}")
+    try:
+        p.replace(aside)
+    except OSError as e:
+        raise StoreUnreadable(f"{p} is unreadable and could not be moved aside: {e}") from e
+    for cand in [p.with_suffix(f"{p.suffix}.bak"), *_snapshots(p)]:
+        good = _parse_store(cand) if cand.exists() else None
+        if good is not None:
+            import shutil
+            tmp = _tmp_path(p)
+            shutil.copy2(cand, tmp)
+            tmp.replace(p)             # atomic, like every other store write
+            msg = (f"{p.name} was unreadable and has been restored from {cand.name} "
+                   f"({time.strftime('%Y-%m-%d %H:%M', time.localtime(cand.stat().st_mtime))}). "
+                   f"Edits after that time may be missing; the damaged file is kept as {aside.name}.")
+            break
+    else:
+        good = {}
+        msg = (f"{p.name} was unreadable and no good backup was found; starting empty. "
+               f"The damaged file is kept as {aside.name}.")
+    STORE_NOTICES.append(msg)
+    _dbg(msg)
+    import sys
+    print(f"[sidekick] WARNING: {msg}", file=sys.stderr)
+    return good
 
 
 def _read_private_dialogs(key: str) -> set[str]:
@@ -117,9 +198,10 @@ def _write_private_dialogs(key: str, names: set[str]) -> None:
             p.unlink(missing_ok=True)
             return
         body = _PRIVATE_HEADER + "".join(f"{n}\n" for n in sorted(names))
-        tmp = p.with_suffix(f"{p.suffix}.tmp")
-        tmp.write_text(body)
-        tmp.replace(p)                 # atomic
+        with _SAVE_LOCK:
+            tmp = _tmp_path(p)
+            tmp.write_text(body)
+            tmp.replace(p)             # atomic
     except OSError:
         pass                           # never let a disk hiccup break the toggle
 
@@ -134,42 +216,76 @@ def _load_dialogs(key: str) -> dict[str, list[Msg]]:
             for name, msgs in raw.items()}
 
 
+def _tmp_path(p: Path) -> Path:
+    # unique per process and thread, so two writers never share a temp file
+    return p.with_name(f"{p.name}.{os.getpid()}-{threading.get_ident()}.tmp")
+
+
+def _maybe_snapshot(p: Path) -> None:
+    """Copy the store about to be replaced into backups/, throttled and pruned.
+    Only a readable store is kept, so snapshots are always good restore points."""
+    if SNAPSHOT_KEEP <= 0 or not p.exists():
+        return
+    snaps = _snapshots(p)
+    if snaps and time.time() - snaps[0].stat().st_mtime < SNAPSHOT_MINUTES * 60:
+        return
+    if _parse_store(p) is None:
+        return
+    import shutil
+    d = _snapshot_dir(p)
+    d.mkdir(parents=True, exist_ok=True)
+    from datetime import datetime
+    dst = d / f"{p.stem}-{datetime.now().strftime('%Y%m%d-%H%M%S-%f')}.json"
+    shutil.copy2(p, dst)
+    os.utime(dst)                      # throttle on when it was taken
+    for old in _snapshots(p)[SNAPSHOT_KEEP:]:
+        old.unlink(missing_ok=True)
+
+
 def _write_dialog_store(p: Path, raw: dict) -> None:
-    # Poor-man's history guard: snapshot the prior store to a single rolling
-    # <name>.bak before we overwrite it, so a destructive edit is recoverable.
-    # Best-effort — never let a failed backup block the actual save.
+    # History guard: the previous save goes to a rolling <name>.bak and, now
+    # and then, to a timestamped snapshot. Best-effort — a failed backup never
+    # blocks the actual save.
     if p.exists():
         try:
             import shutil
+            _maybe_snapshot(p)
             shutil.copy2(p, p.with_suffix(f"{p.suffix}.bak"))
         except OSError:
             pass
-    tmp = p.with_suffix(f"{p.suffix}.tmp")
-    tmp.write_text(json.dumps(raw, indent=2))
-    tmp.replace(p)                 # atomic write
+    tmp = _tmp_path(p)
+    try:
+        tmp.write_text(json.dumps(raw, indent=2))
+        tmp.replace(p)                 # atomic write
+    finally:
+        tmp.unlink(missing_ok=True)
 
 
 def _save_dialogs(key: str, dialogs: dict[str, list[Msg]]) -> None:
     p = _store_path(key)
     local = _local_store_path(key)
-    try:
-        p.parent.mkdir(parents=True, exist_ok=True)
-        private_names = _read_private_dialogs(key)
-        public = {}
-        private = {}
-        for name, msgs in dialogs.items():
-            raw_msgs = [asdict(m) for m in msgs]
-            if name in private_names:
-                private[name] = raw_msgs
-            else:
-                public[name] = raw_msgs
-        _write_dialog_store(p, public)
-        if private:
-            _write_dialog_store(local, private)
-        elif local.exists():
-            local.unlink()
-    except OSError:
-        pass                           # never let a disk hiccup break the app
+    with _SAVE_LOCK:
+        try:
+            p.parent.mkdir(parents=True, exist_ok=True)
+            private_names = _read_private_dialogs(key)
+            public = {}
+            private = {}
+            # list() copies are atomic in CPython, so another thread adding a
+            # dialog or cell mid-save can't break the iteration
+            for name, msgs in list(dialogs.items()):
+                raw_msgs = [asdict(m) for m in list(msgs)]
+                if name in private_names:
+                    private[name] = raw_msgs
+                else:
+                    public[name] = raw_msgs
+            _write_dialog_store(p, public)
+            if private:
+                _write_dialog_store(local, private)
+            elif local.exists():
+                local.unlink()
+        except OSError as e:           # never let a disk hiccup break the app,
+            import sys                 # but don't hide it either
+            print(f"[sidekick] WARNING: could not save {p}: {e}", file=sys.stderr)
 
 
 def _rename_in(dialogs: dict, old: str, new: str) -> None:

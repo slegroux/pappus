@@ -457,7 +457,15 @@ just backup ~/x --with-secrets   # include secrets.json too; keep that archive p
 just stop && just restore ~/pCloud/sidekick-backup-….tar.gz   # on the new install
 ```
 
-Restore keeps any file that already exists unless you pass `--force`. Which
+Restore keeps any file that already exists unless you pass `--force`, and it
+refuses to run while the app is up (stop it with `just stop` first).
+
+The notebook store also protects itself. Every save keeps the previous version
+as `dialogs-<target>.json.bak`, and while you work a timestamped copy goes to
+`backups/` every 15 minutes, newest 20 kept (`SIDEKICK_SNAPSHOT_MINUTES`,
+`SIDEKICK_SNAPSHOT_KEEP`). If the store is ever unreadable, the app sets the
+damaged file aside as `….corrupt-<time>`, reopens the newest good copy, and says
+so in a banner instead of starting empty. Which
 cells are collapsed and the table-of-contents state are per browser and are not
 part of a backup. An older checkout that kept dialogs in the repo's `data/`
 folder is moved into the local directory the first time `sidekick serve` runs.

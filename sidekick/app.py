@@ -2162,6 +2162,8 @@ PAPER_JS = """
 def Page():
     banner = (Div("⚠ ", STATE["warning"], " — showing a mock so you can still explore the UI.",
                   cls="banner") if STATE["warning"] else None)
+    from . import client as _client              # a recovered (corrupt) dialog store
+    store_notes = [Div("⚠ ", n, cls="banner") for n in _client.STORE_NOTICES]
     return Html(
         # *app.hdrs carries htmx (+ fasthtml.js): without it the per-cell
         # hx-post buttons render but do nothing, since we return a full Html
@@ -2255,7 +2257,7 @@ def Page():
                 Div(cls="gutter gutter-side", data_resize="side"),
                 PaperPanel(),
                 Div(cls="gutter gutter-paper", data_resize="paper"),
-                Div(banner, Stream(), Composer(), cls="main"),
+                Div(banner, *store_notes, Stream(), Composer(), cls="main"),
                 Div(cls="gutter gutter-toc", data_resize="toc"),
                 Div(Div("Contents", cls="toc-head"), Div(id="tocList", cls="toc-list"),
                     cls="toc", id="toc"),

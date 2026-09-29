@@ -103,6 +103,11 @@ path through `data_root()`; don't add a second path rule.
 - `data/` is the old in-repo location: fully gitignored. `sidekick serve` moves
   anything there into the root once, never overwriting, and ignores a stale
   `SIDEKICK_DATA` that still points into the repo.
+- The dialog store (`client.py`) serializes every write through `_SAVE_LOCK` with
+  per-thread temp files, keeps `.bak` plus throttled snapshots in `backups/`, and
+  never treats an unreadable store as empty: it moves it to `.corrupt-<time>`,
+  reopens the newest good copy, and adds to `client.STORE_NOTICES` (shown as a
+  banner). `restore` refuses while `.serve.pid` names a live `sidekick serve`.
 - `tests/conftest.py` points `SIDEKICK_DATA`/`_PAPERS`/`_SECRETS`/`_TOOLS` at
   `tmp_path` for every test, so no test can touch real notebooks or keys.
 
