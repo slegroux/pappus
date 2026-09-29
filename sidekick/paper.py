@@ -20,19 +20,128 @@ from urllib.parse import urlparse
 
 
 def _cache_dir() -> Path:
-    base = os.environ.get("SIDEKICK_DATA")
-    base = Path(base).expanduser() if base else Path.home() / ".config" / "solveit-sidekick"
-    return base / "papers"
+    """Where papers live: uploads, converted markdown, figures, sources.json.
+    Local to this machine, under the data root (see datadir), never in the repo.
+    Override with SIDEKICK_PAPERS."""
+    override = os.environ.get("SIDEKICK_PAPERS")
+    if override:
+        return Path(override).expanduser()
+    from .datadir import data_root
+    return data_root() / "papers"
 
 
-def cache_path(pdf: Path) -> Path:
-    """Cache file keyed by absolute path + mtime, so an edited PDF re-converts."""
+def _md_key(pdf: Path) -> str:
     try:
         stamp = pdf.stat().st_mtime_ns
     except OSError:
         stamp = 0
-    key = hashlib.sha1(f"{pdf.resolve()}:{stamp}".encode()).hexdigest()[:16]
-    return _cache_dir() / f"{key}.md"
+    return hashlib.sha1(f"{pdf.resolve()}:{stamp}".encode()).hexdigest()[:16]
+
+
+def migrate_legacy_cache(old: Path | None = None) -> list[str]:
+    """One-time move of papers from an old location (default
+    $SIDEKICK_DATA/papers; datadir passes the old in-repo dir) into the cache. Idempotent and non-destructive:
+    nothing already in the destination is overwritten.
+
+    Figures keep their key (imported note cells link to /paper/asset/<key>/…).
+    Each moved upload's markdown is copied under its new path-based key so the
+    paper reopens without a slow marker re-conversion. sources.json is merged,
+    with paths into the old location rewritten. Returns what was moved."""
+    import json
+    import shutil
+    if old is None:
+        data = os.environ.get("SIDEKICK_DATA")
+        if not data:
+            return []
+        old = Path(data).expanduser() / "papers"
+    new = _cache_dir()
+    if not old.is_dir():
+        return []
+    try:
+        if old.resolve() == new.resolve():
+            return []
+    except OSError:
+        return []
+    new.mkdir(parents=True, exist_ok=True)
+    moved: list[str] = []
+
+    # Upload PDFs are content-hashed, so an existing file of the same name is
+    # the same paper: keep the destination copy and re-key against it.
+    old_up = old / "uploads"
+    if old_up.is_dir():
+        (new / "uploads").mkdir(exist_ok=True)
+        for pdf in sorted(old_up.glob("*.pdf")):
+            dst = new / "uploads" / pdf.name
+            old_md = old / f"{_md_key(pdf)}.md"
+            if not dst.exists():
+                shutil.move(str(pdf), dst)       # preserves mtime (rename / copy2)
+                moved.append(f"uploads/{pdf.name}")
+            new_md = new / f"{_md_key(dst)}.md"
+            if old_md.is_file() and not new_md.exists():
+                shutil.copy2(old_md, new_md)
+
+    # Figures: move each key directory intact.
+    if (old / "assets").is_dir():
+        (new / "assets").mkdir(exist_ok=True)
+        for kdir in sorted((old / "assets").iterdir()):
+            dst = new / "assets" / kdir.name
+            if kdir.is_dir() and not dst.exists():
+                shutil.move(str(kdir), dst)
+                moved.append(f"assets/{kdir.name}")
+
+    # Converted markdown (path- and url- keyed).
+    for md in sorted(old.glob("*.md")):
+        dst = new / md.name
+        if not dst.exists():
+            shutil.move(str(md), dst)
+            moved.append(md.name)
+
+    # dialog -> source links: merge, destination wins, re-point old paths.
+    # The old index is then renamed aside, so later runs neither re-merge it
+    # (resurrecting links deleted since) nor report a migration again.
+    osrc = old / "sources.json"
+    if osrc.is_file():
+        olds = _read_json_dict(osrc)
+        nsrc = new / "sources.json"
+        news = _read_json_dict(nsrc)
+        if news is None:                         # unreadable destination: leave it
+            return moved                         # and the old index untouched
+        # sources were recorded under whatever SIDEKICK_DATA said, possibly via a
+        # symlink, so match both the literal and the resolved old location.
+        prefixes = {str(old), str(old.resolve())}
+        for dialog, rec in (olds or {}).items():
+            if dialog in news or not isinstance(rec, dict):
+                continue
+            src = str(rec.get("source", ""))
+            for pre in prefixes:
+                if src.startswith(pre + os.sep):
+                    rec = {**rec, "source": str(new / src[len(pre) + 1:])}
+                    break
+            news[dialog] = rec
+        tmp = nsrc.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(news, indent=1))
+        tmp.replace(nsrc)
+        osrc.replace(osrc.with_name("sources.json.migrated"))
+        moved.append("sources.json")
+    return moved
+
+
+def _read_json_dict(p: Path) -> dict | None:
+    """{} when `p` is missing or empty-ish, the dict when it holds one, and None
+    when it exists but isn't a readable JSON object (caller must not clobber it)."""
+    import json
+    if not p.is_file():
+        return {}
+    try:
+        v = json.loads(p.read_text())
+    except (OSError, ValueError):
+        return None
+    return v if isinstance(v, dict) else None
+
+
+def cache_path(pdf: Path) -> Path:
+    """Cache file keyed by absolute path + mtime, so an edited PDF re-converts."""
+    return _cache_dir() / f"{_md_key(pdf)}.md"
 
 
 _converter = None  # cache marker's (expensive) model load across conversions
@@ -68,7 +177,7 @@ def assets_dir(key: str) -> Path:
 def _store_assets(md: str, images: dict, key: str) -> str:
     """Save marker's extracted images under assets/<key>/ and rewrite their
     markdown refs to the app's /paper/asset/<key>/<name> route, so figures render
-    in the reading panel and in imported note cells (and sync with the cache).
+    in the reading panel and in imported note cells (and live with the local cache).
     An image that fails to save keeps its original (dead) ref, which the block
     splitter then drops — same behavior as before images were kept."""
     adir = assets_dir(key)

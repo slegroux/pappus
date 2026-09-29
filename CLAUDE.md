@@ -92,10 +92,19 @@ Which tools Ask AI may use is declarative: `~/.config/solveit-sidekick/tools.jso
 
 ## Data & secrets
 
-Dialogs, papers, and blog exports live **in the repo** under `data/` — this repo is
-private and doubles as the cross-machine sync + backup channel (`just sync` commits/
-pulls/pushes `data/`). `SIDEKICK_DATA` points the app at that dir (the justfile sets
-it); without it, dialogs default to `~/.config/solveit-sidekick/dialogs-<target>.json`.
+**User data never lives in the repo.** Notebooks (`dialogs-<target>.json`), papers,
+recall schedule, libraries and the blog project are local to each machine under one
+root, `~/.config/solveit-sidekick` (override with `SIDEKICK_DATA`; papers alone with
+`SIDEKICK_PAPERS`). `sidekick/datadir.py` owns that root. Every store resolves its
+path through `data_root()`; don't add a second path rule.
+- **Portable, not synced:** `just backup [dir]` / `sidekick backup` packs it all into
+  one 0600 `.tar.gz` (API keys only with `--with-secrets`); `just restore <file>`
+  unpacks on a new install and re-keys paper caches (their keys embed absolute paths).
+- `data/` is the old in-repo location: fully gitignored. `sidekick serve` moves
+  anything there into the root once, never overwriting, and ignores a stale
+  `SIDEKICK_DATA` that still points into the repo.
+- `tests/conftest.py` points `SIDEKICK_DATA`/`_PAPERS`/`_SECRETS`/`_TOOLS` at
+  `tmp_path` for every test, so no test can touch real notebooks or keys.
 
 **Secrets stay out of the repo**: API keys go in `~/.config/solveit-sidekick/secrets.json`
 (chmod 600, gitignored) via `sidekick/secrets_store.py`; an env var of the same name
@@ -147,7 +156,7 @@ Q = structure, T = tests. Line numbers are approximate — verify before editing
   guard torch with `pytest.importorskip`; do the same: `np = pytest.importorskip("numpy")`.
 - [x] **S2 · Stored XSS via kernel rich output** (`app.py:706-708`). `_rich_view` emits
   `Div(NotStr(data))` for `image/svg+xml` and `text/html` unescaped. Dialogs (with cached
-  outputs) are persisted to `data/` and synced across machines, so a crafted dialog runs
+  outputs) are persisted locally and move between installs via backup, so a crafted dialog runs
   JS in the viewer's browser on open. Fix: sanitize HTML/SVG (allowlist tags/attrs, strip
   `<script>` and event handlers) before `NotStr`.
 - [ ] **Q1 · `app.py` is a 3208-line god-module.** Renderers, global state, ~90 route

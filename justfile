@@ -8,7 +8,8 @@
 #   just ui         start only the web UI
 #   just test       run the test suite
 #   just doctor     check the kernel target is reachable
-#   just sync       commit/pull/push the dialog store (data/) across machines
+#   just backup     pack all local data (notebooks, papers, …) into one .tar.gz
+#   just restore F  unpack a backup into this install (app stopped)
 
 kernel_port := "5055"     # must match the `kernel` target's url in targets.yaml
 ui_port     := "8000"
@@ -20,10 +21,9 @@ ui_port     := "8000"
 # re-syncs (uninstalls the other's extras) between launches.
 run_extras := "--extra kernel --extra paper"
 
-# Dialogs/papers/blog live IN the repo (data/) — this repo is private and doubles
-# as the cross-machine sync + backup channel for them (`just sync`). Secrets stay
-# outside (~/.config/solveit-sidekick/secrets.json, see .gitignore).
-data_dir := justfile_directory() / "data"
+# Notebooks, papers, recall, libraries and blog live LOCALLY in
+# ~/.config/solveit-sidekick (the app's default; override with SIDEKICK_DATA),
+# never in this repo. Move them between installs with `just backup`/`just restore`.
 
 # This machine's own Tailscale MagicDNS name (empty when off-tailnet or Tailscale
 # isn't installed). Passed to the UI as SIDEKICK_ALLOWED_HOSTS so `tailscale serve`
@@ -76,7 +76,7 @@ start reload="":
         for i in $(seq 1 120); do up {{kernel_port}} && break; sleep 0.5; done
     fi
     echo "▶ web UI → http://localhost:{{ui_port}}  (logs: $LOG/ui.log)"
-    nohup env $RELOAD_ENV SIDEKICK_ALLOWED_HOSTS="{{tailnet_host}}" SIDEKICK_TRUST_TAILNET="{{trust_tailnet}}" SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run {{run_extras}} python -m sidekick.cli serve >"$LOG/ui.log" 2>&1 &
+    nohup env $RELOAD_ENV SIDEKICK_ALLOWED_HOSTS="{{tailnet_host}}" SIDEKICK_TRUST_TAILNET="{{trust_tailnet}}" SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} uv run {{run_extras}} python -m sidekick.cli serve >"$LOG/ui.log" 2>&1 &
     for i in $(seq 1 60); do up {{ui_port}} && break; sleep 0.5; done
     if up {{ui_port}}; then
         echo "✓ running in the background → http://localhost:{{ui_port}}   (stop with: just stop)"
@@ -102,7 +102,7 @@ dev:
     done
     echo " ✓"
     echo "▶ web UI         → http://localhost:{{ui_port}}  (target: kernel)"
-    SIDEKICK_ALLOWED_HOSTS="{{tailnet_host}}" SIDEKICK_TRUST_TAILNET="{{trust_tailnet}}" SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run {{run_extras}} python -m sidekick.cli serve
+    SIDEKICK_ALLOWED_HOSTS="{{tailnet_host}}" SIDEKICK_TRUST_TAILNET="{{trust_tailnet}}" SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} uv run {{run_extras}} python -m sidekick.cli serve
 
 # Just the kernel server (e.g. to run it on its own / on the H100).
 kernel:
@@ -113,20 +113,18 @@ kernel:
 
 # Just the web UI (assumes the kernel server is already running).
 ui:
-    SIDEKICK_ALLOWED_HOSTS="{{tailnet_host}}" SIDEKICK_TRUST_TAILNET="{{trust_tailnet}}" SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} SIDEKICK_DATA={{data_dir}} uv run {{run_extras}} python -m sidekick.cli serve
+    SIDEKICK_ALLOWED_HOSTS="{{tailnet_host}}" SIDEKICK_TRUST_TAILNET="{{trust_tailnet}}" SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} uv run {{run_extras}} python -m sidekick.cli serve
 
-# Sync dialogs across machines: commit local dialog/paper changes, pull, push.
-# Run at session start (get the other machine's dialogs) and session end (share
-# this one's). Conflicts are rare (one machine at a time) but resolve manually.
-sync:
-    #!/usr/bin/env bash
-    set -euo pipefail
-    cd {{justfile_directory()}}
-    git add data
-    git diff --cached --quiet -- data || git commit -m "data: sync dialogs ($(hostname -s))"
-    git pull --rebase --autostash
-    git push
-    echo "✓ dialogs in sync"
+# `just backup ~/pCloud/` writes a timestamped archive there; API keys are left
+# out unless you pass --with-secrets.
+# Pack all local data (notebooks, papers, recall, libraries, blog) into one .tar.gz
+backup *args:
+    uv run python -m sidekick.cli backup {{args}}
+
+# Stop the app first (`just stop`); existing files are kept unless --force.
+# Unpack a backup into this install
+restore archive *args:
+    uv run python -m sidekick.cli restore {{archive}} {{args}}
 
 # Run the test suite.
 test:
@@ -194,7 +192,7 @@ app:
     fi
     # 2) UI on :8000 — after the kernel, so it connects live (not the mock)
     if ! up 8000; then
-        nohup env SIDEKICK_TARGET=kernel SIDEKICK_PORT=8000 SIDEKICK_DATA="$PROJ/data" "$UV" run {{run_extras}} python -m sidekick.cli serve \
+        nohup env SIDEKICK_TARGET=kernel SIDEKICK_PORT=8000 "$UV" run {{run_extras}} python -m sidekick.cli serve \
             >"$LOG/ui.log" 2>&1 & UPID=$!
         for i in $(seq 1 60); do up 8000 && break; sleep 0.5; done
     fi

@@ -30,8 +30,8 @@ from .export import _directives, slug
 
 # Rich HTML/SVG cell outputs get allowlist-sanitized here (nh3 strips <script>,
 # event handlers, javascript: URLs, …) both for a *published* post and for the
-# live in-app view (app._rich_view reuses _sanitize): dialogs now sync across
-# machines via data/, so a cached output is untrusted input, not just the local
+# live in-app view (app._rich_view reuses _sanitize): dialogs can be restored
+# from a backup made elsewhere, so a cached output is untrusted input, not just the local
 # user's own. nh3's defaults are widened to keep DataFrame tables and SVG/
 # matplotlib plots intact.
 _HTML_TAGS = nh3.ALLOWED_TAGS | {
@@ -224,11 +224,8 @@ def default_blog_dir() -> str:
     in place* (like a library or an nbdev project), not a throwaway artifact — so
     it lives under the same data root as your dialogs (``SIDEKICK_DATA``, else
     ``~/.config/solveit-sidekick``) and accumulates posts across sessions."""
-    import os
-    from pathlib import Path
-    base = os.environ.get("SIDEKICK_DATA")
-    base = Path(base).expanduser() if base else Path.home() / ".config" / "solveit-sidekick"
-    return str(base / "blog")
+    from .datadir import data_root
+    return str(data_root() / "blog")
 
 
 # ---- disk + render ----------------------------------------------------------

@@ -113,8 +113,12 @@ allow web research and deny hidden execution/editing.
 
 ## Data and secrets
 
-- Dialogs, papers, and blog exports are stored under `data/` when `SIDEKICK_DATA`
-  points there; the repo is private and may be used for sync/backup.
+- User data never lives in the repo. Notebooks, papers, recall, libraries and
+  the blog project are local to each machine in `~/.config/solveit-sidekick`
+  (override with `SIDEKICK_DATA`), resolved only through `sidekick/datadir.py`.
+  `data/` is the old in-repo location and is gitignored; never commit user data.
+- Move data between installs with `sidekick backup` / `sidekick restore`
+  (`just backup` / `just restore`); API keys are included only with `--with-secrets`.
 - API keys live outside the repo in
   `~/.config/solveit-sidekick/secrets.json` via `sidekick/secrets_store.py`.
 - Environment variables override stored keys.

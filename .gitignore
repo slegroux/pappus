@@ -21,19 +21,8 @@ README_files/
 SolveIt Sidekick.app/
 .DS_Store
 
-# data/ holds the dialog store (committed on purpose — this repo is PRIVATE and
-# doubles as the sync/backup channel for dialogs). Keep secrets and the rolling
-# save-backups out of it; API keys live in ~/.config/solveit-sidekick/secrets.json.
-data/secrets.json
-data/*.bak
-
-# private/local dialog overlays (configured by data/dialogs-<target>.private)
-data/dialogs-*.private
-data/dialogs-*.local.json
-data/dialogs-*.local.json.bak
-data/dialogs-*.local.json.tmp
-
-# private Shield/AP paper cache
-data/papers/99503bdf2461b921.md
-data/papers/assets/99503bdf2461b921/
-data/papers/uploads/dbac2df646b8613c.pdf
+# User data never lives in the repo: notebooks, papers, recall, libraries and
+# blog are local to each machine in ~/.config/solveit-sidekick (SIDEKICK_DATA).
+# data/ is the OLD in-repo location; ignore it so nothing there is re-added.
+data/
+*.tar.gz

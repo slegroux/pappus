@@ -34,7 +34,7 @@ from . import secrets_store, export, libraries, nbdev_export, scaffold
 from . import paper as paperlib
 # Shared allowlist sanitizer (drops <script>, event handlers, javascript: URLs
 # while keeping tables/plots) — the same one the blog publisher uses. Rich cell
-# outputs are now untrusted (dialogs sync across machines via data/), so the live
+# outputs are untrusted (dialogs move between installs via backup/restore), so the live
 # view sanitizes too, not just published posts.
 from .blog import _sanitize as _sanitize_rich
 
@@ -772,7 +772,7 @@ def _rich_view(item):
     if t == "image/svg+xml":
         # Inline the SVG markup directly so it stays crisp/scalable (vector
         # diagrams from conv_arch, plots saved as SVG, etc.). Sanitize first: cached
-        # outputs are persisted to data/ and synced across machines, so a crafted
+        # outputs are persisted and can be restored from a backup, so a crafted
         # dialog is untrusted input — strip <script>/event-handlers before NotStr.
         return Div(NotStr(_sanitize_rich(data)), cls="cell-svg")
     if t == "text/html":

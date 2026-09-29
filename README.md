@@ -447,6 +447,21 @@ Cells, outputs, plots, and pin/mute flags are all restored. (The mock fallback
 used when no server is reachable stays ephemeral; a real **solveit** target keeps
 its dialogs on the SolveIt server.)
 
+Everything you create stays **local to the machine and out of git**: notebooks,
+papers, the recall schedule, libraries and the blog project all live under that
+one directory. To move to a new install, or keep a copy somewhere safe:
+
+```bash
+just backup ~/pCloud/            # one timestamped .tar.gz (API keys left out)
+just backup ~/x --with-secrets   # include secrets.json too; keep that archive private
+just stop && just restore ~/pCloud/sidekick-backup-….tar.gz   # on the new install
+```
+
+Restore keeps any file that already exists unless you pass `--force`. Which
+cells are collapsed and the table-of-contents state are per browser and are not
+part of a backup. An older checkout that kept dialogs in the repo's `data/`
+folder is moved into the local directory the first time `sidekick serve` runs.
+
 ## Building a Python library from your dialogs
 
 Your dialogs are where you *learn*; a **library** is how you *ship* what you
@@ -580,6 +595,11 @@ background and are cached to disk. Without it, opening a PDF shows the install
 hint in the panel — there's deliberately no degraded text-only fallback —
 though already-converted papers still open from the cache. Web pages don't
 need it.
+
+Papers are **local, like everything else**: the uploaded PDFs, their converted
+markdown, extracted figures, and the dialog→source index live in
+`~/.config/solveit-sidekick/papers` (set `SIDEKICK_PAPERS` to move it) and are
+included in `just backup`.
 
 ## Pain points this targets
 

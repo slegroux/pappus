@@ -10,16 +10,14 @@ manifest *dialog* can layer on later.
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 from .export import slug
 
 
 def _path() -> Path:
-    base = os.environ.get("SIDEKICK_DATA")
-    base = Path(base).expanduser() if base else Path.home() / ".config" / "solveit-sidekick"
-    return base / "libraries.json"
+    from .datadir import data_root
+    return data_root() / "libraries.json"
 
 
 def load() -> list[dict]:

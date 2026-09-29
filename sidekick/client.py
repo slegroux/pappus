@@ -54,8 +54,8 @@ class Msg:
 
 # ---- on-disk persistence for the in-memory backends -------------------------
 def _data_dir() -> Path:
-    base = os.environ.get("SIDEKICK_DATA")
-    return Path(base).expanduser() if base else Path.home() / ".config" / "solveit-sidekick"
+    from .datadir import data_root
+    return data_root()
 
 
 # Dialogs are saved per store key (the target name) as one JSON file, so your

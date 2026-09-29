@@ -34,7 +34,6 @@ Two pieces, both easy to test in isolation:
 from __future__ import annotations
 
 import json
-import os
 import re
 from pathlib import Path
 
@@ -187,9 +186,8 @@ def default_schedule_path() -> Path:
     """Where the review schedule lives: ``recall.json`` under the same data root
     as the dialogs (``SIDEKICK_DATA``, else ``~/.config/solveit-sidekick``).
     Mirrors `blog.default_blog_dir` — self-contained, no backend internals."""
-    base = os.environ.get("SIDEKICK_DATA")
-    base = Path(base).expanduser() if base else Path.home() / ".config" / "solveit-sidekick"
-    return base / "recall.json"
+    from .datadir import data_root
+    return data_root() / "recall.json"
 
 
 def load_schedule(path: str | Path | None = None) -> dict:

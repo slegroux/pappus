@@ -16,6 +16,16 @@ Usage:
                                      post each, outputs kept — and render it with
                                      quarto if installed. --author defaults to the
                                      git user.name
+    sidekick backup [path] [--with-secrets]
+                                     pack notebooks, papers, recall, libraries,
+                                     blog and tool config into one .tar.gz (API
+                                     keys only with --with-secrets)
+    sidekick restore <archive> [--force]
+                                     unpack a backup into this install (stop the
+                                     app first); existing files kept unless --force
+
+All of that lives locally in ~/.config/solveit-sidekick (SIDEKICK_DATA), never
+in the git repo.
 """
 from __future__ import annotations
 
@@ -69,6 +79,68 @@ def cmd_up(args):
     return 0
 
 
+def _ignore_repo_data_env():
+    """Old launchers set SIDEKICK_DATA=<repo>/data; user data no longer lives there."""
+    from . import datadir
+    cur = os.environ.get("SIDEKICK_DATA")
+    if cur and datadir._same(datadir.Path(cur).expanduser(), datadir.REPO_DATA):
+        del os.environ["SIDEKICK_DATA"]
+        print(f"note: ignoring SIDEKICK_DATA={cur} (inside the repo); "
+              f"using {datadir.data_root()}", file=sys.stderr)
+
+
+def _move_out_of_repo():
+    """User data used to live in <repo>/data (pushed to GitHub by `just sync`).
+    Ignore a stale SIDEKICK_DATA still pointing there, and move what's there
+    into the local data root once."""
+    from . import datadir
+    _ignore_repo_data_env()
+    try:
+        moved = datadir.migrate_repo_data()
+    except Exception as e:  # noqa: BLE001 — a failed migration must never block serve
+        print(f"warning: could not move {datadir.REPO_DATA} to {datadir.data_root()}: {e}",
+              file=sys.stderr)
+        return
+    if moved:
+        print(f"Moved {len(moved)} entries from {datadir.REPO_DATA} to {datadir.data_root()}")
+    left = datadir.leftovers()
+    if left:
+        print(f"warning: {len(left)} files in {datadir.REPO_DATA} were not moved because "
+              f"{datadir.data_root()} already has them: {', '.join(left[:5])}"
+              f"{' …' if len(left) > 5 else ''}", file=sys.stderr)
+
+
+def cmd_backup(args):
+    """`sidekick backup [path] [--with-secrets]` — one portable .tar.gz."""
+    from . import datadir
+    _ignore_repo_data_env()
+    with_secrets = "--with-secrets" in args
+    rest = [a for a in args if a != "--with-secrets"]
+    dest, n = datadir.backup(rest[0] if rest else None, with_secrets=with_secrets)
+    print(f"Backed up {n} files from {datadir.data_root()} -> {dest}")
+    if with_secrets:
+        print("  includes API keys (secrets.json): keep this archive private")
+    return 0
+
+
+def cmd_restore(args):
+    """`sidekick restore <archive> [--force]` — unpack a backup here."""
+    from . import datadir
+    _ignore_repo_data_env()
+    force = "--force" in args
+    rest = [a for a in args if a != "--force"]
+    if not rest:
+        print("usage: sidekick restore <archive> [--force]", file=sys.stderr)
+        return 2
+    restored, skipped = datadir.restore(rest[0], force=force)
+    print(f"Restored {len(restored)} files into {datadir.data_root()}")
+    if skipped:
+        print(f"Skipped {len(skipped)}: {', '.join(skipped[:8])}{' …' if len(skipped) > 8 else ''}")
+        if any(s.endswith("(exists)") for s in skipped):
+            print("  (re-run with --force to overwrite existing files)")
+    return 0
+
+
 def cmd_serve(_):
     import uvicorn
     # Default to loopback: the UI is single-user with global state and holds your
@@ -91,6 +163,7 @@ def cmd_serve(_):
             f"refusing to bind {host}: the UI has no authentication, so this would "
             "expose unauthenticated code execution and your stored API keys. "
             "Use an SSH tunnel for remote access (see the comment in cli.py).")
+    _move_out_of_repo()
     if reload:
         uvicorn.run("sidekick.app:app", host=host, port=port,
                     reload=True, reload_dirs=[os.path.dirname(__file__)])
@@ -179,7 +252,8 @@ def cmd_blog(args):
 
 
 COMMANDS = {"targets": cmd_targets, "doctor": cmd_doctor, "up": cmd_up,
-            "serve": cmd_serve, "library": cmd_library, "blog": cmd_blog}
+            "serve": cmd_serve, "library": cmd_library, "blog": cmd_blog,
+            "backup": cmd_backup, "restore": cmd_restore}
 
 
 def main(argv=None):
