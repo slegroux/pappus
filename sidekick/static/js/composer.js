@@ -102,11 +102,17 @@ window.__askComposer = function(text){
   var quote = String(text || '').split('\n').map(function(l){ return '> ' + l; }).join('\n');
   ta.value = quote + '\n\n';
   ta.focus(); ta.setSelectionRange(ta.value.length, ta.value.length);
+  if(window.__growComposer) window.__growComposer();
   ta.scrollIntoView({block: 'center'});
 };
 (function(){
   var ta = document.getElementById('composerInput');
   if(!ta) return;
+  // Grow with the text (field-sizing:content does this natively where supported;
+  // this is the fallback), capped by the CSS max-height, after which it scrolls.
+  function grow(){ ta.style.height = 'auto'; ta.style.height = ta.scrollHeight + 'px'; }
+  ta.addEventListener('input', grow);
+  window.__growComposer = grow;
   // Plain-textarea keys (Ask AI / Note, and the offline Code fallback).
   ta.addEventListener('keydown', function(e){
     if(e.key === 'Tab'){                 // Tab cycles Ask AI -> Code -> Note (Shift+Tab back)

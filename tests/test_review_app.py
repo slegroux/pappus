@@ -203,3 +203,35 @@ def test_model_select_persists_without_send():
     r = client.post("/model/select", data={"model": "claude-sonnet-xhigh"})
     assert r.status_code == 200
     assert app.STATE["model"] == "claude-sonnet-xhigh"
+
+
+def test_done_button_is_the_touch_escape_hatch():
+    """Esc leaves a code/prompt editor keeping the text and WITHOUT running. A
+    phone has no Esc, so edit mode carries a Done button posting to /cell/save
+    ("save without executing"). Notes don't need one — their primary IS Save."""
+    from fasthtml.common import to_xml
+    from sidekick.client import Msg
+    import sidekick.app as app
+
+    for t in ("code", "prompt"):
+        html = to_xml(app._cell_edit(Msg("_d", t, "x=1"), num=1))
+        assert 'cell-btn done' in html, f"{t} edit view lost its Done button"
+        assert '/cell/save' in html
+    note = to_xml(app._cell_edit(Msg("_n", "note", "hi"), num=1))
+    assert 'cell-btn done' not in note
+
+    # Edit mode must force the toolbar visible (.show), or on touch — where
+    # there is no :hover — every exit from the editor is unreachable.
+    assert 'cell-actions show' in note
+
+
+def test_done_button_saves_without_executing():
+    """The Done path must not run the cell — that's the whole point of it."""
+    app, client = _client()
+    m = app.STATE["backend"].add("touch/esc", "1+1", "code")
+    app.STATE["dialog"] = "touch/esc"
+    r = client.post("/cell/save", data={"id": m.id, "content": "2+2"})
+    assert r.status_code == 200
+    saved = [x for x in app.STATE["backend"].messages("touch/esc") if x.id == m.id][0]
+    assert saved.content == "2+2"        # text kept
+    assert not saved.output              # and never executed

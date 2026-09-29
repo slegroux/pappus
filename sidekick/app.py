@@ -480,11 +480,44 @@ CSS = _static_text("css/app.css")
 
 
 # ---- view helpers -----------------------------------------------------------
-def Led():
-    live = getattr(STATE["backend"], "live", False)
-    cls = "live" if live else "mock"
-    label = "live" if live else "mock"
-    return Span(Span(cls=f"led {cls}"), label, style="display:inline-flex;align-items:center;gap:7px")
+# Inline SVG line icons (24px grid, stroke = currentColor), so the chrome is one
+# consistent set instead of mixed emoji, and stays offline (no icon font / CDN).
+_ICON_PATHS = {
+    "panel": '<rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18"/>',
+    "book": '<path d="M2 4h6a4 4 0 0 1 4 4v13a3 3 0 0 0-3-3H2z"/>'
+            '<path d="M22 4h-6a4 4 0 0 0-4 4v13a3 3 0 0 1 3-3h7z"/>',
+    "toc": '<path d="M9 6h12M9 12h12M9 18h12M4 6h.01M4 12h.01M4 18h.01"/>',
+    "source": '<path d="M14 3H6a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"/>'
+              '<path d="M14 3v6h6M12 18v-6M9 15h6"/>',
+    "download": '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>',
+    "runall": '<path d="M5 5l7 7-7 7zM13 5l7 7-7 7z"/>',
+    "restart": '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5"/>',
+    "package": '<path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 '
+               '1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/><path d="M3.3 7 12 12l8.7-5M12 22V12"/>',
+    "settings": '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 '
+                '1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 '
+                '0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 '
+                '1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1'
+                'a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 '
+                '1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9'
+                'a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
+    "plus": '<path d="M12 5v14M5 12h14"/>',
+    "search": '<circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/>',
+    "send": '<path d="M12 19V5M5 12l7-7 7 7"/>',
+    "sparkle": '<path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9z"/>',
+    "code": '<path d="m16 18 6-6-6-6M8 6l-6 6 6 6"/>',
+    "note": '<path d="M4 6h16M4 12h16M4 18h10"/>',
+    "link": '<path d="M10 13a5 5 0 0 0 7.5.5l3-3a5 5 0 0 0-7-7l-1.7 1.7"/>'
+            '<path d="M14 11a5 5 0 0 0-7.5-.5l-3 3a5 5 0 0 0 7 7l1.7-1.7"/>',
+    "swap": '<path d="M7 4 3 8l4 4M3 8h14M17 20l4-4-4-4M21 16H7"/>',
+    "copy": '<rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"/>',
+}
+
+
+def _icon(name, size=18):
+    return NotStr(f'<svg class="ico" width="{size}" height="{size}" viewBox="0 0 24 24" '
+                  'fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" '
+                  f'stroke-linejoin="round" aria-hidden="true">{_ICON_PATHS[name]}</svg>')
 
 
 def TargetSwitcher():
@@ -492,10 +525,14 @@ def TargetSwitcher():
         Option(n, value=n, selected=(n == STATE["target_name"]))
         for n in list_targets()
     ]
+    live = getattr(STATE["backend"], "live", False)
     return Div(
-        Led(),
+        Span(cls=f"led {'live' if live else 'mock'}", role="img",
+             aria_label="live: connected" if live else "mock: no server reachable",
+             title="live: connected to the kernel" if live else "mock: no server reachable"),
         Form(
             Select(*opts, name="target", cls="tsel",
+                   title="Where code runs — switch between laptop and H100",
                    onchange="this.form.submit()"),
             method="post", action="/switch",
         ),
@@ -556,7 +593,7 @@ def _dialog_leaf(label, full, active):
 def _render_dialog_nodes(node, active):
     """Recursively render a dialog-tree node: folders (collapsible) then leaves."""
     out = []
-    for seg in sorted(node["folders"]):
+    for seg in sorted(node["folders"], key=lambda s: (s.lower(), s)):
         out.append(
             Details(
                 Summary(seg, cls="folder-label"),
@@ -565,7 +602,7 @@ def _render_dialog_nodes(node, active):
                 open=True,
             )
         )
-    for label, full in sorted(node["leaves"]):
+    for label, full in sorted(node["leaves"], key=lambda t: (t[0].lower(), t)):
         out.append(_dialog_leaf(label, full, active))
     return out
 
@@ -594,12 +631,16 @@ def Sidebar():
         if len(names) > 1 else [])
     return Div(
         Div(Span("S", cls="dot"), "SolveIt Sidekick", cls="brand"),
-        A("✎  New dialog", href="/new", cls="newbtn"),
-        *recent_section,
+        A(_icon("plus", 16), "New dialog", href="/new", cls="newbtn"),
+        Label(_icon("search", 15),
+              Input(type="search", id="sideFilter", placeholder="Filter dialogs",
+                    autocomplete="off", oninput="window.__filterDialogs(this.value)"),
+              cls="side-filter") if len(names) > 6 else None,
+        Div(*recent_section, cls="recent"),
         Div("Dialogs", cls="seclabel", title="Shift/⌘-click to select several, then Delete"),
         sel_bar,
         *_render_dialog_nodes(tree, cur("dialog")),
-        Div(f"target: {STATE['target_name']}", cls="side-foot"),
+        Div("No dialogs match", cls="side-nomatch", id="sideNoMatch", style="display:none"),
         Script(src="/static/js/sidebar.js"),
         cls="side",
     )
@@ -638,7 +679,8 @@ def _stream_btn(label, post, *, cls="cell-btn", vals=None, title=None, confirm=N
 def _dropdown(summary, *children, title=None, menu_cls="ins-menu"):
     """A hover-toolbar dropdown: a `.cell-btn` summary over an absolute-positioned
     menu. Shared by the ＋ insert, ⇆ type, and paper Import… menus."""
-    return Details(Summary(summary, cls="cell-btn", title=title),
+    icon = not isinstance(summary, str)
+    return Details(Summary(summary, cls="cell-btn" + (" icon" if icon else ""), title=title),
                    Div(*children, cls=menu_cls), cls="ins")
 
 
@@ -655,7 +697,7 @@ def _insert_menu(mid):
         _insert_item(mid, "note", where, "Note"),
         _insert_item(mid, "prompt", where, "Ask AI"),
         cls="ins-col")
-    return _dropdown("＋", col("above", "↑ Above"), col("below", "↓ Below"),
+    return _dropdown(_icon("plus", 15), col("above", "↑ Above"), col("below", "↓ Below"),
                      title="Insert a cell  ·  a = above, b = below")
 
 
@@ -666,7 +708,7 @@ def _type_menu(m):
         cur = (t == m.msg_type)
         return _stream_btn(label, "/cell/type", cls="ins-item" + (" cur" if cur else ""),
                            vals={"id": mid, "msg_type": t})
-    return _dropdown("⇆", Span("Cell type", cls="ins-col-head"),
+    return _dropdown(_icon("swap", 15), Span("Cell type", cls="ins-col-head"),
                      item("code", "Code"), item("note", "Note"), item("prompt", "Ask AI"),
                      title="Change cell type  ·  y = Code, m = Note, i = Ask AI",
                      menu_cls="type-menu")
@@ -681,7 +723,7 @@ def _copy_menu(mid):
         return None
     items = [_stream_btn(d, "/cell/copy", cls="ins-item", vals={"id": mid, "target": d})
              for d in others]
-    return _dropdown("⧉", Span("Copy to dialog", cls="ins-col-head"), *items,
+    return _dropdown(_icon("copy", 15), Span("Copy to dialog", cls="ins-col-head"), *items,
                      title="Copy this cell into another dialog", menu_cls="type-menu copy-menu")
 
 
@@ -817,7 +859,7 @@ def _head(m, primary, num=None, show_actions=False):
     bits += [Span("⠿", cls="drag-handle", title="Drag to reorder"),
              Span(_TAG[m.msg_type], cls="tag")]
     if m.msg_type == "code":
-        bits.append(Span(m.id, cls="muted small"))
+        bits.append(Span(m.id, cls="muted small cid"))
     bits.append(_tok_badge(m))
     bits.append(Div(*primary, _link_btn(m), *_ctx_buttons(m),
                     cls="cell-actions" + (" show" if show_actions else "")))
@@ -828,7 +870,7 @@ def _link_btn(m):
     """🔗 Copy a #reference to this cell — SolveIt's `#_msgid` anchor. It's the exact
     string you paste into a note or prompt (same dialog) to render a clickable link
     here; prefix a dialog path (`#folder/dlg/_id`) to reference it from elsewhere."""
-    return Button("🔗", type="button", cls="cell-btn link", title="Copy a #link to this cell",
+    return Button(_icon("link", 15), type="button", cls="cell-btn link", title="Copy a #link to this cell",
                   onclick="_copyMsgLink(this)", **{"data-anchor": f"#{m.id}"})
 
 
@@ -1000,11 +1042,24 @@ def _cell_edit(m, num=None, focus_start: bool = False):
                      hx_target="#stream", hx_swap="outerHTML")
     if m.msg_type == "prompt":
         run_attrs["onclick"] = f"_showCellSpinner('{mid}')"   # instant wheel before the swap
-    primary = [
-        Button(_PRIMARY[m.msg_type], **run_attrs),
+    primary = [Button(_PRIMARY[m.msg_type], **run_attrs)]
+    if m.msg_type != "note":
+        # The touch equivalent of Esc. Esc drops a code/prompt cell out of the
+        # editor keeping the text and WITHOUT executing (see the Escape handler
+        # in STREAM_JS); a phone has no Esc, and the only other exits are
+        # Run/Ask (executes — and for a prompt, spends an AI call) or Cancel
+        # (discards). /cell/save is already "save without executing", so this
+        # needs no new route. CSS hides it wherever a real pointer exists,
+        # since Esc already covers it there. A note's primary IS Save, so it
+        # doesn't need one.
+        primary.append(Button("Done", type="button", cls="cell-btn done",
+                              title="Stop editing, keep the text, don't run",
+                              hx_post="/cell/save", hx_include=f"#ta-{mid}",
+                              hx_vals=json.dumps({"id": mid}),
+                              hx_target="#stream", hx_swap="outerHTML"))
+    primary.append(
         Button("Cancel", type="button", cls="cell-btn",
-               hx_get=f"/cell/view?id={mid}", hx_target=f"#cell-{mid}", hx_swap="outerHTML"),
-    ]
+               hx_get=f"/cell/view?id={mid}", hx_target=f"#cell-{mid}", hx_swap="outerHTML"))
     # Code cells get CodeMirror (highlight-while-editing); notes/prompts just focus.
     js = (_code_editor_js(mid, focus_start)
           if m.msg_type == "code" else _focus_js(mid, focus_start))
@@ -1754,8 +1809,21 @@ def Stream():
     scroll_to = pop_cur("scroll_to", None)        # scroll a just-added cell into view (one-shot)
     flash = pop_cur("flash", None)                # transient confirmation banner (one-shot)
     if not msgs:
-        inner = Div("Start the conversation — write code, ask the AI, or jot a note.",
-                    cls="empty")
+        start = lambda mode, icon, label, sub: Button(
+            _icon(icon, 18), Span(Strong(label), Span(sub, cls="muted")), type="button",
+            cls="start-btn",
+            onclick=f"setMode('{mode}');setTimeout(function(){{var c=document.querySelector("
+                    "'.composer .CodeMirror');if(c&&c.CodeMirror)c.CodeMirror.focus();else{{var t="
+                    "document.getElementById('composerInput');if(t)t.focus();}}}},0);")
+        inner = Div(Div(
+            Div("An empty dialog", cls="empty-title"),
+            Div("Work in small steps: write a little code, run it, look at the result, "
+                "and ask the AI when you're stuck.", cls="empty-sub"),
+            Div(start("prompt", "sparkle", "Ask AI", "Think it through together"),
+                start("code", "code", "Code", "Runs on the live kernel"),
+                start("note", "note", "Note", "Markdown, headings, math"),
+                cls="start-grid"),
+            cls="empty"), cls="wrap")
     else:
         rows = [
             _cell_edit(m, num=i, focus_start=(m.id == focus_start))
@@ -1833,14 +1901,16 @@ def Composer():
     return Div(Div(Div(
         Form(
             Input(type="hidden", name="msg_type", value=cur, id="msgType"),
-            Textarea(name="content", id="composerInput",
-                     placeholder="Message SolveIt…  (Shift+Enter to send, Enter for newline)"),
+            Textarea(name="content", id="composerInput", rows="1",
+                     placeholder="Ask, write code, or add a note…   ⇧↵ to send",
+                     title="Shift+Enter sends · Enter adds a newline · Tab switches Ask AI / Code / Note"),
             Div(
                 Div(mode("prompt", "Ask AI"), mode("code", "Code"),
                     mode("note", "Note"), cls="modes", id="modeChips"),
                 Div(ModeSelect(), ModelSelect(),
-                    Button("↑", cls="send", type="button", onclick="_submitComposer()"),
-                    style="display:flex;align-items:center;gap:8px"),
+                    Button(_icon("send", 16), cls="send", type="button", title="Send  (Shift+Enter)",
+                           onclick="_submitComposer()"),
+                    cls="compose-opts"),
                 cls="row2",
             ),
             # htmx swaps just #stream (no full-page reload) so the answer streams
@@ -1848,8 +1918,6 @@ def Composer():
             method="post", action="/send", id="composerForm", cls="box",
             hx_post="/send", hx_target="#stream", hx_swap="outerHTML",
         ),
-        Div("Connected to ", Strong(STATE["target_name"]),
-            " · switch target top-right to move between laptop and H100", cls="hint"),
         Script(src="/static/js/composer.js"),
         cls="wrap"), cls="composer"))
 
@@ -2176,26 +2244,29 @@ def Page():
             # global top bar — above all columns, so its toggles stay reachable
             # even when the dialogs panel is hidden.
             Div(
-                Div(Span("🗂", cls="gear tgl", id="tgl-side",
+                Div(Span(_icon("panel"), cls="gear tgl icon-btn", id="tgl-side", role="button", tabindex="0",
+                         aria_label="Toggle dialogs panel",
                          title="Show/hide the dialogs panel",
                          onclick="toggleCol('no-side','sidekick_noside')"),
                     # paper open → show/hide toggle; closed but this dialog
                     # remembers its source → reopen it (see /paper/reopen)
-                    (Span("📖", cls="gear tgl", id="tgl-paper",
+                    (Span(_icon("book"), cls="gear tgl icon-btn", id="tgl-paper", role="button", tabindex="0",
+                          aria_label="Toggle paper viewer",
                           title="Show/hide the paper (PDF / markdown) viewer",
                           onclick="toggleCol('no-paper','sidekick_nopaper')")
                      if STATE.get("paper") else
-                     (A("📖", href="/paper/reopen", cls="gear tgl", id="tgl-paper",
+                     (A(_icon("book"), href="/paper/reopen", cls="gear tgl icon-btn", id="tgl-paper",
                         title="Reopen this dialog's paper",
                         onclick="try{localStorage.removeItem('sidekick_nopaper')}catch(e){}")
                       if _paper_source_for(cur("dialog")) else None)),
-                    Span("☰", cls="gear tgl toc-toggle", id="tgl-toc",
+                    Span(_icon("toc"), cls="gear tgl toc-toggle icon-btn", id="tgl-toc", role="button", tabindex="0",
+                         aria_label="Toggle table of contents",
                          title="Show/hide the table of contents",
                          onclick="toggleCol('toc-open','sidekick_toc')"),
                     TitleEditor(),
                     cls="topbar-left"),
                 Div(Details(
-                        Summary("📄", cls="gear", title="Open a source — a PDF or a web page"),
+                        Summary(_icon("source"), cls="gear icon-btn", title="Open a source — a PDF or a web page"),
                         Form(
                             # Explicit button → input.click() rather than a label
                             # wrapping the hidden input: nested-label + display:none
@@ -2226,7 +2297,7 @@ def Page():
                             cls="src-form",
                             onsubmit="try{localStorage.removeItem('sidekick_nopaper')}catch(e){}"),
                         cls="export"),
-                    Details(Summary("⬇", cls="gear", title="Export this dialog"),
+                    Details(Summary(_icon("download"), cls="gear icon-btn", title="Export this dialog"),
                             Div(A("Jupyter notebook (.ipynb)", href="/export/ipynb"),
                                 A("Markdown (.md)", href="/export/md"),
                                 A("Python package (.zip)", href="/export/package"),
@@ -2236,18 +2307,19 @@ def Page():
                                   title="Generate retrieval-practice questions from this dialog"),
                                 cls="export-menu"),
                             cls="export"),
-                    Button("▶▶", cls="gear", type="button",
+                    Button(_icon("runall"), cls="gear icon-btn", type="button",
                            title="Run all code cells in this dialog, top to bottom",
                            hx_post="/cell/run-all", hx_target="#stream", hx_swap="outerHTML"),
-                    Button("⟳", cls="gear", type="button",
+                    Button(_icon("restart"), cls="gear icon-btn", type="button",
                            title="Restart the kernel — clear all variables for this dialog",
                            hx_post="/kernel/restart", hx_target="#stream", hx_swap="outerHTML",
                            **{"hx-confirm": "Restart the kernel? This clears all variables "
                                             "defined in this dialog."}),
-                    A("📦 Libraries", href="/libraries", cls="gear",
-                      title="Build Python packages from tagged cells",
-                      style="font-size:13px;font-weight:500;white-space:nowrap"),
-                    A("⚙", href="/settings", cls="gear", title="Settings — API keys"),
+                    Span(cls="tb-sep"),
+                    A(_icon("package"), href="/libraries", cls="gear icon-btn",
+                      title="Libraries — build Python packages from tagged cells"),
+                    A(_icon("settings"), href="/settings", cls="gear icon-btn",
+                      title="Settings — API keys"),
                     TargetSwitcher(),
                     cls="topbar-right"),
                 cls="topbar"),

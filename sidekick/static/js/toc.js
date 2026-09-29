@@ -58,8 +58,15 @@ window.toggleCol = function(cls, key){
     if(v === null) v = defOn ? '1' : '0';
     app.classList.toggle(cls, v === '1');
   }
+  // At phone width the dialogs panel is a full-width view that REPLACES the
+  // notebook (see the max-width:700px block in app.css), so defaulting it shown
+  // would land every phone visit on the dialog list instead of the notebook.
+  // Default it hidden there; desktop is unchanged. Only the DEFAULT moves — an
+  // explicit toggle is still remembered per device via localStorage.
+  var narrow = false;
+  try { narrow = window.matchMedia('(max-width: 700px)').matches; } catch(e){}
   restore('sidekick_toc', 'toc-open', true);          // TOC default open
-  restore('sidekick_noside', 'no-side', false);       // dialogs default shown
+  restore('sidekick_noside', 'no-side', narrow);      // dialogs: shown on desktop, hidden on phone
   restore('sidekick_nopaper', 'no-paper', false);     // paper viewer default shown
   restore('sidekick_paperhidden', 'paper-collapsed', false);  // paper text default shown
   window.syncToggles();
@@ -112,4 +119,17 @@ window.toggleCol = function(cls, key){
     document.body.classList.remove('col-resizing');
     drag = null;
   });
+})();
+
+// The topbar panel toggles are <span role="button" tabindex="0">: make Enter and
+// Space activate them like a real button, so they work from the keyboard.
+(function(){
+  if(window.__tglKeys) return; window.__tglKeys = true;
+  document.addEventListener('keydown', function(e){
+    var t = e.target;
+    if((e.key === 'Enter' || e.key === ' ') && t && t.getAttribute &&
+       t.getAttribute('role') === 'button' && t.classList.contains('tgl')){
+      e.preventDefault(); e.stopPropagation(); t.click();
+    }
+  }, true);
 })();
