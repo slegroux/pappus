@@ -94,7 +94,8 @@ window.__filterDialogs = function(q){
   });
   // deepest folders first, so a parent sees its children's final visibility
   Array.prototype.slice.call(side.querySelectorAll('.folder')).reverse().forEach(function(f){
-    var vis = Array.prototype.some.call(f.children, function(c){
+    var body = f.querySelector(':scope > .folder-body') || f;
+    var vis = Array.prototype.some.call(body.children, function(c){
       return (c.classList.contains('conv-row') || c.classList.contains('folder')) && c.style.display !== 'none';
     });
     f.style.display = (!q || vis) ? '' : 'none';
@@ -111,5 +112,210 @@ window.__filterDialogs = function(q){
         return r.offsetParent !== null && !r.closest('.recent'); });
       var a = first && first.querySelector('a.conv'); if(a) location.href = a.href;
     }
+  });
+})();
+
+// Sidebar editing, Claude-projects style: rename dialogs and groups in place,
+// create a group, move a dialog to another group, drag to re-order. A group is
+// its dialogs' name prefix; the order and collapsed state live in groups.json.
+(function(){
+  if(window.__sidebarEdit) return; window.__sidebarEdit = true;
+  var side = document.querySelector('.side'); if(!side) return;
+  function post(url, data){
+    return fetch(url, {method: 'POST', body: new URLSearchParams(data)})
+      .then(function(r){ return r.json().catch(function(){ return {ok: false, error: 'HTTP ' + r.status}; }); })
+      .catch(function(){ return {ok: false, error: 'The app did not answer.'}; });
+  }
+  // After an edit, go to the dialog this tab should show (the server says which).
+  // Never reload: the current URL may name a dialog that was just renamed, and
+  // opening it again would recreate it empty.
+  function done(res){
+    if(!res || !res.ok){ alert((res && res.error) || 'That did not work.'); return; }
+    location.href = res.open ? '/open?dialog=' + encodeURIComponent(res.open) : '/';
+  }
+  function parentOf(p){ var i = p.lastIndexOf('/'); return i < 0 ? '' : p.slice(0, i); }
+  // Names are relative to where you are: "sub/name" inside `p` is `p/sub/name`.
+  function under(parent, v){ return parent ? parent + '/' + v : v; }
+  function closeMenus(keep){
+    side.querySelectorAll('details.conv-actions[open]').forEach(function(d){
+      if(!(keep && d.contains(keep))) d.open = false; });
+    var m = document.getElementById('grpMenu');
+    if(m){ var b = document.querySelector('.grp-dots[aria-expanded="true"]'); if(b) b.setAttribute('aria-expanded', 'false'); m.remove(); }
+  }
+  // A text field floated over `anchor`: Enter or leaving the field commits,
+  // Esc cancels. Nothing is sent when the value is unchanged.
+  function edit(anchor, value, commit, opts){
+    opts = opts || {};
+    closeMenus();
+    var r = anchor.getBoundingClientRect();
+    var inp = document.createElement('input');
+    inp.type = 'text'; inp.className = 'side-edit'; inp.value = value; inp.spellcheck = false;
+    if(opts.list) inp.setAttribute('list', opts.list);
+    if(opts.placeholder) inp.placeholder = opts.placeholder;
+    inp.setAttribute('aria-label', opts.label || 'Name');
+    function place(){
+      var r = anchor.getBoundingClientRect();
+      inp.style.left = r.left + 'px'; inp.style.top = r.top + 'px';
+      inp.style.width = Math.max(r.width, 200) + 'px'; inp.style.height = Math.max(r.height, 30) + 'px';
+    }
+    place(); side.addEventListener('scroll', place, {passive: true});   // stay on the row
+    document.body.appendChild(inp); inp.focus(); inp.select();
+    var over = false;
+    function finish(ok){
+      if(over) return; over = true;
+      side.removeEventListener('scroll', place);
+      var v = inp.value.trim(); inp.remove();
+      if(ok && v !== value && (v || opts.allowEmpty)) commit(v);
+    }
+    inp.addEventListener('keydown', function(e){
+      e.stopPropagation();
+      if(e.key === 'Enter'){ e.preventDefault(); finish(true); }
+      if(e.key === 'Escape'){ e.preventDefault(); finish(false); }
+    });
+    inp.addEventListener('blur', function(){
+      // switching windows is not "done": keep the field and come back to it
+      if(!document.hasFocus()){ window.addEventListener('focus', function(){ if(!over) inp.focus(); }, {once: true}); return; }
+      finish(true);
+    });
+  }
+  function renameDialog(row){
+    var full = row.dataset.dialog;
+    edit(row, row.dataset.leaf, function(v){
+      post('/dialog/rename-to', {old: full, new: under(parentOf(full), v)}).then(done);
+    }, {label: 'Dialog name'});
+  }
+  function moveDialog(row){
+    var full = row.dataset.dialog;
+    edit(row, parentOf(full), function(v){
+      post('/dialog/move', {dialog: full, group: v}).then(done);
+    }, {list: 'groupList', placeholder: 'Group (empty: top level)', allowEmpty: true, label: 'Move to group'});
+  }
+  function renameGroup(folder){
+    var path = folder.dataset.path;
+    edit(folder.querySelector('summary'), folder.dataset.seg, function(v){
+      post('/group/rename', {old: path, new: under(parentOf(path), v)}).then(done);
+    }, {label: 'Group name'});
+  }
+  function newGroup(anchor, parent){
+    edit(anchor, '', function(v){
+      post('/group/new', {name: under(parent, v)}).then(done);
+    }, {placeholder: parent ? 'New group in ' + parent : 'New group name', label: 'New group name'});
+  }
+  function groupMenu(btn){
+    var open = btn.getAttribute('aria-expanded') === 'true';
+    closeMenus(); if(open) return;
+    var folder = btn.closest('.folder'), path = folder.dataset.path;
+    var m = document.createElement('div'); m.id = 'grpMenu'; m.className = 'grp-menu'; m.setAttribute('role', 'menu');
+    [['New dialog here', function(){ post('/group/new', {name: path}).then(done); }],
+     ['New group inside', function(){ newGroup(folder.querySelector('summary'), path); }],
+     ['Rename group', function(){ renameGroup(folder); }]].forEach(function(it){
+      var b = document.createElement('button'); b.type = 'button'; b.textContent = it[0]; b.setAttribute('role', 'menuitem');
+      b.addEventListener('click', function(e){ e.stopPropagation(); closeMenus(); it[1](); });
+      m.appendChild(b);
+    });
+    var r = btn.getBoundingClientRect();
+    m.style.top = (r.bottom + 4) + 'px'; m.style.left = Math.max(8, r.right - 190) + 'px';
+    document.body.appendChild(m); btn.setAttribute('aria-expanded', 'true');
+    var items = Array.prototype.slice.call(m.querySelectorAll('button'));
+    m.addEventListener('keydown', function(e){          // arrows move, Esc returns, Tab leaves
+      var i = items.indexOf(document.activeElement);
+      if(e.key === 'ArrowDown' || e.key === 'ArrowUp'){
+        e.preventDefault(); items[(i + (e.key === 'ArrowDown' ? 1 : items.length - 1)) % items.length].focus(); }
+      else if(e.key === 'Escape'){ e.preventDefault(); e.stopPropagation(); closeMenus(); btn.focus(); }
+      else if(e.key === 'Tab'){ closeMenus(); }
+    });
+    if(items[0]) items[0].focus();
+  }
+  document.addEventListener('click', function(e){
+    var t = e.target.closest ? e.target : null; if(!t) return;
+    var b;
+    if((b = t.closest('.grp-dots'))){ e.preventDefault(); e.stopPropagation(); groupMenu(b); return; }
+    if((b = t.closest('.grp-new'))){ e.preventDefault(); newGroup(b.closest('.seclabel'), ''); return; }
+    if((b = t.closest('.conv-rename'))){ e.preventDefault(); renameDialog(b.closest('.conv-row')); return; }
+    if((b = t.closest('.conv-move'))){ e.preventDefault(); moveDialog(b.closest('.conv-row')); return; }
+    if(!t.closest('#grpMenu')) closeMenus(t);        // leave the ⋯ being clicked to its own toggle
+  });
+  document.addEventListener('keydown', function(e){ if(e.key === 'Escape') closeMenus(); });
+  // Remember collapsed groups (not while the filter has opened everything).
+  // Browsers fire 'toggle' for every open <details> as the page renders, so only
+  // a change from the last saved state is sent.
+  side.querySelectorAll('.folder').forEach(function(f){ f.dataset.savedOpen = f.open ? '1' : '0'; });
+  side.addEventListener('toggle', function(e){
+    var f = e.target;
+    if(!f.classList || !f.classList.contains('folder')) return;
+    var q = document.getElementById('sideFilter'); if(q && q.value.trim()) return;
+    var now = f.open ? '1' : '0';
+    if(now === f.dataset.savedOpen) return;
+    f.dataset.savedOpen = now;
+    post('/group/collapse', {path: f.dataset.path, collapsed: f.open ? 0 : 1});
+  }, true);
+  // Drag to re-order. Dialogs can also be dropped into another group (a move);
+  // groups re-order within their parent only.
+  if(!window.Sortable) return;
+  function keys(el){
+    return Array.prototype.filter.call(el.children, function(c){
+      return c.classList.contains('conv-row') || c.classList.contains('folder'); })
+      .map(function(c){ return c.classList.contains('folder') ? 'f:' + c.dataset.seg : 'd:' + c.dataset.leaf; });
+  }
+  // Dropping a dialog ONTO a group's header moves it into that group (as in
+  // Claude's projects), open or collapsed. Hovering a collapsed group's header
+  // for a moment springs it open (for this view only) so it can be placed inside.
+  var dragRow = null, dropInto = null, spring = null;
+  function clearDropInto(){
+    if(dropInto) dropInto.classList.remove('drop-into');
+    dropInto = null; clearTimeout(spring);
+  }
+  function trackHeader(e){
+    if(!dragRow) return;
+    var p = e.touches ? e.touches[0] : e;
+    var el = document.elementFromPoint(p.clientX, p.clientY);
+    var head = el && el.closest && el.closest('.tree-root summary.folder-label');
+    var folder = head && head.parentElement;
+    if(folder && folder.dataset.path === parentOf(dragRow.dataset.dialog)) head = null;  // already there
+    if(head === dropInto) return;
+    clearDropInto();
+    if(!head) return;
+    dropInto = head; head.classList.add('drop-into');
+    if(!folder.open) spring = setTimeout(function(){
+      folder.dataset.savedOpen = '1';          // a temporary peek: don't save it as expanded
+      folder.open = true; }, 550);
+  }
+  document.addEventListener('mousemove', trackHeader, true);
+  document.addEventListener('touchmove', trackHeader, {capture: true, passive: true});
+  side.querySelectorAll('.tree-root, .folder-body').forEach(function(el){
+    Sortable.create(el, {
+      group: {name: 'dialogs', pull: true, put: function(to, from, drag){
+        return drag.classList.contains('conv-row') || to.el === from.el; }},
+      draggable: '.conv-row, .folder', animation: 120, delay: 180, delayOnTouchOnly: true,
+      forceFallback: true, fallbackTolerance: 4,     // mouse-driven drag: reliable in nested lists and on touch
+      fallbackOnBody: true, swapThreshold: 0.6, emptyInsertThreshold: 8,
+      ghostClass: 'drag-ghost', chosenClass: 'drag-chosen',
+      filter: 'input, .conv-actions, .grp-dots', preventOnFilter: false,
+      onStart: function(evt){ dragRow = evt.item.classList.contains('conv-row') ? evt.item : null; },
+      onMove: function(){ return !dropInto; },  // over a header: keep the list still
+      onEnd: function(evt){
+        var item = evt.item, to = evt.to, from = evt.from;
+        var target = dropInto && dropInto.parentElement.dataset.path;
+        dragRow = null; clearDropInto();
+        if(target !== undefined && target !== null && item.classList.contains('conv-row')){
+          // the mouse-up lands on the header as a click: don't let it toggle the group
+          document.addEventListener('click', function swallow(e){
+            if(e.target.closest && e.target.closest('summary')){ e.preventDefault(); e.stopPropagation(); }
+          }, {capture: true, once: true});
+          post('/dialog/move', {dialog: item.dataset.dialog, group: target}).then(function(r){
+            if(!r || !r.ok){ done(r); location.reload(); return; } done(r); });
+          return;
+        }
+        if(to === from && evt.oldIndex === evt.newIndex) return;
+        function saveOrder(){ return post('/sidebar/order', {parent: to.dataset.parent, keys: JSON.stringify(keys(to))}); }
+        if(to !== from && item.classList.contains('conv-row')){
+          // move first; record the new place only if the move succeeded
+          post('/dialog/move', {dialog: item.dataset.dialog, group: to.dataset.parent}).then(function(r){
+            if(!r || !r.ok){ done(r); location.reload(); return; }
+            saveOrder().then(function(){ done(r); });
+          });
+        } else { saveOrder(); }
+      }
+    });
   });
 })();

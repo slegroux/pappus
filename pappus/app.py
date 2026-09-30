@@ -31,6 +31,7 @@ from .claude_cli import (stream as stream_claude, call as call_claude,
                          cost_for, CLI_MODELS, AI_MODES, DEFAULT_MODE)
 from .codex_cli import stream as stream_codex, CLI_MODELS as CODEX_CLI_MODELS
 from . import secrets_store, export, libraries, nbdev_export, scaffold
+from . import groups as groupslib
 from . import paper as paperlib
 # Shared allowlist sanitizer (drops <script>, event handlers, javascript: URLs
 # while keeping tables/plots) — the same one the blog publisher uses. Rich cell
@@ -633,27 +634,56 @@ def _dialog_leaf(label, full, active):
                      method="post", action="/dialog/duplicate", style="margin:0"),
                 A("⬇  Export .ipynb", href=f"/dialog/export/ipynb?dialog={quote(full)}",
                   cls="conv-dup", title="Download this dialog as a Jupyter notebook"),
+                Button("✎  Rename", type="button", cls="conv-rename", **{"data-dialog": full}),
+                Button("↳  Move to…", type="button", cls="conv-move", **{"data-dialog": full}),
                 Button("🗑  Delete", type="button", cls="conv-del", **{"data-dialog": full}),
                 cls="conv-menu"),
             cls="conv-actions"),
-        cls="conv-row")
+        cls="conv-row", **{"data-dialog": full, "data-leaf": label})
 
 
-def _render_dialog_nodes(node, active):
-    """Recursively render a dialog-tree node: folders (collapsible) then leaves."""
+def _render_dialog_nodes(node, active, path="", layout=None):
+    """Recursively render a dialog-tree node in the user's arrangement (groups.json):
+    placed children first in their saved order, the rest sub-groups then dialogs,
+    alphabetically. Groups are folded unless the user expanded them, except the
+    groups holding the open dialog (shown open, not saved). Each carries a ⋯
+    menu; its children sit in a .folder-body that drag-and-drop targets."""
+    layout = layout if layout is not None else groupslib.load()
+    leaves: dict[str, list[str]] = {}
+    for label, full in node["leaves"]:          # `a/b` and `a//b` share a label; keep both
+        leaves.setdefault(label, []).append(full)
+    items = [("f", seg) for seg in node["folders"]] + [("d", label) for label in leaves]
     out = []
-    for seg in sorted(node["folders"], key=lambda s: (s.lower(), s)):
+    for kind, seg in groupslib.sort_children(path, items, layout):
+        if kind == "d":
+            out.extend(_dialog_leaf(seg, full, active) for full in sorted(leaves[seg]))
+            continue
+        sub = f"{path}/{seg}" if path else seg
         out.append(
             Details(
-                Summary(_icon("project", 15), Span(seg), cls="folder-label"),
-                *_render_dialog_nodes(node["folders"][seg], active),
+                Summary(_icon("project", 15), Span(seg, cls="folder-name"),
+                        Button("⋯", type="button", cls="grp-dots", title="Group actions",
+                               aria_label=f"Actions for group {seg}",
+                               **{"data-group": sub, "aria-haspopup": "menu", "aria-expanded": "false"}),
+                        cls="folder-label"),
+                Div(*_render_dialog_nodes(node["folders"][seg], active, sub, layout),
+                    cls="folder-body", **{"data-parent": sub}),
                 cls="folder",
-                open=True,
+                open=sub in layout["expanded"] or (active or "").startswith(sub + "/"),
+                **{"data-path": sub, "data-seg": seg},
             )
         )
-    for label, full in sorted(node["leaves"], key=lambda t: (t[0].lower(), t)):
-        out.append(_dialog_leaf(label, full, active))
     return out
+
+
+def _group_paths(names) -> list[str]:
+    """Every group path in the tree (for the Move-to suggestions)."""
+    out = set()
+    for n in names:
+        parts = [s for s in n.split("/") if s][:-1]
+        for i in range(1, len(parts) + 1):
+            out.add("/".join(parts[:i]))
+    return sorted(out, key=str.lower)
 
 
 # Shift/⌘-click to multi-select dialog rows, then bulk-delete. Plain click still
@@ -685,9 +715,13 @@ def Sidebar():
                     autocomplete="off", oninput="window.__filterDialogs(this.value)"),
               cls="side-filter") if len(names) > 6 else None,
         Div(*recent_section, cls="recent"),
-        Div("Dialogs", cls="seclabel", title="Shift/⌘-click to select several, then Delete"),
+        Div(Span("Dialogs", title="Shift/⌘-click to select several, then Delete"),
+            Button(_icon("plus", 14), type="button", cls="grp-new", title="New group",
+                   aria_label="New group"),
+            cls="seclabel seclabel-row"),
         sel_bar,
-        *_render_dialog_nodes(tree, cur("dialog")),
+        Div(*_render_dialog_nodes(tree, cur("dialog")), cls="tree-root", **{"data-parent": ""}),
+        Datalist(*[Option(value=g) for g in _group_paths(names)], id="groupList"),
         Div("No dialogs match", cls="side-nomatch", id="sideNoMatch", style="display:none"),
         Script(src="/static/js/sidebar.js"),
         cls="side",
@@ -1698,6 +1732,7 @@ STREAM_JS = """
   }
   document.addEventListener('keydown', function(e){
     if((e.metaKey || e.ctrlKey) && e.key !== 'Enter') return;   // allow Cmd/Ctrl+Enter through
+    if(e.target.closest && e.target.closest('.side, #grpMenu')) return;  // sidebar keys stay in the sidebar
     var inEditor = window.__inEditor(e.target);
 
     if(e.key === 'Escape'){                        // leave edit mode -> command mode
@@ -2721,22 +2756,180 @@ def cell_export_to(id: str, lib: str = "", module: str = "core"):
     return Stream()
 
 
+def _rename_one(old: str, new: str) -> None:
+    """Rename a dialog: the backend (cells, kernel namespace), the Codex session,
+    and the open dialog if it was this one. Raises ValueError on a name clash."""
+    backend = STATE["backend"]
+    if not hasattr(backend, "rename"):
+        raise ValueError("This backend can't rename dialogs.")
+    if old not in backend.list_dialogs():       # renamed/deleted meanwhile (another tab)
+        raise ValueError(f"No dialog named '{old}'.")
+    backend.rename(old, new)
+    try:
+        from . import codex_cli
+        codex_cli.rename(old, new)
+    except Exception:  # noqa: BLE001 — session carry is best-effort
+        _dbg(f"codex rename({old!r}, {new!r}) failed")
+    # Every tab that has `old` open follows it; a stale name would otherwise be
+    # recreated as an empty dialog on that tab's next render.
+    with _STATE_LOCK:
+        if STATE.get("dialog") == old:
+            STATE["dialog"] = new
+        for ov in SESSIONS.values():
+            if ov.get("dialog") == old:
+                ov["dialog"] = new
+    if cur("dialog") == old:
+        _set_dialog(new)
+
+
 @rt("/rename", methods=["post"])
 def rename_dialog(old: str, new: str):
     new = (new or "").strip()
-    backend = STATE["backend"]
-    if new and new != old and hasattr(backend, "rename"):
+    if new and new != old:
         try:
-            backend.rename(old, new)
-            try:
-                from . import codex_cli
-                codex_cli.rename(old, new)
-            except Exception:  # noqa: BLE001 — session carry is best-effort
-                _dbg(f"codex rename({old!r}, {new!r}) failed")
+            _rename_one(old, new)
             _set_dialog(new)
         except ValueError as e:
             STATE["warning"] = str(e)          # surfaced as the banner
     return Page()
+
+
+# ---- sidebar editing: groups (name prefixes) and their arrangement ----------
+def _clean_path(name: str) -> str | None:
+    """A group or dialog path as typed: NFC-normalised, trimmed, no empty/./..
+    segments and no invisible or control characters (look-alike names)."""
+    import unicodedata
+    name = unicodedata.normalize("NFC", name or "")
+    if any(unicodedata.category(ch) in ("Cc", "Cf") for ch in name):
+        return None
+    parts = [p.strip() for p in name.strip().strip("/").split("/")]
+    if not parts or any(p in ("", ".", "..") for p in parts):
+        return None
+    return "/".join(parts)
+
+
+def _group_members(group: str) -> list[str]:
+    return [d for d in STATE["backend"].list_dialogs() if d.startswith(group + "/")]
+
+
+def _rename_group(old: str, new: str) -> None:
+    """Rename every dialog under `old` to live under `new`, all or nothing: on any
+    failure the dialogs already moved are moved back. Raises ValueError."""
+    new = _clean_path(new)
+    if not (old or "").strip() or not new:
+        raise ValueError("A group name can't be empty or contain empty parts.")
+    if new == old:
+        return
+    if new.startswith(old + "/"):
+        raise ValueError("A group can't be moved inside itself.")
+    members = _group_members(old)
+    if not members:
+        raise ValueError(f"No group named '{old}'.")
+    pairs = [(d, new + d[len(old):]) for d in members]
+    taken = set(STATE["backend"].list_dialogs()) - set(members)
+    clash = [t for _, t in pairs if t in taken]
+    if clash:
+        raise ValueError(f"'{clash[0]}' already exists.")
+    done = []
+    try:
+        for a, b in pairs:
+            _rename_one(a, b)
+            done.append((a, b))
+    except Exception:
+        for a, b in reversed(done):             # roll back what already moved
+            try:
+                _rename_one(b, a)
+            except Exception as e:  # noqa: BLE001 — keep undoing the rest
+                _dbg(f"rollback {b!r} -> {a!r} failed: {e}")
+        raise
+    groupslib.rename_group(old, new)
+
+
+def _ok(**kw):
+    """Success, plus the dialog this tab should show next (`open`): the client
+    navigates there instead of reloading a URL that may name a renamed dialog."""
+    return _json({"ok": True, "open": cur("dialog"), **kw})
+
+
+def _err(e) -> object:
+    return _json({"ok": False, "error": str(e)}, 400)
+
+
+@rt("/dialog/rename-to", methods=["post"])
+def sidebar_rename_dialog(old: str, new: str):
+    """Rename from the sidebar; stays on whichever dialog is open."""
+    target = _clean_path(new)
+    if not target:
+        return _err("A dialog name can't be empty.")
+    try:
+        if target != old:
+            _rename_one(old, target)
+            groupslib.rename_dialog(old, target)
+        return _ok(name=target)
+    except ValueError as e:
+        return _err(e)
+
+
+@rt("/dialog/move", methods=["post"])
+def sidebar_move_dialog(dialog: str, group: str = ""):
+    leaf = dialog.rsplit("/", 1)[-1]
+    grp = _clean_path(group) if (group or "").strip() else ""
+    if grp is None:
+        return _err("That group name isn't valid.")
+    target = f"{grp}/{leaf}" if grp else leaf
+    if not leaf.strip():
+        return _err("That dialog name isn't valid.")
+    try:
+        if target != dialog:
+            _rename_one(dialog, target)
+            groupslib.rename_dialog(dialog, target)
+        return _ok(name=target)
+    except ValueError as e:
+        return _err(e)
+
+
+@rt("/group/rename", methods=["post"])
+def sidebar_rename_group(old: str, new: str):
+    try:
+        _rename_group(old, new)
+        return _ok(name=_clean_path(new))
+    except ValueError as e:
+        return _err(e)
+
+
+@rt("/group/new", methods=["post"])
+def sidebar_new_group(name: str):
+    """A group exists through its dialogs, so a new group starts with one empty
+    dialog, `<group>/untitled`, which opens."""
+    grp = _clean_path(name)
+    if not grp:
+        return _err("A group name can't be empty.")
+    backend = STATE["backend"]
+    dialog = _unique_dialog(backend, f"{grp}/untitled")
+    backend.messages(dialog)                    # touch -> create (as /new does)
+    save = getattr(backend, "_save", None)
+    if callable(save):
+        save()                                  # a new group survives a restart
+    _set_dialog(dialog)
+    return _ok(name=dialog)
+
+
+@rt("/sidebar/order", methods=["post"])
+def sidebar_order(parent: str = "", keys: str = "[]"):
+    try:
+        items = json.loads(keys)
+    except ValueError:
+        return _err("Bad order.")
+    if not isinstance(items, list) or not all(isinstance(k, str) for k in items):
+        return _err("Bad order.")
+    groupslib.set_order(parent or "", items)
+    return _ok()
+
+
+@rt("/group/collapse", methods=["post"])
+def sidebar_collapse(path: str, collapsed: int = 1):
+    groupslib.set_collapsed(path, bool(collapsed))
+    return _ok()
 
 
 @rt("/open")
