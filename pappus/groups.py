@@ -1,5 +1,6 @@
 """The sidebar arrangement the user makes: an order for each group's children
-and which groups are collapsed, saved as groups.json in the data root.
+and which groups are expanded (groups are folded by default), saved as
+groups.json in the data root.
 
 Membership is never stored here. A dialog's group is still the prefix of its
 name (`speech/tts/fastpitch` lives in `speech` → `tts`), so this file only
@@ -27,8 +28,9 @@ def _path() -> Path:
 
 
 def load() -> dict:
-    """{"order": {parent_path: [key, ...]}, "collapsed": [group_path, ...]}.
-    A missing or damaged file reads as empty (the default alphabetical layout)."""
+    """{"order": {parent_path: [key, ...]}, "expanded": [group_path, ...]}.
+    A missing or damaged file reads as empty: alphabetical, everything folded.
+    (An older "collapsed" list is ignored: folded is now the default.)"""
     try:
         raw = json.loads(_path().read_text())
     except (OSError, ValueError):
@@ -36,10 +38,10 @@ def load() -> dict:
     if not isinstance(raw, dict):
         raw = {}
     order = raw.get("order") if isinstance(raw.get("order"), dict) else {}
-    collapsed = raw.get("collapsed") if isinstance(raw.get("collapsed"), list) else []
+    expanded = raw.get("expanded") if isinstance(raw.get("expanded"), list) else []
     return {
         "order": {str(k): [str(x) for x in v] for k, v in order.items() if isinstance(v, list)},
-        "collapsed": sorted({str(x) for x in collapsed}),
+        "expanded": sorted({str(x) for x in expanded}),
     }
 
 
@@ -60,11 +62,12 @@ def set_order(parent: str, keys: list[str]) -> None:
 
 
 def set_collapsed(path: str, collapsed: bool) -> None:
+    """Remember a fold/unfold. Only expanded groups are stored."""
     with _LOCK:
         layout = load()
-        names = set(layout["collapsed"])
-        (names.add if collapsed else names.discard)(path)
-        layout["collapsed"] = sorted(names)
+        names = set(layout["expanded"])
+        (names.discard if collapsed else names.add)(path)
+        layout["expanded"] = sorted(names)
         save(layout)
 
 
@@ -84,7 +87,7 @@ def _parent_and_seg(path: str) -> tuple[str, str]:
 
 def rename_group(old: str, new: str) -> None:
     """Carry the arrangement across a group rename: its own order lists, its
-    collapsed state, and its entry in its parent's order."""
+    expanded state, and its entry in its parent's order."""
     with _LOCK:
         layout = load()
         order: dict[str, list[str]] = {}
@@ -101,7 +104,7 @@ def rename_group(old: str, new: str) -> None:
             else:
                 order[old_parent] = [k for k in siblings if k != f"f:{old_seg}"]
         layout["order"] = order
-        layout["collapsed"] = sorted({_moved(c, old, new) for c in layout["collapsed"]})
+        layout["expanded"] = sorted({_moved(c, old, new) for c in layout["expanded"]})
         save(layout)
 
 

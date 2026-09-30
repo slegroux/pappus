@@ -645,8 +645,9 @@ def _dialog_leaf(label, full, active):
 def _render_dialog_nodes(node, active, path="", layout=None):
     """Recursively render a dialog-tree node in the user's arrangement (groups.json):
     placed children first in their saved order, the rest sub-groups then dialogs,
-    alphabetically. Each group is collapsible, remembers that state, and carries a
-    ⋯ menu; its children sit in a .folder-body that drag-and-drop targets."""
+    alphabetically. Groups are folded unless the user expanded them, except the
+    groups holding the open dialog (shown open, not saved). Each carries a ⋯
+    menu; its children sit in a .folder-body that drag-and-drop targets."""
     layout = layout if layout is not None else groupslib.load()
     leaves: dict[str, list[str]] = {}
     for label, full in node["leaves"]:          # `a/b` and `a//b` share a label; keep both
@@ -668,7 +669,7 @@ def _render_dialog_nodes(node, active, path="", layout=None):
                 Div(*_render_dialog_nodes(node["folders"][seg], active, sub, layout),
                     cls="folder-body", **{"data-parent": sub}),
                 cls="folder",
-                open=sub not in layout["collapsed"],
+                open=sub in layout["expanded"] or (active or "").startswith(sub + "/"),
                 **{"data-path": sub, "data-seg": seg},
             )
         )

@@ -35,18 +35,23 @@ def _body(resp):
 # ---- groups.json -------------------------------------------------------------
 def test_layout_roundtrip_and_damaged_file():
     groups.set_order("", ["f:speech", "d:scratch", "x:bad"])
-    groups.set_collapsed("audio", True)
+    groups.set_collapsed("audio", False)                        # unfold = remembered
     lay = groups.load()
     assert lay["order"][""] == ["f:speech", "d:scratch"]      # unknown kinds dropped
-    assert lay["collapsed"] == ["audio"]
-    groups.set_collapsed("audio", False)
-    assert groups.load()["collapsed"] == []
+    assert lay["expanded"] == ["audio"]
+    groups.set_collapsed("audio", True)
+    assert groups.load()["expanded"] == []
     groups._path().write_text("{not json")
-    assert groups.load() == {"order": {}, "collapsed": []}    # damaged file = default layout
+    assert groups.load() == {"order": {}, "expanded": []}     # damaged file = default layout
+
+
+def test_legacy_collapsed_list_is_ignored():
+    groups._path().write_text('{"order": {}, "collapsed": ["audio"]}')
+    assert groups.load()["expanded"] == []                     # folded is the default now
 
 
 def test_sort_children_placed_first_then_default():
-    lay = {"order": {"": ["d:scratch", "f:speech"]}, "collapsed": []}
+    lay = {"order": {"": ["d:scratch", "f:speech"]}, "expanded": []}
     items = [("f", "audio"), ("f", "speech"), ("d", "scratch"), ("d", "alpha")]
     assert groups.sort_children("", items, lay) == [
         ("d", "scratch"), ("f", "speech"),                     # user's order
@@ -57,24 +62,30 @@ def test_rename_group_carries_order_and_collapse():
     groups.set_order("", ["f:speech", "f:audio"])
     groups.set_order("speech", ["f:tts", "d:intro"])
     groups.set_order("speech/tts", ["d:fastpitch"])
-    groups.set_collapsed("speech/tts", True)
+    groups.set_collapsed("speech/tts", False)
     groups.rename_group("speech", "voice")
     lay = groups.load()
     assert lay["order"][""] == ["f:voice", "f:audio"]
     assert lay["order"]["voice"] == ["f:tts", "d:intro"]
     assert lay["order"]["voice/tts"] == ["d:fastpitch"]
-    assert lay["collapsed"] == ["voice/tts"]
+    assert lay["expanded"] == ["voice/tts"]
 
 
 # ---- rendering ---------------------------------------------------------------
+def _folder_tag(h, path):
+    i = h.index(f'data-path="{path}"')
+    return h[h.rindex("<details", 0, i):h.index(">", i)]
+
+
 def test_sidebar_follows_saved_order_and_collapse(backend):
     groups.set_order("", ["d:scratch", "f:speech", "f:audio"])
-    groups.set_collapsed("audio", True)
     h = to_xml(app.Sidebar())
     tree = h[h.index('class="tree-root"'):]
     assert tree.index('data-dialog="scratch"') < tree.index('data-path="speech"') < tree.index('data-path="audio"')
-    audio = tree[tree.index('data-path="audio"') - 200:tree.index('data-path="audio"')]
-    assert " open" not in audio                                 # collapsed group renders closed
+    assert " open" not in _folder_tag(tree, "audio")            # groups are folded by default
+    assert " open" in _folder_tag(tree, "speech")               # ...except the open dialog's
+    groups.set_collapsed("audio", False)                        # the user unfolds one
+    assert " open" in _folder_tag(to_xml(app.Sidebar()), "audio")
     assert 'class="grp-new"' in h and 'class="grp-dots"' in h   # new-group + group menu
     assert 'id="groupList"' in h and 'value="speech/tts"' in h  # Move-to suggestions
     assert "conv-rename" in h and "conv-move" in h
@@ -164,10 +175,10 @@ def test_order_and_collapse_routes(backend):
     assert groups.load()["order"]["speech"] == ["d:intro", "f:tts"]
     assert app.sidebar_order("", "not json").status_code == 400
     assert app.sidebar_order("", json.dumps([1, 2])).status_code == 400
-    app.sidebar_collapse("audio", 1)
-    assert groups.load()["collapsed"] == ["audio"]
     app.sidebar_collapse("audio", 0)
-    assert groups.load()["collapsed"] == []
+    assert groups.load()["expanded"] == ["audio"]
+    app.sidebar_collapse("audio", 1)
+    assert groups.load()["expanded"] == []
 
 
 # ---- regressions found in the browser ----------------------------------------
@@ -176,10 +187,10 @@ def test_concurrent_layout_writes_lose_nothing():
     race on one temp file (500s) and could drop each other's updates."""
     import threading
     paths = [f"g{i}" for i in range(24)]
-    ts = [threading.Thread(target=groups.set_collapsed, args=(p, True)) for p in paths]
+    ts = [threading.Thread(target=groups.set_collapsed, args=(p, False)) for p in paths]
     [t.start() for t in ts]
     [t.join() for t in ts]
-    assert groups.load()["collapsed"] == sorted(paths)
+    assert groups.load()["expanded"] == sorted(paths)
 
 
 def test_new_group_survives_a_restart():
