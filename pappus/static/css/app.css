@@ -714,6 +714,7 @@ select.msel:hover{background-color:var(--hover);color:var(--ink)}
 .side .drag-ghost{opacity:.35}
 .side .drag-chosen>.conv,.side .drag-chosen>summary{background:var(--active)}
 .side .folder-body:empty{min-height:6px}
+.side summary.folder-label.drop-into{background:var(--accent-soft);box-shadow:inset 0 0 0 1px var(--accent);border-radius:8px}
 .code-view .highlight,.md .highlight{border-radius:12px}
 .newbtn{background:var(--surface);border:1px solid var(--line);box-shadow:none;border-radius:8px}
 /* you: a soft grey bubble, like Claude's user message; the answer sits on the page */

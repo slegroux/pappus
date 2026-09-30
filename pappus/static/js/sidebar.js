@@ -257,6 +257,31 @@ window.__filterDialogs = function(q){
       return c.classList.contains('conv-row') || c.classList.contains('folder'); })
       .map(function(c){ return c.classList.contains('folder') ? 'f:' + c.dataset.seg : 'd:' + c.dataset.leaf; });
   }
+  // Dropping a dialog ONTO a group's header moves it into that group (as in
+  // Claude's projects), open or collapsed. Hovering a collapsed group's header
+  // for a moment springs it open (for this view only) so it can be placed inside.
+  var dragRow = null, dropInto = null, spring = null;
+  function clearDropInto(){
+    if(dropInto) dropInto.classList.remove('drop-into');
+    dropInto = null; clearTimeout(spring);
+  }
+  function trackHeader(e){
+    if(!dragRow) return;
+    var p = e.touches ? e.touches[0] : e;
+    var el = document.elementFromPoint(p.clientX, p.clientY);
+    var head = el && el.closest && el.closest('.tree-root summary.folder-label');
+    var folder = head && head.parentElement;
+    if(folder && folder.dataset.path === parentOf(dragRow.dataset.dialog)) head = null;  // already there
+    if(head === dropInto) return;
+    clearDropInto();
+    if(!head) return;
+    dropInto = head; head.classList.add('drop-into');
+    if(!folder.open) spring = setTimeout(function(){
+      folder.dataset.savedOpen = '1';          // a temporary peek: don't save it as expanded
+      folder.open = true; }, 550);
+  }
+  document.addEventListener('mousemove', trackHeader, true);
+  document.addEventListener('touchmove', trackHeader, {capture: true, passive: true});
   side.querySelectorAll('.tree-root, .folder-body').forEach(function(el){
     Sortable.create(el, {
       group: {name: 'dialogs', pull: true, put: function(to, from, drag){
@@ -266,8 +291,21 @@ window.__filterDialogs = function(q){
       fallbackOnBody: true, swapThreshold: 0.6, emptyInsertThreshold: 8,
       ghostClass: 'drag-ghost', chosenClass: 'drag-chosen',
       filter: 'input, .conv-actions, .grp-dots', preventOnFilter: false,
+      onStart: function(evt){ dragRow = evt.item.classList.contains('conv-row') ? evt.item : null; },
+      onMove: function(){ return !dropInto; },  // over a header: keep the list still
       onEnd: function(evt){
         var item = evt.item, to = evt.to, from = evt.from;
+        var target = dropInto && dropInto.parentElement.dataset.path;
+        dragRow = null; clearDropInto();
+        if(target !== undefined && target !== null && item.classList.contains('conv-row')){
+          // the mouse-up lands on the header as a click: don't let it toggle the group
+          document.addEventListener('click', function swallow(e){
+            if(e.target.closest && e.target.closest('summary')){ e.preventDefault(); e.stopPropagation(); }
+          }, {capture: true, once: true});
+          post('/dialog/move', {dialog: item.dataset.dialog, group: target}).then(function(r){
+            if(!r || !r.ok){ done(r); location.reload(); return; } done(r); });
+          return;
+        }
         if(to === from && evt.oldIndex === evt.newIndex) return;
         function saveOrder(){ return post('/sidebar/order', {parent: to.dataset.parent, keys: JSON.stringify(keys(to))}); }
         if(to !== from && item.classList.contains('conv-row')){
