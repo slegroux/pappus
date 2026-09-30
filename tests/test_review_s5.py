@@ -23,7 +23,7 @@ import re
 import pytest
 from starlette.testclient import TestClient
 
-import sidekick.app as app
+import pappus.app as app
 
 
 # The current dialog is uniquely marked by the rename box (exactly one per page):

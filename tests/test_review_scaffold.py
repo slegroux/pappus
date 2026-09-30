@@ -1,10 +1,10 @@
 """Tests for the faded-scaffolding learning mechanic (F6).
 
-Covers the pure fade logic in ``sidekick.scaffold`` and the ``/cell/fade`` route
-wiring in ``sidekick.app`` (mirrors the split-to-code pattern).
+Covers the pure fade logic in ``pappus.scaffold`` and the ``/cell/fade`` route
+wiring in ``pappus.app`` (mirrors the split-to-code pattern).
 """
 
-from sidekick import scaffold
+from pappus import scaffold
 
 
 # A worked example that exercises every fade rule: an import (scaffolding), a
@@ -93,7 +93,7 @@ def test_check_prompt():
 
 # ── route wiring ─────────────────────────────────────────────────────────────
 def test_fade_route_inserts_exercise():
-    import sidekick.app as app
+    import pappus.app as app
     app.STATE["dialog"] = "fade/route"
     bk = app.STATE["backend"]
     bk.messages("fade/route")
@@ -115,7 +115,7 @@ def test_fade_route_inserts_exercise():
 
 
 def test_fade_route_refades_in_place():
-    import sidekick.app as app
+    import pappus.app as app
     app.STATE["dialog"] = "fade/inplace"
     bk = app.STATE["backend"]
     bk.messages("fade/inplace")
@@ -135,7 +135,7 @@ def test_fade_route_refades_in_place():
 
 
 def test_check_route_inserts_prompt():
-    import sidekick.app as app
+    import pappus.app as app
     app.STATE["dialog"] = "fade/check"
     bk = app.STATE["backend"]
     bk.messages("fade/check")

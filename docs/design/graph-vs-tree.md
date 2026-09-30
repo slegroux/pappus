@@ -4,7 +4,7 @@ Status: **accepted** (frame consensus-reviewed by Planner/Architect/Critic; road
 
 ## The question
 
-As Sidekick grows past single, independent dialogs, two ways of "relating"
+As Pappus grows past single, independent dialogs, two ways of "relating"
 dialogs pull in different directions:
 
 - **Graph** — dialogs cross-reference each other (the `#_msgid` message links),
@@ -29,7 +29,7 @@ mechanisms, and they are kept orthogonal.**
 | How does my knowledge connect? What does the AI see as context? | dialog names + message links + `build_context` | **graph** | learning, exploration |
 | How is the shipped library laid out? | `#\| export <module>` directives → nbdev build (or `export.tangle`) | **tree** | building, packaging |
 
-`sidekick/export.py` already embodies this: its docstring calls it *"the inverse
+`pappus/export.py` already embodies this: its docstring calls it *"the inverse
 of `build_context`."* One serializes cells **into** AI context (graph); the other
 emits cells **as** a package (tree). Same cells, opposite direction.
 
@@ -79,7 +79,7 @@ it carries a **freshness** question (if A includes B and B changes, is A's conte
 stale?) — the flip side of the living-knowledge-base direction, and something a
 static "concat the cells" implementation would get wrong.
 
-Note also: Sidekick has no real folders on disk. Dialogs are stored as one JSON
+Note also: Pappus has no real folders on disk. Dialogs are stored as one JSON
 per target, keyed by `/`-separated *name*; the sidebar tree is derived from those
 names. So "a file in a folder" isn't even a thing here — another reason the
 file-based CRAFT model doesn't map, and a naming/reference convention does.
@@ -91,7 +91,7 @@ file-based CRAFT model doesn't map, and a naming/reference convention does.
   join its `build_context`. Sound direction; the hard parts are named under
   "Open questions" below, not free.
 - **Library (tree side):** the build engine is **nbdev** (decided — see "Build
-  engine" below). Sidekick projects a library's tagged cells into nbdev-ready
+  engine" below). Pappus projects a library's tagged cells into nbdev-ready
   notebooks and nbdev builds the package + docs + tests; module assembly and
   collision handling are nbdev's job, not ours. Cell-level selection and module
   targeting already exist (the per-cell Export toggle, `#| export <module>`); what
@@ -165,11 +165,11 @@ and provenance (per-cell back-links).
 
 ### Build engine — decided: delegate to nbdev (the tool)
 
-Sidekick does **not** build the library itself. A library's tagged cells are
+Pappus does **not** build the library itself. A library's tagged cells are
 projected into **nbdev-ready `.ipynb` notebooks** (one notebook per module,
 carrying `#| default_exp <module>` plus each cell's `#| export`), written into an
 **nbdev project** whose path the manifest holds; **nbdev** then builds the `.py`
-package, the docs site, the tests, and the release. Sidekick owns the
+package, the docs site, the tests, and the release. Pappus owns the
 *graph→notebook* projection; nbdev owns *notebook→library*. `export.py`'s own
 tangler is demoted to a lightweight "quick zip, no nbdev needed" convenience.
 
@@ -177,7 +177,7 @@ This settles the earlier **write-target** question: the target is an nbdev proje
 directory. Source-of-truth chain: **dialog cells (you edit here) → generated
 `.ipynb` (never hand-edited) → nbdev → `.py` + docs + tests**. Note the mild
 inversion of normal nbdev use — the notebooks are a *generated* hand-off artifact,
-so you edit in Sidekick, not in the notebooks, and a re-Build regenerates them.
+so you edit in Pappus, not in the notebooks, and a re-Build regenerates them.
 Consistent with the lens/snapshot decisions, just one hop longer.
 
 **New open sub-questions (nbdev delegation):**
@@ -188,11 +188,11 @@ Consistent with the lens/snapshot decisions, just one hop longer.
   rate limit; `nbdev-new`'s template download hits the hardcoded-unauthenticated
   GitHub API and can't be fixed with a token). Rebuilds reuse the existing project
   and just refresh notebooks. Falls back to a minimal `pyproject.toml` if nbdev
-  isn't installed. Opt out with `SIDEKICK_NBDEV_SCAFFOLD=0`. The `nbdev-new`
+  isn't installed. Opt out with `PAPPUS_NBDEV_SCAFFOLD=0`. The `nbdev-new`
   template extras (LICENSE/CI/docs) are out of scope — run it yourself once.
-- *Integration depth:* **decided — Sidekick shells out** to `nbdev-export` on Build
+- *Integration depth:* **decided — Pappus shells out** to `nbdev-export` on Build
   (one click), best-effort; if nbdev is absent the notebooks are still emitted.
-- *Where nbdev runs:* the project's own env, separate from Sidekick's app env.
+- *Where nbdev runs:* the project's own env, separate from Pappus's app env.
 - *Provenance carrier:* how the `#_id` back-link rides an emitted cell so it
   survives into the `.py` (a comment nbdev passes through).
 
@@ -206,7 +206,7 @@ here stops a reader from assuming the roadmap is turnkey (it is not).
   points at one `_id`, implying cell-level; "those cells join context" implies
   whole-dialog — different features.)
 - *Budget / mute / pin:* included cells compete for the same
-  `SIDEKICK_CTX_MAX_CHARS` budget. Are they muting-aware, pinnable, truncated,
+  `PAPPUS_CTX_MAX_CHARS` budget. Are they muting-aware, pinnable, truncated,
   droppable? Default stance: an include resolves to specific cells and counts
   against the budget like any other cell — so it can't silently blow it and drop
   the user's own newest cells (`build_context` drops oldest non-pinned first).
@@ -221,7 +221,7 @@ under "Build engine — delegate to nbdev" above (notebook granularity, project
 lifecycle, integration depth, provenance carrier) and the manifest's cell schema.
 
 **Out of scope for this frame:** SolveIt's `TEMPLATE.ipynb` and `AUTORUN/` have no
-analog in Sidekick and are not addressed here.
+analog in Pappus and are not addressed here.
 
 ## What to check any future feature against
 

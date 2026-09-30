@@ -18,7 +18,7 @@ np = pytest.importorskip("numpy")   # lives only in the `kernel` extra — skip,
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from sidekick.audio import play
+from pappus.audio import play
 from server import kernel_server
 
 
@@ -213,6 +213,6 @@ def test_run_prompt_reports_missing_sdk(monkeypatch):
 
 def test_run_prompt_without_key_is_offline_stub(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    monkeypatch.setattr("sidekick.secrets_store.key_for_model", lambda m: None)
+    monkeypatch.setattr("pappus.secrets_store.key_for_model", lambda m: None)
     out = kernel_server.run_prompt("d", "hello", "claude")
     assert "no API key" in out

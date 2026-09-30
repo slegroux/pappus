@@ -1,11 +1,11 @@
-# SolveIt Sidekick — target profiles
+# Pappus — target profiles
 #
 # A "target" is just a SolveIt server the client connects to. The whole
 # local-vs-H100 problem collapses into: which target is active right now.
 #
 # - `local`  : a SolveIt server running on your laptop (localhost:5001).
 # - `h100`   : a SolveIt server running on the remote H100 box. We never expose
-#              5001 to the internet; instead `sidekick up h100` opens an SSH
+#              5001 to the internet; instead `pappus up h100` opens an SSH
 #              tunnel so the remote port shows up on a local port, and the
 #              client talks to *that*. Same client code, both targets.
 #
@@ -82,7 +82,7 @@ targets:
     ssh: null
 
   h100:
-    # The client connects here. `sidekick up h100` forwards the remote
+    # The client connects here. `pappus up h100` forwards the remote
     # SolveIt port to this local port, so the URL stays localhost.
     url: http://localhost:5101
     token_env: SOLVEIT_H100_TOKEN   # `export SOLVEIT_H100_TOKEN=...` (your _solveit cookie)

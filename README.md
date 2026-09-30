@@ -1,8 +1,14 @@
-# SolveIt Sidekick
+# Pappus
 
 A clean, Claude-desktop-style interface for [SolveIt](https://solve.it.com) that
 runs against **your laptop** or a **remote H100** — switchable from a dropdown in
 the top-right, with no change to how you work.
+
+> **Renamed from SolveIt Sidekick.** On first start, Pappus moves your data from
+> `~/.config/solveit-sidekick` to `~/.config/pappus` and leaves a link at the old
+> path. Settings exported as `SIDEKICK_*` still work as their `PAPPUS_*`
+> equivalents (an explicit `PAPPUS_*` wins). The data folder is set with
+> `PAPPUS_DATA`.
 
 ## The core idea
 
@@ -10,11 +16,11 @@ SolveIt's own client (`solveit_client`) already connects to *any* server URL:
 it defaults to `http://localhost:5001` and takes `SOLVEIT_URL` for hosted
 instances. So "local vs H100" is just **which target the client points at**.
 
-Sidekick turns that into a first-class switch:
+Pappus turns that into a first-class switch:
 
 ```
 ┌──────────────┐         local  → http://localhost:5001        (laptop)
-│  Sidekick UI │ ──────► h100   → http://localhost:5101  ⇢ SSH ⇢ H100:5001
+│  Pappus UI │ ──────► h100   → http://localhost:5101  ⇢ SSH ⇢ H100:5001
 └──────────────┘         (the H100's SolveIt port is tunneled to localhost,
                           so it never touches the public internet)
 ```
@@ -27,12 +33,12 @@ profile in `targets.yaml`.
 | File | Purpose |
 |------|---------|
 | `targets.yaml`        | Define `local` and `h100` targets (URL, token, SSH) |
-| `sidekick/targets.py` | Load/resolve profiles (token from env, graceful if unset) |
-| `sidekick/tunnel.py`  | Open/close the SSH tunnel to the H100, wait until live |
-| `sidekick/doctor.py`  | Diagnose connection/setup (DNS, port, token, `/test_route`) |
-| `sidekick/client.py`  | Wrap `solveit_client`; fall back to an in-memory mock |
-| `sidekick/app.py`     | The web UI (FastHTML), styled like the Claude desktop app |
-| `sidekick/cli.py`     | `sidekick targets / doctor / up / serve` |
+| `pappus/targets.py` | Load/resolve profiles (token from env, graceful if unset) |
+| `pappus/tunnel.py`  | Open/close the SSH tunnel to the H100, wait until live |
+| `pappus/doctor.py`  | Diagnose connection/setup (DNS, port, token, `/test_route`) |
+| `pappus/client.py`  | Wrap `solveit_client`; fall back to an in-memory mock |
+| `pappus/app.py`     | The web UI (FastHTML), styled like the Claude desktop app |
+| `pappus/cli.py`     | `pappus targets / doctor / up / serve` |
 
 The mock fallback means the UI runs **with no SolveIt server at all** — handy for
 trying the interface or developing it away from the H100. When a real target is
@@ -48,7 +54,7 @@ every dependency for you, so you never touch `pip` or a venv by hand.
 curl -LsSf https://astral.sh/uv/install.sh | sh
 
 # 2. get the repo
-git clone <this-repo> solveit-sidekick && cd solveit-sidekick
+git clone <this-repo> pappus && cd pappus
 
 # 3. install EVERYTHING up front — the base app, the kernel's numpy/torch/… stack,
 #    `paper` (marker — REQUIRED to open PDFs: structure, sections, equations,
@@ -70,15 +76,15 @@ No `just`? Run the two processes yourself in two terminals:
 # terminal 1 — the kernel server (executes your code)
 uv run --extra kernel python -m server.kernel_server --port 5055
 # terminal 2 — verify the connection, then launch the UI
-uv run python -m sidekick.cli doctor kernel     # every check should pass
-SIDEKICK_TARGET=kernel uv run python -m sidekick.cli serve   # → http://localhost:8000
+uv run python -m pappus.cli doctor kernel     # every check should pass
+PAPPUS_TARGET=kernel uv run python -m pappus.cli serve   # → http://localhost:8000
 ```
 
 **Is it live?** Look at the LED in the top-right: **green** = the UI reached the
-kernel (your dialogs load, code runs for real); **grey** = it fell back to the mock
-(only the `demo/welcome` dialog, nothing executes). Grey almost always means the
-kernel server on `:5055` isn't up — check `~/Library/Logs/SolveItSidekick/kernel.log`
-and run `uv run python -m sidekick.cli doctor kernel` to see exactly what's missing.
+kernel (your dialogs load, code runs for real); **amber** = it fell back to the mock
+(only the `demo/welcome` dialog, nothing executes). Amber almost always means the
+kernel server on `:5055` isn't up — check `~/Library/Logs/Pappus/kernel.log`
+and run `uv run python -m pappus.cli doctor kernel` to see exactly what's missing.
 
 ## Setup
 
@@ -113,8 +119,8 @@ just dev        # → kernel on :5055, UI on http://localhost:8000
 # terminal 1 — start the kernel server (--extra kernel adds numpy/torch/etc.)
 uv run --extra kernel python -m server.kernel_server --port 5055
 # terminal 2 — verify and launch
-uv run python -m sidekick.cli doctor kernel      # -> all checks pass
-SIDEKICK_TARGET=kernel uv run python -m sidekick.cli serve
+uv run python -m pappus.cli doctor kernel      # -> all checks pass
+PAPPUS_TARGET=kernel uv run python -m pappus.cli serve
 ```
 
 > `just dev` needs [`just`](https://github.com/casey/just) (`brew install just`).
@@ -124,11 +130,11 @@ SIDEKICK_TARGET=kernel uv run python -m sidekick.cli serve
 
 ### Run it like a Mac app
 
-`just app` builds a double-click **`SolveIt Sidekick.app`** launcher: it starts the
+`just app` builds a double-click **`Pappus.app`** launcher: it starts the
 kernel server and the UI (if not already running), then opens the browser to the
 app — quitting it stops the servers it launched. Drag it to `/Applications` and
 your Dock. It's a thin launcher around the same servers (not a native wrapper),
-so it stays light; logs go to `~/Library/Logs/SolveItSidekick/`. Re-run `just app`
+so it stays light; logs go to `~/Library/Logs/Pappus/`. Re-run `just app`
 if you move the project (the path is baked into the bundle). To stop everything
 from the terminal: `just stop`.
 
@@ -137,25 +143,25 @@ as soon as you add a key in Settings — no extra flag needed.
 
 The bundled `kernel` target (`backend: kernel` in `targets.yaml`) runs real Python
 in a persistent per-dialog namespace — variables carry across cells, just like a
-notebook. On the **H100**, run the same server there and `sidekick up h100`
+notebook. On the **H100**, run the same server there and `pappus up h100`
 tunnels it back.
 
 > **Security.** `/exec` runs arbitrary code, so the kernel server is secure by
 > default: on loopback it's open (local dev), but it **refuses to bind a
-> non-loopback host without `--token`** (or `SIDEKICK_KERNEL_TOKEN`), after which
+> non-loopback host without `--token`** (or `PAPPUS_KERNEL_TOKEN`), after which
 > every request must carry a matching `_solveit` cookie. The H100 flow keeps it on
 > `127.0.0.1` and reaches it through the SSH tunnel, so no token is needed; only
-> pass `--token` if you expose the port directly. Likewise, `sidekick serve` binds
-> `127.0.0.1` by default — set `SIDEKICK_HOST=0.0.0.0` to expose the UI on your LAN.
+> pass `--token` if you expose the port directly. Likewise, `pappus serve` binds
+> `127.0.0.1` by default — set `PAPPUS_HOST=0.0.0.0` to expose the UI on your LAN.
 
 When you have access to the real Answer.AI SolveIt server, just point the `local`
 or `h100` targets at it (they use `backend: solveit` via `solveit_client`) — same UI.
 
 ## Two dependency groups: the server vs your coding stack
 
-Sidekick keeps two kinds of dependency apart, because they serve different jobs:
+Pappus keeps two kinds of dependency apart, because they serve different jobs:
 
-- **The server** (base install) — what *runs* sidekick: FastHTML, uvicorn, the
+- **The server** (base install) — what *runs* pappus: FastHTML, uvicorn, the
   markdown/code renderers, and the AI SDKs. Light by design.
 - **The coding environment** (`kernel` extra) — what your *notebook code* imports:
   numpy, pandas, matplotlib, scikit-learn, scipy, torch. Kept separate because
@@ -187,17 +193,17 @@ matplotlib defaults to the headless `Agg` backend on the server, so
 ## Models & API keys
 
 The default **Codex CLI** model uses your installed `codex` command with an
-explicit Sidekick choice of `gpt-5.5` at `high` reasoning, so it needs no
-Sidekick API key. Open the **⚙ Settings** page (gear, top-right) to paste API
+explicit Pappus choice of `gpt-5.5` at `high` reasoning, so it needs no
+Pappus API key. Open the **⚙ Settings** page (gear, top-right) to paste API
 keys for the direct SDK providers — Anthropic (Claude) and Zhipu (GLM). Keys are stored in
-`~/.config/solveit-sidekick/secrets.json` (chmod 600, gitignored); an environment
+`~/.config/pappus/secrets.json` (chmod 600, gitignored); an environment
 variable of the same name always overrides the file.
 
 ### Which tools the AI may use
 
 The Claude CLI Ask AI routes run as a `claude` agent, so they *could* have the
 full tool set. What they may and may not do is declarative — one file,
-`~/.config/solveit-sidekick/tools.json` (override with `SIDEKICK_TOOLS`). The
+`~/.config/pappus/tools.json` (override with `PAPPUS_TOOLS`). The
 Codex CLI route stays read-only at the filesystem/shell layer and gets only the
 notebook-cell MCP tools described below.
 
@@ -214,19 +220,19 @@ allowed** — a thinking-partner tool (SolveIt's own `dialoghelper` ships
 training cutoff — while the **executor's hands are denied** (`Write`/`Edit`/`Bash`:
 running code or working off-screen is your job, not the AI's). Edit the lists to
 taste; set `"deny": []` to fully open it up. The cell-editing tools are wired
-separately (they need the local MCP server) and gated by `SIDEKICK_CELL_TOOLS`.
+separately (they need the local MCP server) and gated by `PAPPUS_CELL_TOOLS`.
 
 ## Use it
 
 ```bash
 # 1. (remote only) open the tunnel to the H100 in one terminal
-uv run python -m sidekick.cli up h100
+uv run python -m pappus.cli up h100
 
 # 2. check a target is healthy
-uv run python -m sidekick.cli doctor h100
+uv run python -m pappus.cli doctor h100
 
 # 3. launch the UI
-uv run python -m sidekick.cli serve        # http://localhost:8000
+uv run python -m pappus.cli serve        # http://localhost:8000
 ```
 
 In the UI, the top-right dropdown flips between `local` and `h100`. A green LED =
@@ -326,7 +332,7 @@ To keep within the model's token window, context is managed two ways:
 
 - **Truncation (automatic)** — long outputs are middle-out truncated, and if the
   whole notebook exceeds a budget the **oldest** cells drop first (newest are most
-  relevant). Tune with `SIDEKICK_CTX_OUT_TRUNC` and `SIDEKICK_CTX_MAX_CHARS`.
+  relevant). Tune with `PAPPUS_CTX_OUT_TRUNC` and `PAPPUS_CTX_MAX_CHARS`.
 - **Mute (manual)** — each cell has an **In context / Muted** toggle. Muting drops
   it from what the AI sees (it dims, but still runs) — the lever for steering
   context and staying under the limit.
@@ -382,7 +388,7 @@ fresh session so the new directive actually applies (a resumed session can't
 rewrite its own system prompt). The Codex CLI path also keeps a conservative
 read-only session per dialog when the notebook is append-only; if earlier cells
 change, mode/model/tool settings change, or the session can't be resumed safely,
-Sidekick starts a fresh `codex exec --json` turn and re-sends the full notebook
+Pappus starts a fresh `codex exec --json` turn and re-sends the full notebook
 context. The notebook stays the source of truth. Works on every backend: the
 persona/mode is built app-side and sent as the model's system preamble or prompt
 envelope. After installing or changing Codex addons/plugins, start a new dialog
@@ -409,7 +415,7 @@ they renumber when you insert, delete, or reorder cells.
 
 It only touches cells when you **explicitly ask**; an ordinary question is still
 answered in text. The tools are loopback-only and token-guarded, and active only
-on local CLI models (Codex and Claude CLI choices). Set `SIDEKICK_CELL_TOOLS=0`
+on local CLI models (Codex and Claude CLI choices). Set `PAPPUS_CELL_TOOLS=0`
 to turn them off (e.g. for the leanest time-to-first-token).
 
 #### …but the right hands, not a free-roaming agent
@@ -423,9 +429,9 @@ The catch is that the Max-plan path shells out to `claude -p`, which is the full
 Claude Code **agent** — so out of the box it *also* has Write/Edit/Bash. Left
 alone it does what agents do: writes the whole solution to a scratchpad file and
 executes it off-screen, taking the executor's seat you're supposed to hold and
-steamrolling the small-steps [persona](sidekick/claude_cli.py) we append. So the
-sidekick launches it with `--disallowed-tools Write Edit Bash`
-([sidekick/claude_cli.py](sidekick/claude_cli.py)). The line it draws: the AI may
+steamrolling the small-steps [persona](pappus/claude_cli.py) we append. So the
+pappus launches it with `--disallowed-tools Write Edit Bash`
+([pappus/claude_cli.py](pappus/claude_cli.py)). The line it draws: the AI may
 make **visible, in-notebook** edits when asked, but it can't run code or work
 off-screen. This strips only the *spawned assistant's* hands — your own Claude
 Code tools are untouched.
@@ -440,8 +446,8 @@ trailing `;` suppresses the last expression's value, Jupyter-style.
 ## Your work is saved
 
 Dialogs on the bundled **kernel** backend are persisted to disk — one JSON file
-per target at `~/.config/solveit-sidekick/dialogs-<target>.json` (override the
-directory with `SIDEKICK_DATA`). So your notebook survives a restart, and it
+per target at `~/.config/pappus/dialogs-<target>.json` (override the
+directory with `PAPPUS_DATA`). So your notebook survives a restart, and it
 survives the backend being rebuilt when you save Settings or switch targets.
 Cells, outputs, plots, and pin/mute flags are all restored. (The mock fallback
 used when no server is reachable stays ephemeral; a real **solveit** target keeps
@@ -454,7 +460,7 @@ one directory. To move to a new install, or keep a copy somewhere safe:
 ```bash
 just backup ~/pCloud/            # one timestamped .tar.gz (API keys left out)
 just backup ~/x --with-secrets   # include secrets.json too; keep that archive private
-just stop && just restore ~/pCloud/sidekick-backup-….tar.gz   # on the new install
+just stop && just restore ~/pCloud/pappus-backup-….tar.gz   # on the new install
 ```
 
 Restore keeps any file that already exists unless you pass `--force`, and it
@@ -462,13 +468,13 @@ refuses to run while the app is up (stop it with `just stop` first).
 
 The notebook store also protects itself. Every save keeps the previous version
 as `dialogs-<target>.json.bak`, and while you work a timestamped copy goes to
-`backups/` every 15 minutes, newest 20 kept (`SIDEKICK_SNAPSHOT_MINUTES`,
-`SIDEKICK_SNAPSHOT_KEEP`). If the store is ever unreadable, the app sets the
+`backups/` every 15 minutes, newest 20 kept (`PAPPUS_SNAPSHOT_MINUTES`,
+`PAPPUS_SNAPSHOT_KEEP`). If the store is ever unreadable, the app sets the
 damaged file aside as `….corrupt-<time>`, reopens the newest good copy, and says
 so in a banner instead of starting empty. Which
 cells are collapsed and the table-of-contents state are per browser and are not
 part of a backup. An older checkout that kept dialogs in the repo's `data/`
-folder is moved into the local directory the first time `sidekick serve` runs.
+folder is moved into the local directory the first time `pappus serve` runs.
 
 ## Building a Python library from your dialogs
 
@@ -496,10 +502,10 @@ dialog, into a library.
 3. **Build.** Click **Build** on the card — or, from the CLI, across all dialogs:
 
    ```bash
-   uv run python -m sidekick.cli library build audiolib ./audiolib
+   uv run python -m pappus.cli library build audiolib ./audiolib
    ```
 
-   Sidekick gathers every cell tagged `audiolib:*`, groups them by module, and
+   Pappus gathers every cell tagged `audiolib:*`, groups them by module, and
    tangles them into a real `.py` package. The banner reports the result
    (`✓ built with nbdev`) and where it landed.
 4. **Use it.** Click **Use in kernel**, then `import audiolib` in any code cell —
@@ -509,11 +515,11 @@ dialog, into a library.
 
 ### How it works
 
-Sidekick owns the *cells → notebooks* step; **nbdev** owns *notebooks → package +
+Pappus owns the *cells → notebooks* step; **nbdev** owns *notebooks → package +
 docs + tests*. It projects the tagged cells into an nbdev project (one notebook per
 module) and runs `nbdev-export`.
 
-On the *first* build to a fresh dir, Sidekick generates a real nbdev
+On the *first* build to a fresh dir, Pappus generates a real nbdev
 `pyproject.toml` (full `[tool.nbdev]`, entry-points, setuptools config) with
 [nbdev](https://nbdev.fast.ai)'s own `nbdev_create_config` — **offline**;
 *rebuilds* reuse the existing project and just refresh the notebooks, then
@@ -523,9 +529,9 @@ API (hardcoded, so a token can't fix it) and gets rate-limited — `nbdev_create
 touches no network, so Build never rate-limits. The tradeoff: the template extras
 `nbdev-new` adds (`LICENSE`, `.github` CI, docs styling) aren't generated — run
 `nbdev-new` yourself once if you want them. If nbdev isn't installed, Build falls
-back to a minimal `pyproject.toml` (still tangles to `.py`); `SIDEKICK_NBDEV_SCAFFOLD=0`
+back to a minimal `pyproject.toml` (still tangles to `.py`); `PAPPUS_NBDEV_SCAFFOLD=0`
 forces that path. Install nbdev with the `nbdev` extra
-(`uv pip install "solveit-sidekick[nbdev]"`).
+(`uv pip install "pappus[nbdev]"`).
 
 Two nice properties fall out:
 
@@ -541,7 +547,7 @@ The dialog cells are the source of truth; the notebooks and `.py` are generated
 rebuilding.
 
 **Use it back in a dialog.** After Build, click **Use in kernel** on the library's
-card — Sidekick puts the built package on the kernel's path, so `import <pkg>`
+card — Pappus puts the built package on the kernel's path, so `import <pkg>`
 just works in any code cell (no `sys.path` boilerplate). That closes the loop:
 build a library from your cells, import it back, use it, and — via the provenance
 links — click straight back to the source cell when you want to change something.
@@ -559,7 +565,7 @@ it:
   imports the *paper*, not the abstract page.
 - Any other page (a **blog/article**) is fetched and reduced to just the main
   content (no nav/ads/footer): **trafilatura** with the **`web`** extra
-  (`uv pip install "solveit-sidekick[web]"`), or a built-in **bs4 + markdownify**
+  (`uv pip install "pappus[web]"`), or a built-in **bs4 + markdownify**
   fallback without it.
 
 Either way the source becomes markdown in the same reader, so the stepper,
@@ -592,7 +598,7 @@ highlighting passages into the same dialog (close it with **✕** when done).
 
 PDFs are converted to markdown and rendered with the same math/code pipeline as
 the rest of the app. The reader is **marker** — **required** for PDFs: install
-the **`paper`** extra (`uv pip install "solveit-sidekick[paper]"`, also in
+the **`paper`** extra (`uv pip install "pappus[paper]"`, also in
 `[all]`). It preserves structure, tables, **equations as LaTeX** (rendered via
 KaTeX), and **figures/diagrams** — extracted images are saved next to the
 conversion cache and render inline, both in the reading panel and in the note
@@ -606,7 +612,7 @@ need it.
 
 Papers are **local, like everything else**: the uploaded PDFs, their converted
 markdown, extracted figures, and the dialog→source index live in
-`~/.config/solveit-sidekick/papers` (set `SIDEKICK_PAPERS` to move it) and are
+`~/.config/pappus/papers` (set `PAPPUS_PAPERS` to move it) and are
 included in `just backup`.
 
 ## Pain points this targets

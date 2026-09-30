@@ -1,12 +1,12 @@
 """S6 refactor: notebook/markdown export helpers moved out of the UI module.
 
-These exercise sidekick.export_nb *directly* (not via sidekick.app), proving the
+These exercise pappus.export_nb *directly* (not via pappus.app), proving the
 split gives the serializers independent, state-free testability.
 """
 import json
 
-from sidekick.client import Msg
-from sidekick.export_nb import to_ipynb, to_markdown
+from pappus.client import Msg
+from pappus.export_nb import to_ipynb, to_markdown
 
 
 def test_to_ipynb_direct_valid_nbformat():
@@ -43,6 +43,6 @@ def test_to_markdown_direct():
 
 def test_app_reexports_stay_identical():
     # app.<name> must resolve to the very same objects (tests reference app.to_ipynb).
-    import sidekick.app as app
+    import pappus.app as app
     assert app.to_ipynb is to_ipynb
     assert app.to_markdown is to_markdown

@@ -31,7 +31,7 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(scope="module")
 def target():
-    from sidekick.targets import Target
+    from pappus.targets import Target
     return Target(name="live", url=LIVE_URL, token=LIVE_TOKEN, ssh=None)
 
 
@@ -40,7 +40,7 @@ def test_solveit_client_importable():
 
 
 def test_doctor_reaches_live_server(target):
-    from sidekick.doctor import run_checks
+    from pappus.doctor import run_checks
     checks = run_checks(target)
     assert any(ok and label == "AUTH" for ok, label, _ in checks), (
         "live /test_route did not accept the token — check SOLVEIT_LIVE_TOKEN"
@@ -49,12 +49,12 @@ def test_doctor_reaches_live_server(target):
 
 def test_live_backend_code_roundtrip(target):
     pytest.importorskip("solveit_client")
-    from sidekick.client import connect
+    from pappus.client import connect
 
     backend, warning = connect(target)
     assert backend.live, f"expected a live backend, got mock: {warning}"
 
-    dialog = "sidekick-ci/roundtrip"
+    dialog = "pappus-ci/roundtrip"
     msg = backend.add(dialog, "6 * 7", "code")
     out = backend.exec(dialog, msg.id)
     assert "42" in (out.output or ""), f"unexpected code output: {out.output!r}"
@@ -67,10 +67,10 @@ def test_live_backend_code_roundtrip(target):
 def test_live_prompt_with_model(target):
     """Real AI round-trip — opt-in because it spends tokens. Honors the model switch."""
     pytest.importorskip("solveit_client")
-    from sidekick.client import connect
+    from pappus.client import connect
 
     backend, _ = connect(target)
     model = os.environ.get("SOLVEIT_LIVE_MODEL", "claude")
-    msg = backend.add("sidekick-ci/prompt", "Reply with the single word: pong", "prompt", model=model)
-    out = backend.exec("sidekick-ci/prompt", msg.id)
+    msg = backend.add("pappus-ci/prompt", "Reply with the single word: pong", "prompt", model=model)
+    out = backend.exec("pappus-ci/prompt", msg.id)
     assert out.output and out.output.strip(), "empty AI response"

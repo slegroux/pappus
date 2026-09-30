@@ -1,4 +1,4 @@
-# Refactor brief — split `sidekick/app.py` (Q1) + decompose `_cell_edit` (Q2)
+# Refactor brief — split `pappus/app.py` (Q1) + decompose `_cell_edit` (Q2)
 
 Hand this to Claude Code, running on the host (real venv, `just test`, live server).
 Goal: make `app.py` maintainable without changing behavior. This is the P1 structural
@@ -14,7 +14,7 @@ case stronger, not weaker).
 ## Ground rules
 
 - **Behavior-preserving.** Every route, response, and rendered fragment must be
-  byte-identical where practical. The suite (currently 350 tests: `test_sidekick.py`,
+  byte-identical where practical. The suite (currently 350 tests: `test_pappus.py`,
   `test_review_app.py`, `_backend`, `_s1`, `_scaffold`, …) is the oracle: `just test`
   must stay green at every commit.
 - **Small commits, one concern each.** Prefix `refactor:`. Land the package skeleton +
@@ -32,7 +32,7 @@ imports (routes need `rt` + renderers; renderers need state; `app.py` needs rout
 Solve it with an app-factory core that everyone imports from, no cycles:
 
 ```
-sidekick/
+pappus/
   app.py                 # thin wiring: build app, import route modules (for @rt side effects), expose `app`
   webapp/
     __init__.py
@@ -63,10 +63,10 @@ Dependency direction is strictly downward: `server.py` and `state.py` at the bot
 `middleware`. `app.py` at the top imports every `routes/*` module purely to trigger
 registration, then exposes `app`. No module imports `app.py`.
 
-Keep the package name out of the way of the existing `sidekick/app.py` during the move:
-create `sidekick/webapp/` alongside, migrate into it, and at the end keep `app.py` as the
+Keep the package name out of the way of the existing `pappus/app.py` during the move:
+create `pappus/webapp/` alongside, migrate into it, and at the end keep `app.py` as the
 thin wiring shim — the import surface is wider than it looks. What reaches into
-`sidekick.app` today (verified by grep): `sidekick/cli.py`, and **eight test files** that
+`pappus.app` today (verified by grep): `pappus/cli.py`, and **eight test files** that
 poke module internals directly (`app.STATE`, `app.paper_import(...)`, `app.paperlib`,
 `app.Page`, `app._paper_source_for`, …). `server/mcp_cells.py` does **not** import it.
 So the shim must re-export everything tests touch — cheapest as `from .webapp.state
@@ -127,8 +127,8 @@ lean on it, add a snapshot assertion per cell type if coverage feels thin.
   target, open Settings. These exercise every moved surface.
 - `git diff --stat` should show moves, not rewrites — large deletions in `app.py`
   balanced by additions in `webapp/`. If a moved function's body changed, justify why.
-- Confirm the public import path still works: `python -c "from sidekick.app import app"`
-  and `python -m sidekick.cli serve` both start.
+- Confirm the public import path still works: `python -c "from pappus.app import app"`
+  and `python -m pappus.cli serve` both start.
 
 ## Explicitly out of scope
 

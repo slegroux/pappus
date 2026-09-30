@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command test runner for SolveIt Sidekick (uv-based).
+# One-command test runner for Pappus (uv-based).
 # uv creates the venv and installs deps from pyproject.toml on first run.
 # No SolveIt server required — live tests skip unless SOLVEIT_LIVE_URL is set.
 set -e

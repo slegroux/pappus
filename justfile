@@ -1,4 +1,4 @@
-# SolveIt Sidekick — task runner (https://github.com/casey/just)
+# Pappus — task runner (https://github.com/casey/just)
 #
 #   just            list recipes
 #   just start         run the app in the background (pairs with `just stop`)
@@ -22,11 +22,11 @@ ui_port     := "8000"
 run_extras := "--extra kernel --extra paper"
 
 # Notebooks, papers, recall, libraries and blog live LOCALLY in
-# ~/.config/solveit-sidekick (the app's default; override with SIDEKICK_DATA),
+# ~/.config/pappus (the app's default; override with PAPPUS_DATA),
 # never in this repo. Move them between installs with `just backup`/`just restore`.
 
 # This machine's own Tailscale MagicDNS name (empty when off-tailnet or Tailscale
-# isn't installed). Passed to the UI as SIDEKICK_ALLOWED_HOSTS so `tailscale serve`
+# isn't installed). Passed to the UI as PAPPUS_ALLOWED_HOSTS so `tailscale serve`
 # can front the UI for other tailnet devices — the app still only accepts LOOPBACK
 # peers (see _LocalGuard in app.py), so this just lets the Host-header check pass.
 # Derived per-machine, never hardcoded (the justfile is shared across machines).
@@ -62,13 +62,13 @@ default:
 start reload="":
     #!/usr/bin/env bash
     set -uo pipefail
-    LOG="$HOME/Library/Logs/SolveItSidekick"; mkdir -p "$LOG"
+    LOG="$HOME/Library/Logs/Pappus"; mkdir -p "$LOG"
     up(){ curl -s -o /dev/null "http://localhost:$1/" 2>/dev/null; }
     if up {{ui_port}}; then
         echo "✓ already running → http://localhost:{{ui_port}}"; open "http://localhost:{{ui_port}}" || true; exit 0
     fi
     RELOAD_ENV=""
-    if [ "{{reload}}" = "reload" ]; then RELOAD_ENV="SIDEKICK_RELOAD=1"; echo "  (auto-reload on)"; fi
+    if [ "{{reload}}" = "reload" ]; then RELOAD_ENV="PAPPUS_RELOAD=1"; echo "  (auto-reload on)"; fi
     if ! up {{kernel_port}}; then
         echo "▶ kernel server → :{{kernel_port}}  (logs: $LOG/kernel.log)"
         {{portkey_env}}
@@ -76,7 +76,7 @@ start reload="":
         for i in $(seq 1 120); do up {{kernel_port}} && break; sleep 0.5; done
     fi
     echo "▶ web UI → http://localhost:{{ui_port}}  (logs: $LOG/ui.log)"
-    nohup env $RELOAD_ENV SIDEKICK_ALLOWED_HOSTS="{{tailnet_host}}" SIDEKICK_TRUST_TAILNET="{{trust_tailnet}}" SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} uv run {{run_extras}} python -m sidekick.cli serve >"$LOG/ui.log" 2>&1 &
+    nohup env $RELOAD_ENV PAPPUS_ALLOWED_HOSTS="{{tailnet_host}}" PAPPUS_TRUST_TAILNET="{{trust_tailnet}}" PAPPUS_TARGET=kernel PAPPUS_PORT={{ui_port}} uv run {{run_extras}} python -m pappus.cli serve >"$LOG/ui.log" 2>&1 &
     for i in $(seq 1 60); do up {{ui_port}} && break; sleep 0.5; done
     if up {{ui_port}}; then
         echo "✓ running in the background → http://localhost:{{ui_port}}   (stop with: just stop)"
@@ -102,7 +102,7 @@ dev:
     done
     echo " ✓"
     echo "▶ web UI         → http://localhost:{{ui_port}}  (target: kernel)"
-    SIDEKICK_ALLOWED_HOSTS="{{tailnet_host}}" SIDEKICK_TRUST_TAILNET="{{trust_tailnet}}" SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} uv run {{run_extras}} python -m sidekick.cli serve
+    PAPPUS_ALLOWED_HOSTS="{{tailnet_host}}" PAPPUS_TRUST_TAILNET="{{trust_tailnet}}" PAPPUS_TARGET=kernel PAPPUS_PORT={{ui_port}} uv run {{run_extras}} python -m pappus.cli serve
 
 # Just the kernel server (e.g. to run it on its own / on the H100).
 kernel:
@@ -113,18 +113,18 @@ kernel:
 
 # Just the web UI (assumes the kernel server is already running).
 ui:
-    SIDEKICK_ALLOWED_HOSTS="{{tailnet_host}}" SIDEKICK_TRUST_TAILNET="{{trust_tailnet}}" SIDEKICK_TARGET=kernel SIDEKICK_PORT={{ui_port}} uv run {{run_extras}} python -m sidekick.cli serve
+    PAPPUS_ALLOWED_HOSTS="{{tailnet_host}}" PAPPUS_TRUST_TAILNET="{{trust_tailnet}}" PAPPUS_TARGET=kernel PAPPUS_PORT={{ui_port}} uv run {{run_extras}} python -m pappus.cli serve
 
 # `just backup ~/pCloud/` writes a timestamped archive there; API keys are left
 # out unless you pass --with-secrets.
 # Pack all local data (notebooks, papers, recall, libraries, blog) into one .tar.gz
 backup *args:
-    uv run python -m sidekick.cli backup {{args}}
+    uv run python -m pappus.cli backup {{args}}
 
 # Stop the app first (`just stop`); existing files are kept unless --force.
 # Unpack a backup into this install
 restore archive *args:
-    uv run python -m sidekick.cli restore {{archive}} {{args}}
+    uv run python -m pappus.cli restore {{archive}} {{args}}
 
 # Run the test suite.
 test:
@@ -136,7 +136,7 @@ lint:
 
 # Diagnose the kernel target (DNS, port, token, /test_route).
 doctor:
-    uv run python -m sidekick.cli doctor kernel
+    uv run python -m pappus.cli doctor kernel
 
 # Stop the app — the kernel server and the UI (pairs with `just start`).
 stop:
@@ -147,20 +147,20 @@ stop:
                        || echo ":$p already free"
     done
 
-# Build a double-click "SolveIt Sidekick.app" launcher (starts servers, opens browser).
+# Build a double-click "Pappus.app" launcher (starts servers, opens browser).
 app:
     #!/usr/bin/env bash
     set -euo pipefail
-    APP="{{justfile_directory()}}/SolveIt Sidekick.app"
+    APP="{{justfile_directory()}}/Pappus.app"
     rm -rf "$APP"
     mkdir -p "$APP/Contents/MacOS"
     cat > "$APP/Contents/Info.plist" <<'PLIST'
     <?xml version="1.0" encoding="UTF-8"?>
     <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
     <plist version="1.0"><dict>
-      <key>CFBundleName</key><string>SolveIt Sidekick</string>
-      <key>CFBundleDisplayName</key><string>SolveIt Sidekick</string>
-      <key>CFBundleIdentifier</key><string>com.slegroux.solveit-sidekick</string>
+      <key>CFBundleName</key><string>Pappus</string>
+      <key>CFBundleDisplayName</key><string>Pappus</string>
+      <key>CFBundleIdentifier</key><string>com.slegroux.pappus</string>
       <key>CFBundleVersion</key><string>1.0</string>
       <key>CFBundleShortVersionString</key><string>1.0</string>
       <key>CFBundlePackageType</key><string>APPL</string>
@@ -173,7 +173,7 @@ app:
     export PATH="/opt/homebrew/bin:$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
     PROJ="__PROJ__"
     UV="$(command -v uv || echo "$HOME/.local/bin/uv")"
-    LOG="$HOME/Library/Logs/SolveItSidekick"; mkdir -p "$LOG"
+    LOG="$HOME/Library/Logs/Pappus"; mkdir -p "$LOG"
     cd "$PROJ" || exit 1
     up(){ curl -s -o /dev/null "http://localhost:$1/" 2>/dev/null; }
     KPID=""; UPID=""
@@ -192,7 +192,7 @@ app:
     fi
     # 2) UI on :8000 — after the kernel, so it connects live (not the mock)
     if ! up 8000; then
-        nohup env SIDEKICK_TARGET=kernel SIDEKICK_PORT=8000 "$UV" run {{run_extras}} python -m sidekick.cli serve \
+        nohup env PAPPUS_TARGET=kernel PAPPUS_PORT=8000 "$UV" run {{run_extras}} python -m pappus.cli serve \
             >"$LOG/ui.log" 2>&1 & UPID=$!
         for i in $(seq 1 60); do up 8000 && break; sleep 0.5; done
     fi
@@ -206,4 +206,4 @@ app:
     touch "$APP"                                  # nudge LaunchServices to register it
     echo "✓ Built: $APP"
     echo "  Double-click it, or drag it to /Applications and your Dock."
-    echo "  Logs: ~/Library/Logs/SolveItSidekick/"
+    echo "  Logs: ~/Library/Logs/Pappus/"

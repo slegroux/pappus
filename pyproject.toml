@@ -1,11 +1,11 @@
 [project]
-name = "solveit-sidekick"
+name = "pappus"
 version = "0.1.0"
 description = "A Claude-desktop-style interface for SolveIt that runs against your laptop or a remote H100."
 readme = "README.md"
 requires-python = ">=3.10"
 # --- THE SERVER -------------------------------------------------------------
-# Base deps run sidekick itself: the web app, the kernel infrastructure, and the
+# Base deps run pappus itself: the web app, the kernel infrastructure, and the
 # AI calls. Deliberately light. The libraries your *notebook code* imports are a
 # separate concern — see the `kernel` extra below.
 dependencies = [
@@ -28,7 +28,7 @@ dependencies = [
 # (a) torch is large and (b) the kernel server is a standalone HTTP process, so
 # this stack belongs wherever the kernel actually runs — which can be a separate
 # venv, or the H100 — while the app stays lean. Install it where the kernel runs:
-#   uv pip install "solveit-sidekick[kernel]"                          # one venv, or
+#   uv pip install "pappus[kernel]"                          # one venv, or
 #   uv run --extra kernel python -m server.kernel_server --port 5055   # kernel only
 kernel = [
     "numpy",
@@ -41,44 +41,44 @@ kernel = [
     "soundfile",     # read/write WAV/FLAC in the kernel
     "jedi",          # code completion: introspects the live kernel namespace
 ]
-ml = ["solveit-sidekick[kernel]"]   # back-compat alias for the former name
+ml = ["pappus[kernel]"]   # back-compat alias for the former name
 
 # PDF → markdown for reading papers: marker preserves structure, tables,
 # figures, and equations as LaTeX (rendered by our mistune + KaTeX). Heavy
 # (uses torch + downloads models on first use) and GPL-3.0, so packaged as an
 # extra — but *required* to open PDFs: without it the reading panel shows the
 # install hint (no text-only fallback). Already-cached papers still open.
-#   uv pip install "solveit-sidekick[paper]"
+#   uv pip install "pappus[paper]"
 paper = ["marker-pdf"]
 
 # High-quality web page / blog → markdown: trafilatura extracts just the main
 # article (no nav/ads/boilerplate), torch-free and fast. Without it, URL import
 # falls back to the base bs4 + markdownify heuristic.
-#   uv pip install "solveit-sidekick[web]"
+#   uv pip install "pappus[web]"
 web = ["trafilatura"]
 
 # Talk to the real Answer.AI SolveIt server instead of the bundled kernel.
 solveit = ["solveit_client"]
 
-# Build a Python library from tagged cells (the 📦 Libraries page / `sidekick
+# Build a Python library from tagged cells (the 📦 Libraries page / `pappus
 # library build`). Without it, Build still emits the nbdev notebooks; nbdev
 # tangles them into the .py package + docs.
-#   uv pip install "solveit-sidekick[nbdev]"
+#   uv pip install "pappus[nbdev]"
 nbdev = ["nbdev"]
 dev = ["pytest", "ruff"]
 
 # Everything for a full local workstation in one shot (server + coding stack +
 # paper reader + solveit + library builds).
 all = [
-    "solveit-sidekick[kernel]",
-    "solveit-sidekick[paper]",
-    "solveit-sidekick[web]",
-    "solveit-sidekick[solveit]",
-    "solveit-sidekick[nbdev]",
+    "pappus[kernel]",
+    "pappus[paper]",
+    "pappus[web]",
+    "pappus[solveit]",
+    "pappus[nbdev]",
 ]
 
 [project.scripts]
-sidekick = "sidekick.cli:main"
+pappus = "pappus.cli:main"
 
 [tool.uv]
 # Dependency-only project: uv manages the venv without trying to build/install

@@ -18,11 +18,11 @@ README.html
 README_files/
 
 # generated, machine-specific (built by `just app`)
-SolveIt Sidekick.app/
+Pappus.app/
 .DS_Store
 
 # User data never lives in the repo: notebooks, papers, recall, libraries and
-# blog are local to each machine in ~/.config/solveit-sidekick (SIDEKICK_DATA).
+# blog are local to each machine in ~/.config/pappus (PAPPUS_DATA).
 # data/ is the OLD in-repo location; ignore it so nothing there is re-added.
 data/
 *.tar.gz

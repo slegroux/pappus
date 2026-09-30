@@ -16,7 +16,7 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from server import kernel_server
-from sidekick.client import MockBackend
+from pappus.client import MockBackend
 
 
 def _poll_until_done(dialog: str, run_id: str, timeout: float = 5.0) -> dict:

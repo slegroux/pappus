@@ -23,7 +23,7 @@ just lint                      # lint  (== uv run ruff check)
 just dev                       # kernel (:5055) + UI (:8000) in foreground, Ctrl+C stops both
 just start [reload]            # same, backgrounded; `just stop` to kill; `reload` auto-restarts UI on edits
 just doctor                    # diagnose the kernel target (DNS/port/token/route)
-uv run python -m sidekick.cli serve   # UI only (assumes kernel already up)
+uv run python -m pappus.cli serve   # UI only (assumes kernel already up)
 ```
 
 The kernel server needs the coding stack: `uv run --extra kernel python -m
@@ -38,23 +38,23 @@ subsystem they harden (backend, kernel, app, audio, recall, scaffold, s1/s5/s6�
 
 Three layers, each swappable:
 
-**UI** — `sidekick/app.py` (~3200 lines, the bulk of the app) is a single FastHTML
+**UI** — `pappus/app.py` (~3200 lines, the bulk of the app) is a single FastHTML
 server. Cells render server-side (mistune for markdown, Pygments for code — offline,
 no CDN); interactions swap only the conversation via htmx, never a full reload.
-Client-side behavior lives in `sidekick/static/js/*` (thin, vendored libs in
-`static/vendor/`, no build step). `sidekick/cli.py` is the `sidekick` entry point
+Client-side behavior lives in `pappus/static/js/*` (thin, vendored libs in
+`static/vendor/`, no build step). `pappus/cli.py` is the `pappus` entry point
 (`targets` / `doctor` / `up` / `serve` / `library build` / `blog build`).
 
-**Client / backends** — `sidekick/client.py` wraps the notion of a "backend" behind
+**Client / backends** — `pappus/client.py` wraps the notion of a "backend" behind
 one `connect()`. Three backends, chosen by `targets.yaml`:
 - `solveit` — real Answer.AI server via `solveit_client` (`solveit` extra).
 - `kernel` — the bundled `server/kernel_server.py`, a self-hostable SolveIt-compatible
   server that executes real Python in a persistent per-dialog namespace.
 - mock — in-memory fallback when nothing is reachable (keeps the UI demoable).
 
-A **target** is just "which server URL the client points at" (`sidekick/targets.py`
+A **target** is just "which server URL the client points at" (`pappus/targets.py`
 resolves profiles from `targets.yaml`; tokens come from env vars, never committed).
-The local↔H100 switch is entirely `sidekick/tunnel.py` opening an SSH tunnel so the
+The local↔H100 switch is entirely `pappus/tunnel.py` opening an SSH tunnel so the
 remote SolveIt port appears on localhost — the client code and URL stay constant.
 
 **Kernel server** (`server/`) — an HTTP process, deliberately separate from the app
@@ -74,50 +74,50 @@ venvs/machines. Other extras: `paper` (marker-pdf), `web` (trafilatura), `solvei
 ### Ask AI — three routes
 
 - **API providers** (`claude`/`glm`/`codex`) go through the SDKs in `client.py`.
-- **Codex CLI** (`codex-cli`, the default) shells out via `sidekick/codex_cli.py`
+- **Codex CLI** (`codex-cli`, the default) shells out via `pappus/codex_cli.py`
   to the user's installed `codex` command and current local auth/config. It runs a
   fresh conservative read-only `codex exec` turn from a neutral scratch directory,
   streams `--json` events in the web UI, and can use the same loopback cell MCP
   tools for explicit visible notebook edits.
-- **Claude subscription** (`claude-cli`) shells out via `sidekick/claude_cli.py`
+- **Claude subscription** (`claude-cli`) shells out via `pappus/claude_cli.py`
   to `claude -p` on the user's Max plan. It is the full Claude Code agent, so it is
   launched with `--disallowed-tools Write Edit Bash`: the AI may make visible,
   in-notebook edits (via the cell MCP tools) but never runs code or works off-screen.
   This enforces SolveIt's posture — the human is the agent; the AI is a thinking
   partner. Preserve that boundary when touching this path.
 
-Which tools Ask AI may use is declarative: `~/.config/solveit-sidekick/tools.json`
+Which tools Ask AI may use is declarative: `~/.config/pappus/tools.json`
 (defaults allow web research, deny Write/Edit/Bash); cell-editing tools are gated by
-`SIDEKICK_CELL_TOOLS`.
+`PAPPUS_CELL_TOOLS`.
 
 ## Data & secrets
 
 **User data never lives in the repo.** Notebooks (`dialogs-<target>.json`), papers,
 recall schedule, libraries and the blog project are local to each machine under one
-root, `~/.config/solveit-sidekick` (override with `SIDEKICK_DATA`; papers alone with
-`SIDEKICK_PAPERS`). `sidekick/datadir.py` owns that root. Every store resolves its
+root, `~/.config/pappus` (override with `PAPPUS_DATA`; papers alone with
+`PAPPUS_PAPERS`). `pappus/datadir.py` owns that root. Every store resolves its
 path through `data_root()`; don't add a second path rule.
-- **Portable, not synced:** `just backup [dir]` / `sidekick backup` packs it all into
+- **Portable, not synced:** `just backup [dir]` / `pappus backup` packs it all into
   one 0600 `.tar.gz` (API keys only with `--with-secrets`); `just restore <file>`
   unpacks on a new install and re-keys paper caches (their keys embed absolute paths).
-- `data/` is the old in-repo location: fully gitignored. `sidekick serve` moves
+- `data/` is the old in-repo location: fully gitignored. `pappus serve` moves
   anything there into the root once, never overwriting, and ignores a stale
-  `SIDEKICK_DATA` that still points into the repo.
+  `PAPPUS_DATA` that still points into the repo.
 - The dialog store (`client.py`) serializes every write through `_SAVE_LOCK` with
   per-thread temp files, keeps `.bak` plus throttled snapshots in `backups/`, and
   never treats an unreadable store as empty: it moves it to `.corrupt-<time>`,
   reopens the newest good copy, and adds to `client.STORE_NOTICES` (shown as a
-  banner). `restore` refuses while `.serve.pid` names a live `sidekick serve`.
-- `tests/conftest.py` points `SIDEKICK_DATA`/`_PAPERS`/`_SECRETS`/`_TOOLS` at
+  banner). `restore` refuses while `.serve.pid` names a live `pappus serve`.
+- `tests/conftest.py` points `PAPPUS_DATA`/`_PAPERS`/`_SECRETS`/`_TOOLS` at
   `tmp_path` for every test, so no test can touch real notebooks or keys.
 
-**Secrets stay out of the repo**: API keys go in `~/.config/solveit-sidekick/secrets.json`
-(chmod 600, gitignored) via `sidekick/secrets_store.py`; an env var of the same name
+**Secrets stay out of the repo**: API keys go in `~/.config/pappus/secrets.json`
+(chmod 600, gitignored) via `pappus/secrets_store.py`; an env var of the same name
 always overrides the file. Never commit keys or dialog tokens.
 
 ## Library & blog builds
 
-`sidekick/nbdev_export.py` + `libraries.py` project cells tagged `#| export lib:module`
+`pappus/nbdev_export.py` + `libraries.py` project cells tagged `#| export lib:module`
 (across *all* dialogs, cell-centric) into a real `.py` package via nbdev — using
 `nbdev_create_config` offline rather than `nbdev-new` (which rate-limits on an
 unauthenticated GitHub API call). `blog.py`/`export.py` do the analogous dialog→Quarto
@@ -127,7 +127,7 @@ projection. Generated code is never hand-edited; edit the source cells and rebui
 
 - Commit messages use `type: subject` prefixes (`feat:`, `fix:`, `data:`, `docs:`).
 - Broad `except ... # noqa: BLE001` handlers intentionally degrade gracefully (mock
-  fallback, missing config); `_dbg()` in `app.py` surfaces them under `SIDEKICK_DEBUG`.
+  fallback, missing config); `_dbg()` in `app.py` surfaces them under `PAPPUS_DEBUG`.
 - Rendering is server-side and offline by design — don't reach for a CDN.
 
 ## Audit findings & prioritized fix plan (2026-07-15)
@@ -144,7 +144,7 @@ Q = structure, T = tests. Line numbers are approximate — verify before editing
 
 - [x] **S1 · 0.0.0.0 mode is effectively unauthenticated RCE** (`app.py:1998,2024`).
   The whole app is gated only by a Host-header allowlist (`_ALLOWED_HOSTS`), which the
-  client controls. With `SIDEKICK_HOST=0.0.0.0` (`cli.py:76`, the documented network-
+  client controls. With `PAPPUS_HOST=0.0.0.0` (`cli.py:76`, the documented network-
   exposure switch), a remote `curl` sending `Host: localhost` reaches every route —
   including `/cell/run` → `backend.exec` → arbitrary Python on the kernel, and
   `/settings` (writes API keys). Internal `/internal/*` routes are safe (they use a peer-

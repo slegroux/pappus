@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="400" height="116" viewBox="0 0 400 116" role="img" aria-label="Pappus">
+  <!-- mark: a dandelion seed (a pappus); the only colourful mark in the UI -->
+  <g transform="translate(2 2) scale(1.7)" stroke-linecap="round">
+  <line x1="32" y1="30" x2="7.02" y2="29.13" stroke="#0B0B0B" stroke-width="1.6"/>
+  <circle cx="7.02" cy="29.13" r="2.5" fill="#7C5CFF"/>
+  <line x1="32" y1="30" x2="8.45" y2="21.61" stroke="#0B0B0B" stroke-width="1.6"/>
+  <circle cx="8.45" cy="21.61" r="2.5" fill="#C084FC"/>
+  <line x1="32" y1="30" x2="12.09" y2="14.89" stroke="#0B0B0B" stroke-width="1.6"/>
+  <circle cx="12.09" cy="14.89" r="2.5" fill="#FF5C8A"/>
+  <line x1="32" y1="30" x2="17.59" y2="9.57" stroke="#0B0B0B" stroke-width="1.6"/>
+  <circle cx="17.59" cy="9.57" r="2.5" fill="#FFB020"/>
+  <line x1="32" y1="30" x2="24.44" y2="6.17" stroke="#0B0B0B" stroke-width="1.6"/>
+  <circle cx="24.44" cy="6.17" r="2.5" fill="#10B981"/>
+  <line x1="32" y1="30" x2="32.00" y2="5.00" stroke="#0B0B0B" stroke-width="1.6"/>
+  <circle cx="32.00" cy="5.00" r="2.5" fill="#38BDF8"/>
+  <line x1="32" y1="30" x2="39.56" y2="6.17" stroke="#0B0B0B" stroke-width="1.6"/>
+  <circle cx="39.56" cy="6.17" r="2.5" fill="#7C5CFF"/>
+  <line x1="32" y1="30" x2="46.41" y2="9.57" stroke="#0B0B0B" stroke-width="1.6"/>
+  <circle cx="46.41" cy="9.57" r="2.5" fill="#C084FC"/>
+  <line x1="32" y1="30" x2="51.91" y2="14.89" stroke="#0B0B0B" stroke-width="1.6"/>
+  <circle cx="51.91" cy="14.89" r="2.5" fill="#FF5C8A"/>
+  <line x1="32" y1="30" x2="55.55" y2="21.61" stroke="#0B0B0B" stroke-width="1.6"/>
+  <circle cx="55.55" cy="21.61" r="2.5" fill="#FFB020"/>
+  <line x1="32" y1="30" x2="56.98" y2="29.13" stroke="#0B0B0B" stroke-width="1.6"/>
+  <circle cx="56.98" cy="29.13" r="2.5" fill="#10B981"/>
+  <line x1="32" y1="30" x2="32" y2="49" stroke="#0B0B0B" stroke-width="1.6"/>
+  <ellipse cx="32" cy="55" rx="3.2" ry="6.5" fill="#256ABF"/>
+  </g>
+  <text x="124" y="66" font-family="-apple-system, 'SF Pro Display', 'Helvetica Neue', Helvetica, Arial, sans-serif" font-size="52" font-weight="650" letter-spacing="-1" fill="#0B0B0B">Pappus</text>
+  <text x="126" y="96" font-family="ui-monospace, 'SF Mono', Menlo, Consolas, monospace" font-size="16" fill="#52514E">a notebook that teaches</text>
+</svg>

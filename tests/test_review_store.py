@@ -7,8 +7,8 @@ import threading
 
 import pytest
 
-from sidekick import cli, client, datadir
-from sidekick.client import Msg, _load_dialogs, _save_dialogs, _store_path
+from pappus import cli, client, datadir
+from pappus.client import Msg, _load_dialogs, _save_dialogs, _store_path
 
 
 @pytest.fixture(autouse=True)
@@ -114,7 +114,7 @@ def test_snapshots_are_throttled_pruned_and_only_of_good_stores(tmp_path, monkey
 
 
 def test_page_shows_store_recovery_banner(monkeypatch):
-    import sidekick.app as app
+    import pappus.app as app
     from fasthtml.common import to_xml
     monkeypatch.setattr(client, "STORE_NOTICES", ["dialogs-kernel.json was unreadable"])
     assert "dialogs-kernel.json was unreadable" in to_xml(app.Page())

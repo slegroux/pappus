@@ -1,6 +1,6 @@
 """Tests for the Recall projection (F4) — retrieval-practice quizzes over a dialog.
 
-These exercise the pure logic in `sidekick.recall` (prompt building, answer
+These exercise the pure logic in `pappus.recall` (prompt building, answer
 parsing, and the spaced-repetition scheduler) plus the `/recall` app route with
 the AI stubbed at the seam (`app.call_claude`), so nothing here hits a real
 `claude` subprocess or the network.
@@ -13,8 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from sidekick import recall
-from sidekick.client import Msg
+from pappus import recall
+from pappus.client import Msg
 
 
 def _m(id, t, content, output=""):
@@ -117,7 +117,7 @@ def test_schedule_round_trips_to_disk(tmp_path):
 
 # ---- /recall route (AI stubbed at the seam) ---------------------------------
 def test_recall_route_inserts_parsed_questions_as_cells(monkeypatch):
-    import sidekick.app as app
+    import pappus.app as app
 
     app.STATE["dialog"] = "recall/route"
     backend = app.STATE["backend"]
@@ -139,7 +139,7 @@ def test_recall_route_inserts_parsed_questions_as_cells(monkeypatch):
 
 def test_recall_route_builds_prompt_from_the_dialog(monkeypatch):
     """The AI seam receives a prompt that carries the dialog's content."""
-    import sidekick.app as app
+    import pappus.app as app
 
     app.STATE["dialog"] = "recall/prompted"
     backend = app.STATE["backend"]

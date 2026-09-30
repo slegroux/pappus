@@ -1,4 +1,4 @@
-"""Tests for the audio spectrogram toolkit (sidekick.audio) and the conv_arch
+"""Tests for the audio spectrogram toolkit (pappus.audio) and the conv_arch
 per-layer summary. torchaudio-backed paths skip cleanly when the optional
 'kernel' extra is absent; the dependency-light paths always run."""
 import base64
@@ -13,14 +13,14 @@ np = pytest.importorskip("numpy")   # lives only in the `kernel` extra — skip,
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from sidekick.audio import ab, play
+from pappus.audio import ab, play
 
 
 def test_spec_requires_torchaudio_or_skips():
     """spec() returns a displayable matplotlib Figure (skips without torchaudio)."""
     import pytest
     pytest.importorskip("torchaudio")
-    from sidekick.audio import spec
+    from pappus.audio import spec
 
     fig = spec(np.random.randn(16000).astype("float32"), 16000)
     # A matplotlib Figure has axes and a savefig method — it is displayable.
@@ -45,7 +45,7 @@ def test_summary_table():
     torch = pytest.importorskip("torch")
     import torch.nn as nn
 
-    from sidekick.conv_arch import summary
+    from pappus.conv_arch import summary
 
     model = nn.Sequential(
         nn.Conv2d(3, 8, 3, padding=1),

@@ -1,4 +1,4 @@
-"""Tests for sidekick.blog — projecting a dialog into a Quarto blog post.
+"""Tests for pappus.blog — projecting a dialog into a Quarto blog post.
 
 No network: exercises the pure cell→nbformat mapping and file assembly. The key
 property vs. the library path is that **outputs are kept** (the library emits
@@ -11,8 +11,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from sidekick import blog
-from sidekick.client import Msg
+from pappus import blog
+from pappus.client import Msg
 
 
 def _dialog():
@@ -91,7 +91,7 @@ def test_empty_code_cell_has_null_execution_count():
 
 def test_blog_files_layout():
     nb = blog.dialog_to_post(_dialog(), title="p")
-    files = blog.blog_files({"my_post": nb}, title="Sidekick")
+    files = blog.blog_files({"my_post": nb}, title="Pappus")
     assert set(files) == {"_quarto.yml", "index.qmd", "posts/my_post.ipynb"}
     # the emitted post is valid JSON
     json.loads(files["posts/my_post.ipynb"])
@@ -110,7 +110,7 @@ class _FakeBackend:
 
 def test_build_blog_writes_files(tmp_path):
     be = _FakeBackend({"intro": _dialog()})
-    result = blog.build_blog(be, ["intro"], str(tmp_path), title="Sidekick", date="2026-07-02")
+    result = blog.build_blog(be, ["intro"], str(tmp_path), title="Pappus", date="2026-07-02")
     assert result["posts"] == ["intro"]
     assert (tmp_path / "posts" / "intro.ipynb").exists()
     assert (tmp_path / "_quarto.yml").exists()
@@ -119,10 +119,10 @@ def test_build_blog_writes_files(tmp_path):
 
 def test_build_blog_defaults_author_from_git(tmp_path, monkeypatch):
     # No explicit author -> build_blog fills the byline from git user.name.
-    monkeypatch.setattr("sidekick.nbdev_export._git_identity",
+    monkeypatch.setattr("pappus.nbdev_export._git_identity",
                         lambda: ("Grace Hopper", "grace@example.com"))
     be = _FakeBackend({"intro": _dialog()})
-    blog.build_blog(be, ["intro"], str(tmp_path), title="Sidekick")
+    blog.build_blog(be, ["intro"], str(tmp_path), title="Pappus")
     post = json.loads((tmp_path / "posts" / "intro.ipynb").read_text())
     fm = "".join(post["cells"][0]["source"])
     assert 'author: "Grace Hopper"' in fm

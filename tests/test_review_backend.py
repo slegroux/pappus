@@ -24,20 +24,20 @@ def test_effective_default_model_falls_back_when_codex_missing():
     starts on a model that can't run here. When codex IS present, keep the codex
     default untouched."""
     from unittest.mock import patch
-    from sidekick import targets
+    from pappus import targets
 
     if not targets.default_model().startswith("codex-"):
         import pytest
         pytest.skip("configured default is not a codex model")
-    with patch("sidekick.codex_cli.codex_bin", return_value=None):
+    with patch("pappus.codex_cli.codex_bin", return_value=None):
         assert targets.effective_default_model() == "claude-opus-high"
-    with patch("sidekick.codex_cli.codex_bin", return_value="/bin/codex"):
+    with patch("pappus.codex_cli.codex_bin", return_value="/bin/codex"):
         assert targets.effective_default_model() == targets.default_model()
 
 
 # ---- W1: exec degrades when the kernel is down ------------------------------
 def test_exec_kernel_down_degrades():
-    from sidekick.client import HttpKernelBackend
+    from pappus.client import HttpKernelBackend
 
     b = HttpKernelBackend.__new__(HttpKernelBackend)     # skip __init__ (no live target)
     b._dialogs, b._undo, b._store_key = {}, [], None
@@ -58,7 +58,7 @@ def test_exec_kernel_down_degrades():
 def test_build_context_pinned_over_budget():
     # Pinned content larger than the whole budget must be trimmed so the returned
     # context never exceeds max_chars (the old code shipped it whole and negative).
-    from sidekick.client import build_context, Msg
+    from pappus.client import build_context, Msg
 
     pinned = Msg(id="p", msg_type="note", content="P" * 5000, pinned=True)
     ctx = build_context([pinned], max_chars=200)
@@ -69,7 +69,7 @@ def test_build_context_pinned_over_budget():
 def test_build_context_keeps_newest():
     # A single newest cell larger than the budget must be truncated to fit, not
     # dropped into a near-empty context.
-    from sidekick.client import build_context, Msg
+    from pappus.client import build_context, Msg
 
     big = Msg(id="n", msg_type="note", content="Z" * 5000)
     ctx = build_context([big], max_chars=200)
@@ -113,7 +113,7 @@ def _delta_line(text):
 
 
 def test_stream_abandon_kills_subprocess(monkeypatch):
-    import sidekick.claude_cli as cc
+    import pappus.claude_cli as cc
 
     cc.CLI_SESSIONS.pop("cli/abandon", None)
     monkeypatch.setattr(cc, "claude_bin", lambda: "/bin/claude")
@@ -134,8 +134,8 @@ def test_stream_abandon_kills_subprocess(monkeypatch):
 
 # ---- evict-sessions: drop() clears in-memory session/cost -------------------
 def test_drop_evicts_session():
-    import sidekick.claude_cli as cc
-    import sidekick.codex_cli as cx
+    import pappus.claude_cli as cc
+    import pappus.codex_cli as cx
 
     cc.CLI_SESSIONS["dlg/drop"] = {"id": "s", "sent": "", "mode": None}
     cc.CLI_COST["dlg/drop"] = {"usd": 0.5, "turns": 2}
@@ -154,8 +154,8 @@ def test_drop_evicts_session():
 def test_set_private_moves_dialog_between_stores(tmp_path, monkeypatch):
     """set_private(dialog) moves a dialog out of the committed store and into the
     gitignored .local.json overlay (and back), and is_private tracks state."""
-    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
-    from sidekick.client import (_InMemoryBackend, _read_private_dialogs,
+    monkeypatch.setenv("PAPPUS_DATA", str(tmp_path))
+    from pappus.client import (_InMemoryBackend, _read_private_dialogs,
                                  _store_path, _local_store_path)
 
     b = _InMemoryBackend(store_key="kernel")
@@ -189,8 +189,8 @@ def test_set_private_moves_dialog_between_stores(tmp_path, monkeypatch):
 
 
 def test_private_flag_follows_rename_and_delete(tmp_path, monkeypatch):
-    monkeypatch.setenv("SIDEKICK_DATA", str(tmp_path))
-    from sidekick.client import _InMemoryBackend, _read_private_dialogs
+    monkeypatch.setenv("PAPPUS_DATA", str(tmp_path))
+    from pappus.client import _InMemoryBackend, _read_private_dialogs
 
     b = _InMemoryBackend(store_key="kernel")
     b.add("draft", "x", "note")
@@ -205,7 +205,7 @@ def test_private_flag_follows_rename_and_delete(tmp_path, monkeypatch):
 
 
 def test_set_private_noops_without_store():
-    from sidekick.client import _InMemoryBackend
+    from pappus.client import _InMemoryBackend
 
     b = _InMemoryBackend()                                # ephemeral, no store_key
     assert b.set_private("whatever") is False

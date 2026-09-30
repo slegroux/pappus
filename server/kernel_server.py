@@ -1,7 +1,7 @@
 """A lightweight, self-hostable SolveIt-compatible kernel server.
 
 This is NOT Answer.AI's proprietary SolveIt server — it's a minimal stand-in you
-can actually run on your laptop or H100 so the Sidekick interface has a *real*
+can actually run on your laptop or H100 so the Pappus interface has a *real*
 backend: it executes Python code in a persistent per-dialog namespace and returns
 output, just like a notebook kernel. Prompts get a routed (stubbed, or real if an
 API key is present) AI reply.
@@ -42,8 +42,8 @@ import warnings
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from sidekick import claude_cli   # CLI (subscription) Claude + shared notebook preamble
-from sidekick import codex_cli    # installed Codex CLI path (current local auth/config)
+from pappus import claude_cli   # CLI (subscription) Claude + shared notebook preamble
+from pappus import codex_cli    # installed Codex CLI path (current local auth/config)
 
 # Request auth. main() sets _AUTH_TOKEN: when it's not None, every request must
 # carry a matching `_solveit` cookie (this is what makes binding off-loopback
@@ -52,15 +52,15 @@ _AUTH_TOKEN: str | None = None
 
 
 def _dbg(msg) -> None:
-    """Print a diagnostic to stderr, but only when SIDEKICK_DEBUG is truthy.
+    """Print a diagnostic to stderr, but only when PAPPUS_DEBUG is truthy.
 
     The kernel deliberately swallows errors around exec/capture so a bad cell
-    can't take the server down; that makes failures invisible. Set SIDEKICK_DEBUG
+    can't take the server down; that makes failures invisible. Set PAPPUS_DEBUG
     to surface them. With the flag unset this is a no-op — default output is
     byte-for-byte unchanged."""
-    if os.environ.get("SIDEKICK_DEBUG"):
+    if os.environ.get("PAPPUS_DEBUG"):
         import sys
-        print(f"[sidekick-kernel] {msg}", file=sys.stderr)
+        print(f"[pappus-kernel] {msg}", file=sys.stderr)
 
 
 def _is_loopback(host: str) -> bool:
@@ -189,7 +189,7 @@ def _rich_repr(val) -> dict | None:
     """
     if type(val).__module__.startswith("matplotlib"):
         return None
-    # Audio first: a carrier from sidekick.audio.play() advertises a WAV via
+    # Audio first: a carrier from pappus.audio.play() advertises a WAV via
     # _repr_audio_wav_, returning a complete base64-encoded WAV file (the kernel
     # side of the audio contract). Checked before the image/html branches.
     fn = getattr(val, "_repr_audio_wav_", None)
@@ -482,7 +482,7 @@ MODEL_NAMES = {
 
 
 # Subscription-backed Claude (the `claude` CLI), installed Codex CLI, and the
-# shared notebook-context preamble live in sidekick.*_cli modules, so the web
+# shared notebook-context preamble live in pappus.*_cli modules, so the web
 # app's streaming path and this server's blocking path share the same prompt
 # contract.
 CLI_MODELS = claude_cli.CLI_MODELS
@@ -554,14 +554,14 @@ def run_prompt(dialog: str, content: str, model: str, context: str = "",
 
     if _is_claude_cli_model(model):       # subscription-backed Claude (no API key)
         return claude_cli.call(dialog, content, context, model=model, mode=mode)
-    if _is_codex_cli_model(model):        # installed Codex CLI (no Sidekick API key)
+    if _is_codex_cli_model(model):        # installed Codex CLI (no Pappus API key)
         return codex_cli.call(dialog, content, context, model=model, mode=mode)
 
     if _wants_diagram(content):           # mirror the CLI path: attach the diagram
         content += _DIAGRAM_GUIDANCE      # conventions to the turn that asks for one
 
     try:
-        from sidekick.secrets_store import key_for_model, PROVIDERS
+        from pappus.secrets_store import key_for_model, PROVIDERS
         api_key = key_for_model(model)
         label = PROVIDERS.get(model, (model, ""))[0]
     except Exception:  # noqa: BLE001 — never let key lookup break execution
@@ -712,7 +712,7 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=5001)
-    ap.add_argument("--token", default=os.environ.get("SIDEKICK_KERNEL_TOKEN"),
+    ap.add_argument("--token", default=os.environ.get("PAPPUS_KERNEL_TOKEN"),
                     help="require this _solveit cookie on every request "
                          "(mandatory when binding off-loopback)")
     args = ap.parse_args()
@@ -723,7 +723,7 @@ def main():
         # /exec runs arbitrary code; refuse to expose it unauthenticated.
         ap.error(f"refusing to bind {args.host} without --token — that would expose "
                  f"unauthenticated code execution. Pass --token (or set "
-                 f"SIDEKICK_KERNEL_TOKEN), or bind 127.0.0.1.")
+                 f"PAPPUS_KERNEL_TOKEN), or bind 127.0.0.1.")
 
     srv = ThreadingHTTPServer((args.host, args.port), Handler)
     auth = "token required" if _AUTH_TOKEN else "open (loopback only)"
