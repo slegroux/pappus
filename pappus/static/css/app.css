@@ -161,12 +161,12 @@ body.col-resizing{cursor:col-resize;user-select:none}
 .conv-del{display:block;width:100%;text-align:left;border:none;background:none;color:var(--danger);cursor:pointer;
   font:inherit;font-size:13px;padding:6px 10px;border-radius:6px}
 .conv-del:hover{background:var(--danger-bg)}
-.conv-priv,.conv-dup{display:block;width:100%;text-align:left;border:none;background:none;color:var(--ink);
+.conv-priv,.conv-dup,.conv-rename,.conv-move{display:block;width:100%;text-align:left;border:none;background:none;color:var(--ink);
   cursor:pointer;font:inherit;font-size:13px;padding:6px 10px;border-radius:6px;text-decoration:none}
 a.conv-dup{box-sizing:border-box}
-.conv-priv:hover,.conv-dup:hover{background:var(--hover)}
+.conv-priv:hover,.conv-dup:hover,.conv-rename:hover,.conv-move:hover{background:var(--hover)}
 .conv-priv-dot{margin-left:4px;font-size:10px;opacity:.7;flex:0 0 auto}
-.folder>.conv-row,.folder>.folder{margin-left:10px}
+.folder-body>.conv-row,.folder-body>.folder{margin-left:10px}
 /* multi-select (shift/⌘-click) + bulk-delete bar */
 .conv-row.sel>.conv{background:var(--ok-bg);box-shadow:inset 2px 0 0 var(--accent)}
 .sel-bar{display:none;align-items:center;gap:6px;margin:4px 2px 6px;padding:5px 8px;border-radius:8px;
@@ -693,7 +693,27 @@ select.msel:hover{background-color:var(--hover);color:var(--ink)}
 .folder-label{display:flex;align-items:center;gap:8px;font-size:14px;font-weight:400;color:var(--muted);padding:6px 8px}
 .folder-label::before{display:none}
 .folder-label .ico{flex:none;opacity:.9}
-.folder>.conv-row,.folder>.folder{margin-left:15px;padding-left:6px;border-left:1px solid var(--line)}
+.folder-body>.conv-row,.folder-body>.folder{margin-left:15px;padding-left:6px;border-left:1px solid var(--line)}
+/* sidebar editing: "+" new group, a ⋯ per group, in-place rename, drag to re-order */
+.seclabel-row{display:flex;align-items:center;justify-content:space-between;padding-right:4px}
+.grp-new{border:none;background:transparent;color:var(--meta);width:24px;height:24px;border-radius:6px;
+  display:grid;place-items:center;cursor:pointer;padding:0}
+.grp-new:hover{background:var(--hover);color:var(--ink)}
+.grp-dots{margin-left:auto;opacity:0;border:none;background:transparent;color:var(--muted);border-radius:6px;
+  padding:0 7px;cursor:pointer;font-size:15px;line-height:22px}
+.folder-label:hover .grp-dots,.grp-dots:focus-visible,.grp-dots[aria-expanded="true"]{opacity:1}
+.grp-dots:hover{background:var(--active);color:var(--ink)}
+@media (hover:none){.grp-dots{opacity:1}}
+.grp-menu{position:fixed;z-index:200;min-width:190px;background:var(--surface);border:1px solid var(--line);
+  border-radius:10px;box-shadow:var(--shadow);padding:5px}
+.grp-menu button{display:block;width:100%;text-align:left;border:none;background:none;color:var(--ink);
+  font:inherit;font-size:13.5px;padding:7px 10px;border-radius:6px;cursor:pointer}
+.grp-menu button:hover,.grp-menu button:focus-visible{background:var(--hover);outline:none}
+.side-edit{position:fixed;z-index:200;font:inherit;font-size:14px;padding:3px 8px;border:1px solid var(--accent);
+  border-radius:7px;background:var(--surface);color:var(--ink);box-shadow:var(--shadow);outline:none;box-sizing:border-box}
+.side .drag-ghost{opacity:.35}
+.side .drag-chosen>.conv,.side .drag-chosen>summary{background:var(--active)}
+.side .folder-body:empty{min-height:6px}
 .code-view .highlight,.md .highlight{border-radius:12px}
 .newbtn{background:var(--surface);border:1px solid var(--line);box-shadow:none;border-radius:8px}
 /* you: a soft grey bubble, like Claude's user message; the answer sits on the page */
